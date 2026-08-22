@@ -52,7 +52,7 @@ identically.
 
 | # | Console screen | Where the answer is |
 |---|---|---|
-| 1 | Create app — name, default language, app/game, free/paid | Listing checklist below (title is `fastlane/…/title.txt`, verbatim). **Free.** |
+| 1 | Create app — name, default language, app/game, free/paid | Listing checklist below (title is `fastlane/…/title.txt`, verbatim). **Free — and read the ⚠ note under this table before clicking it.** |
 | 2 | **Production** → Create release → **enrol in Play App Signing** on first upload | Organization account, so Production directly (step 0). The release key is the **upload** key — keep `distribution.md`'s immutable-signature warning intact. |
 | 3 | Upload `app-full-playsafe-release.aab` (78,022,931 bytes) + release notes | `gh release download v1.0.20 -p 'app-full-playsafe-release.aab'`; notes = `fastlane/…/changelogs/38.txt` verbatim |
 | 4 | App content → **Privacy policy** | `https://bearyjd.github.io/relais/privacy-policy.html` (verified 200 on 2026-08-22) |
@@ -66,6 +66,28 @@ identically.
 | 12 | App content → **Advertising ID** | **No** — verified: no `AD_ID` permission anywhere in `Android/src`. |
 | 13 | Store listing — short/full description, screenshots, icon, category, tags, contact email | §"store-listing checklist" below. Reuse `fastlane/metadata/android/en-US/` verbatim. |
 | 14 | Submit for review | Then do §"Order for the operator" item 6 — append what actually happened to `distribution.md`. That append is #122's acceptance criterion. |
+
+### ⚠ Step 1 — "Free" is IRREVERSIBLE, and it is still the right answer
+
+A Play app set to **Free can never be changed to Paid.** The reverse is allowed; this direction is
+not. That asymmetry is what makes this the one click on the whole submission that cannot be undone.
+
+**Answer Free anyway.** It closes nothing that matters: a free app can add **in-app purchases or
+subscriptions at any later date**. Picking Paid to "keep the option open" is the only choice here
+that actually destroys options — it forecloses the free install that a LAN inference node needs to
+get tried at all.
+
+**Relais ships with no monetization at all today, deliberately** (verified 2026-08-22: no billing
+code anywhere under `Android/src/app/src/main`, and the IARC questionnaire below declares in-app
+purchases **No**). Reasoning is recorded on #300 rather than here — the short
+version is that a paid feature gate in an **AGPL-3.0** app with public source is honor-system
+against exactly the homelab/developer audience this listing targets, and adding IAP would re-open
+the Data Safety declaration (Purchase history), the IARC answer, and Play Billing policy surface for
+revenue from a userbase that does not exist yet.
+
+If monetization ever happens, the thing to sell is a **service with real marginal cost** that a fork
+cannot reproduce — remote access to a node from outside the LAN is the obvious candidate — not an
+`isPro` branch, which is one recompile from gone.
 
 ### Three things the Data Safety form asks that gate 1 does not phrase the same way
 
