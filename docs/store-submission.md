@@ -18,6 +18,87 @@ derivation of every Data Safety answer). That doc builds and signs the artifacts
 gate-1 rows re-verified 2026-08-17; Gate 2 cleared and version rows updated 2026-08-18 (v1.0.20 prep).** Anything marked
 ⚠ is a gate that must clear *before* an upload is worth making.
 
+## Console transcription order (start here when you sit down at the Console)
+
+Added 2026-08-22. Every answer below already exists in this file — this section is the **order the
+Console asks in**, with pointers. It deliberately restates no answer: the Data Safety table has been
+wrong four times in this doc's history, and a second copy of it is that failure mode with extra
+steps. If a step says "see gate 1", go read gate 1; do not answer from memory.
+
+Re-verified against `main` and the published release on **2026-08-22**: privacy-policy URL live
+(HTTP 200) · AAB attached to the **published** (not draft) v1.0.20 release at **78,022,931 bytes** ·
+listing copy 29 / 77 / 2286 chars · icon exactly 512×512 · 3 phone screenshots · contact email
+matches `privacy-policy.md:115` and its `.html` twin · merged `fullPlaysafe` manifest carries none of
+the four gated permissions (`playsafe/AndroidManifest.xml` removes them with `tools:node="remove"`) ·
+**no `AD_ID` permission anywhere in `Android/src`**.
+
+### ✅ Step 0 — production access: SETTLED, no closed-testing detour
+
+**Answered 2026-08-22 by JD: the account is an ORGANIZATION account.** Upload **straight to
+Production**; the order below runs start to finish in one sitting. Recorded here because the
+question is invisible until it bites and the answer is not derivable from the repo.
+
+Why it was asked at all, so nobody re-opens it: Play gates production access for
+**individual/personal** developer accounts created after 2023-11-13 behind **closed testing with 12
+testers opted in continuously for 14 days** — a two-week delay that lands *after* you have filled
+every form. Organization accounts are exempt. The account *name* ("VentouxLabs") never settled this;
+the account *type* does, read off **Setup → Developer account → Account details**.
+
+If that ever changes (a different account, a re-registration), the only thing that changes below is
+step 2: the same AAB goes to **Closed testing** instead of Production. Every form is filled in
+identically.
+
+### The order
+
+| # | Console screen | Where the answer is |
+|---|---|---|
+| 1 | Create app — name, default language, app/game, free/paid | Listing checklist below (title is `fastlane/…/title.txt`, verbatim). **Free.** |
+| 2 | **Production** → Create release → **enrol in Play App Signing** on first upload | Organization account, so Production directly (step 0). The release key is the **upload** key — keep `distribution.md`'s immutable-signature warning intact. |
+| 3 | Upload `app-full-playsafe-release.aab` (78,022,931 bytes) + release notes | `gh release download v1.0.20 -p 'app-full-playsafe-release.aab'`; notes = `fastlane/…/changelogs/38.txt` verbatim |
+| 4 | App content → **Privacy policy** | `https://bearyjd.github.io/relais/privacy-policy.html` (verified 200 on 2026-08-22) |
+| 5 | App content → **App access** | **All functionality is available without special access.** No login exists; a reviewer starts the node and uses in-app chat with no credential. The LAN bearer key is device-generated and the LAN API is not reviewer-reachable regardless. |
+| 6 | App content → **Ads** | **No ads.** |
+| 7 | App content → **Content rating** (IARC) | §"Content rating" below. **Declare AI-generated content: Yes** — chat *and* image generation. |
+| 8 | App content → **Target audience** | 18+ / developers, not directed at children. §listing checklist. |
+| 9 | App content → **Data safety** | **Gate 1**, in full. See the per-type notes directly below this table — the form asks things gate 1 phrases differently. |
+| 10 | App content → **Foreground service permissions** | **Gate 3.** **One** declaration for type `dataSync`, not four. Both prose blocks are paste-ready; video link is in gate 3. |
+| 11 | App content → **Government apps / Financial features / Health / News** | **No** to all four. Listed so you don't stall wondering whether they were considered — they were. |
+| 12 | App content → **Advertising ID** | **No** — verified: no `AD_ID` permission anywhere in `Android/src`. |
+| 13 | Store listing — short/full description, screenshots, icon, category, tags, contact email | §"store-listing checklist" below. Reuse `fastlane/metadata/android/en-US/` verbatim. |
+| 14 | Submit for review | Then do §"Order for the operator" item 6 — append what actually happened to `distribution.md`. That append is #122's acceptance criterion. |
+
+### Three things the Data Safety form asks that gate 1 does not phrase the same way
+
+- **"Is this data processed ephemerally?" → No, for every declared type.** Reports persist in KV for
+  180 days and the rate-limit identifier persists on a renewing one-hour TTL. Both are *collected*,
+  not processed-ephemerally. Answering this one backwards is the same class of error as the
+  default-off mistake gate 1 already corrects twice — the form offers "processed ephemerally" as an
+  escape hatch and neither of these qualifies.
+- **The Messages sub-type label is a live check.** Gate 1 says **"Other in-app messages"**; the
+  Android developer taxonomy says **"Other messages"**. Read the Console's own copy and use that.
+  This doc cannot make that call authoritatively.
+- **Deletion answer has a caveat you must not overstate.** Gate 1's last row: there is no identity
+  field, so "delete my reports" needs the requester to supply enough of the report for a manual KV
+  scan. Do not imply a lookup capability the schema makes impossible.
+
+### Contingency — screenshots may trip the aspect-ratio check
+
+The three phone screenshots are **1080×2364** (2.19:1), above the **2:1** in Play's asset spec.
+Taller phone screenshots are widely accepted in practice, so **upload them as-is and see** — do not
+pre-fix. If the Console rejects them, **pad** (never crop — cropping loses UI the shot exists to
+show) to 1080×2160 on the near-black `DESIGN.md` background:
+
+```bash
+# from fastlane/metadata/android/en-US/images/phoneScreenshots
+for f in 1 2 3; do
+  ffmpeg -i "$f.png" -vf "scale=1080:-1,pad=1080:2160:(ow-iw)/2:(oh-ih)/2:#0B0B0D" "${f}-padded.png"
+done
+```
+
+No re-capture, no device needed.
+
+---
+
 ## Blocked on the operator (account-gated — cannot be automated)
 
 Uploading the AAB and filling the console forms needs the **Play Console** account (`jd@`/VentouxLabs).
