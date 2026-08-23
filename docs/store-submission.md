@@ -605,9 +605,34 @@ this one had to be re-pointed and why it was worth doing *before* the URL was ev
 Play Console. A dead privacy-policy URL discovered during review is a policy strike, not a note.
 
 Pages is deployed by `.github/workflows/static.yml`, which triggers only on pushes touching
-`skills/**` or `docs/privacy-policy.html`. After a transfer or a Pages reconfiguration, **nothing
-triggers a rebuild** — dispatch that workflow manually (it has `workflow_dispatch`) and re-check the
-URL before relying on it. In this case the site had already rebuilt on its own; do not assume that.
+`skills/**` or `docs/privacy-policy.html`.
+
+⚠ **A live 200 does NOT prove the deploy pipeline works.** Immediately after the transfer the URL
+returned 200 — but `static.yml`'s most recent run was **2026-08-17**, five days *before* the move. What
+was being served was the **pre-transfer artifact**, re-hosted at the new name. The 200 was real; the
+inference that the site had rebuilt was not. **Read the run history, not the status code.**
+
+**Why this is worth a paragraph:** `docs/privacy-policy.md` is the source of truth and the hosted copy
+is promised to match it. If org Actions policy or the `github-pages` environment blocked this workflow,
+the next policy edit would fail to publish **silently** — the live policy drifting from the repo while
+every doc asserts they are identical, discovered at worst by a Play reviewer reading a stale policy.
+
+✅ **Pipeline proven 2026-08-23:** `static.yml` dispatched manually on `main` under the org →
+[run 32641230919](https://github.com/ventouxlabs/relais/actions/runs/32641230919) **success**, and the
+URL still serves byte-identical content. Org Actions policy does not block it. Re-prove this the same
+way after any future transfer or Pages reconfiguration.
+
+**Do not use the Pages *builds* API as evidence.** `GET /repos/{o}/{r}/pages/builds/latest` returns
+404 here and always will: that endpoint reports the **legacy** Pages build system, and this repo is
+`build_type: workflow` (deployed by `actions/deploy-pages`). Its 404 means "not applicable", not "no
+deploy" — a distinction that briefly produced a wrong conclusion in this very section. The
+authoritative check is the **workflow run list** for `static.yml`.
+
+`static.yml` publishes **two** things — `skills/**` and the privacy policy. The skills path moved too,
+so `…/relais/skills/…` on the old host now 404s as well. **User-facing impact is zero**, checked
+rather than assumed: the app's skill loader allowlists `google-ai-edge.github.io` only
+(`AddSkillFromUrlDialog.kt:60`), so no Relais build has ever loaded a skill from our own Pages site,
+and nothing in-repo references that path. Recorded so it is not re-derived.
 
 ## Google Play — Content rating (IARC questionnaire)
 

@@ -15,6 +15,15 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 un-rewritten** — their `bearyjd` links still resolve, because `github.com` redirects after a
 transfer. Do not "fix" them.
 
+**The rule, stated precisely, because "leave history alone" is too blunt:**
+
+> Leave historical **statements**. Annotate historical **instructions** that are still actionable and
+> now wrong.
+
+A stale fact is inert — it describes a moment and reads as such. A stale *instruction* is a trap:
+someone may still act on it. `:1678` was the one line in this file that failed that test (an operator
+follow-up pointing at a now-404 URL) and is annotated in place rather than rewritten.
+
 **The one class of URL that does NOT redirect is GitHub Pages.** Verified by request, not assumed:
 
 | URL | Result |
@@ -31,10 +40,21 @@ Also verified post-transfer, because these are the expensive silent failures:
 - **All four `RELEASE_*` signing secrets survived** (`RELEASE_KEYSTORE_BASE64`, `RELEASE_KEY_ALIAS`,
   `RELEASE_KEY_PASSWORD`, `RELEASE_STORE_PASSWORD`). Had they not, the next release would have failed
   at signing, weeks later, for a reason that looks unrelated.
-- Pages `build_type: workflow`, already rebuilt at the new host on its own. **Do not count on that** —
-  `static.yml` only triggers on pushes touching `skills/**` or `docs/privacy-policy.html`, so after a
-  transfer nothing normally rebuilds it. Dispatch it manually and re-check.
-- Local `origin` re-pointed to `git@github.com:ventouxlabs/relais.git`.
+- ⚠ **A 200 did not mean what it looked like — and now the pipeline is PROVEN.** Right after the
+  transfer the URL returned 200, but `static.yml`'s last run was **2026-08-17**, five days *before* the
+  move: the live page was the **pre-transfer artifact re-hosted**, not a rebuild. Dispatched it manually
+  on 2026-08-23 → [run 32641230919](https://github.com/ventouxlabs/relais/actions/runs/32641230919)
+  **success**, content still byte-identical. Org Actions policy does not block it. **Read the run
+  history, not the status code**, and re-prove this after any future transfer.
+  - **Do not cite `GET /pages/builds/latest` as evidence** — it returns 404 for this repo permanently,
+    because it reports the *legacy* Pages builder and we are `build_type: workflow`. That 404 means
+    "not applicable", not "no deploy"; it briefly produced a wrong conclusion here.
+- `static.yml` publishes `skills/**` as well as the policy, so the old skills path 404s too.
+  **Zero user impact**, verified: the skill loader allowlists `google-ai-edge.github.io` only
+  (`AddSkillFromUrlDialog.kt:60`), so no build ever loaded skills from our own Pages site.
+- **Check your `origin` before pushing:** it must be `git@github.com:ventouxlabs/relais.git`. A clone
+  predating 2026-08-22 still points at `bearyjd/relais`, which redirects — so pushes appear to work and
+  the misconfiguration stays invisible until something depends on the real path.
 
 ### Play submission — in progress, steps 1–3
 
@@ -49,8 +69,7 @@ order** (#299) — start there, not at gate 1. Settled during this session:
   `cc.grepon.relais`; Play cares about the **applicationId**, not the namespace.
 - Staged for upload: `~/app-full-playsafe-release.aab` (78,022,931 bytes) and `~/relais-fgs-demo.mp4`.
 
-Open PRs at time of writing: the URL re-point (this change). Issues: **#300** (monetization decision,
-open as a record).
+Decision record: **#300** (monetization — why there is no Pro unlock).
 
 ### Two traps found this session
 
@@ -1670,6 +1689,13 @@ there were **zero open PRs**, not two. Check `gh pr list` before trusting this f
   to 2026-07-26), with the four-question modality review recorded in `docs/store-submission.md`.
   - ⚠️ **Operator follow-up for #122:** the hosted copy at `bearyjd.github.io/relais/privacy-policy.html`
     must pick up this change before the Play submission (same URL, new content).
+    - **[SUPERSEDED 2026-08-23 — do not act on the line above.]** That URL now returns **404**: the
+      repo moved to the `ventouxlabs` org on 2026-08-22 and Pages URLs do not redirect. Current URL:
+      `https://ventouxlabs.github.io/relais/privacy-policy.html`. The content follow-up itself is
+      **done** — the live page is byte-identical to `docs/privacy-policy.html`, effective 2026-08-15.
+      Annotated rather than rewritten: the original is kept as a record, but it was an *actionable
+      instruction* pointing at a dead URL, and stale instructions are traps in a way stale facts are
+      not. See the 2026-08-22 section at the top of this file.
 - **#211 TTS in-app playback → PR #214, OPEN, NOT auto-merge-armed.** JD chose **chat playback only**
   (the MODELS-screen demo alternative was deliberately not built). Assistant turns get a `SPEAK`
   action; the label doubles as its own status readout so there's no spinner/progress bar/new motion.
