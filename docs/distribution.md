@@ -185,7 +185,7 @@ the artifacts and uploads them as a workflow artifact instead of creating a GitH
 
 - **Source of truth:** `docs/privacy-policy.md`. **Hosted copy:** `docs/privacy-policy.html`
   (same content, brand-styled), deployed by `.github/workflows/static.yml` to GitHub Pages at
-  **`https://bearyjd.github.io/relais/privacy-policy.html`** — this is the URL for the Play
+  **`https://ventouxlabs.github.io/relais/privacy-policy.html`** — this is the URL for the Play
   Console *Privacy policy* field and the IzzyOnDroid metadata. Editing either policy file must
   keep the two in sync (the HTML is the rendered copy of the md).
 - Hosting decision: GitHub Pages via the existing `static.yml` artifact deploy (no Jekyll), chosen

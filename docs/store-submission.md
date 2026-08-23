@@ -55,7 +55,7 @@ identically.
 | 1 | Create app — name, default language, app/game, free/paid | Listing checklist below (title is `fastlane/…/title.txt`, verbatim). **Free — and read the ⚠ note under this table before clicking it.** |
 | 2 | **Production** → Create release → **enrol in Play App Signing** on first upload | Organization account, so Production directly (step 0). The release key is the **upload** key — keep `distribution.md`'s immutable-signature warning intact. |
 | 3 | Upload `app-full-playsafe-release.aab` (78,022,931 bytes) + release notes | `gh release download v1.0.20 -p 'app-full-playsafe-release.aab'`; notes = `fastlane/…/changelogs/38.txt` verbatim |
-| 4 | App content → **Privacy policy** | `https://bearyjd.github.io/relais/privacy-policy.html` (verified 200 on 2026-08-22) |
+| 4 | App content → **Privacy policy** | `https://ventouxlabs.github.io/relais/privacy-policy.html` (verified 200 on 2026-08-22) |
 | 5 | App content → **App access** | **All functionality is available without special access.** No login exists; a reviewer starts the node and uses in-app chat with no credential. The LAN bearer key is device-generated and the LAN API is not reviewer-reachable regardless. |
 | 6 | App content → **Ads** | **No ads.** |
 | 7 | App content → **Content rating** (IARC) | §"Content rating" below. **Declare AI-generated content: Yes** — chat *and* image generation. |
@@ -517,7 +517,7 @@ The console asks **per declared type**, not per service. All four services decla
 > None of this work can run without the user noticing, which is why each service posts a visible
 > notification for its whole lifetime.
 
-**Video demonstrating the feature:** <https://github.com/bearyjd/relais/releases/download/v1.0.20/relais-fgs-demo.mp4>
+**Video demonstrating the feature:** <https://github.com/ventouxlabs/relais/releases/download/v1.0.20/relais-fgs-demo.mp4>
 
 `~/relais-fgs-demo.mp4` (1080×2364, 28.7 s, 723 KB). Captured on comet (Pixel 9 Pro Fold,
 Android 17) running the published v1.0.20: dashboard OFFLINE → **START** → `STARTING` → **LIVE** with
@@ -593,9 +593,46 @@ WAV/PCM returns over the LAN socket. It added one network host (the voice bundle
 §"When the app talks to the internet" item 1. "Audio files → Voice or sound recordings" does **not**
 apply: that type covers recordings collected from the user and sent to the developer.
 
-**Privacy-policy URL for the console:** **https://bearyjd.github.io/relais/privacy-policy.html**
-— ✅ verified live 2026-08-05 (HTTP 200, byte-identical to `docs/privacy-policy.html`, effective
-date 2026-07-26).
+**Privacy-policy URL for the console:** **https://ventouxlabs.github.io/relais/privacy-policy.html**
+— ✅ re-verified live **2026-08-22** (HTTP 200, byte-identical to `docs/privacy-policy.html`,
+effective date 2026-08-15).
+
+⚠ **The host changed on 2026-08-22** — the repo moved from the personal account `bearyjd` to the
+**`ventouxlabs`** org, so the old `bearyjd.github.io/relais/privacy-policy.html` now returns **404**.
+Confirmed by request, not assumed. `github.com/bearyjd/relais/*` links *do* still redirect (release
+downloads included, verified 206), but **`*.github.io` Pages URLs do not redirect** — which is why
+this one had to be re-pointed and why it was worth doing *before* the URL was ever entered into the
+Play Console. A dead privacy-policy URL discovered during review is a policy strike, not a note.
+
+Pages is deployed by `.github/workflows/static.yml`, which triggers only on pushes touching
+`skills/**` or `docs/privacy-policy.html`.
+
+⚠ **A live 200 does NOT prove the deploy pipeline works.** Immediately after the transfer the URL
+returned 200 — but `static.yml`'s most recent run was **2026-08-17**, five days *before* the move. What
+was being served was the **pre-transfer artifact**, re-hosted at the new name. The 200 was real; the
+inference that the site had rebuilt was not. **Read the run history, not the status code.**
+
+**Why this is worth a paragraph:** `docs/privacy-policy.md` is the source of truth and the hosted copy
+is promised to match it. If org Actions policy or the `github-pages` environment blocked this workflow,
+the next policy edit would fail to publish **silently** — the live policy drifting from the repo while
+every doc asserts they are identical, discovered at worst by a Play reviewer reading a stale policy.
+
+✅ **Pipeline proven 2026-08-23:** `static.yml` dispatched manually on `main` under the org →
+[run 32641230919](https://github.com/ventouxlabs/relais/actions/runs/32641230919) **success**, and the
+URL still serves byte-identical content. Org Actions policy does not block it. Re-prove this the same
+way after any future transfer or Pages reconfiguration.
+
+**Do not use the Pages *builds* API as evidence.** `GET /repos/{o}/{r}/pages/builds/latest` returns
+404 here and always will: that endpoint reports the **legacy** Pages build system, and this repo is
+`build_type: workflow` (deployed by `actions/deploy-pages`). Its 404 means "not applicable", not "no
+deploy" — a distinction that briefly produced a wrong conclusion in this very section. The
+authoritative check is the **workflow run list** for `static.yml`.
+
+`static.yml` publishes **two** things — `skills/**` and the privacy policy. The skills path moved too,
+so `…/relais/skills/…` on the old host now 404s as well. **User-facing impact is zero**, checked
+rather than assumed: the app's skill loader allowlists `google-ai-edge.github.io` only
+(`AddSkillFromUrlDialog.kt:60`), so no Relais build has ever loaded a skill from our own Pages site,
+and nothing in-repo references that path. Recorded so it is not re-derived.
 
 ## Google Play — Content rating (IARC questionnaire)
 
@@ -622,7 +659,7 @@ some locales.
 - **Target audience:** 18+ / developers — not directed at children (privacy policy §"Children").
 - **Ads:** declare **No ads**.
 - **AAB:** `app-full-playsafe-release.aab`, **78,022,931 bytes**, attached to the published
-  [v1.0.20 release](https://github.com/bearyjd/relais/releases/tag/v1.0.20) (appId
+  [v1.0.20 release](https://github.com/ventouxlabs/relais/releases/tag/v1.0.20) (appId
   `com.ventouxlabs.relais`; published 2026-08-18). **Do not upload an earlier AAB** — see Gate 2.
   Enrol in **Play App Signing** on first upload — the release key is the *upload* key; keep
   `distribution.md`'s warning about the sideload key's immutable-signature story intact.
