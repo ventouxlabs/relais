@@ -6,7 +6,66 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-08-19 — ⏩ START HERE. **v1.0.20 SHIPPED. Every remaining item is Play Console work only JD can do.**
+## 2026-08-22 — ⏩ START HERE. **Repo moved to the `ventouxlabs` org. Play submission in progress.**
+
+### The repo moved — URLs below this section are pre-transfer
+
+`bearyjd/relais` → **`ventouxlabs/relais`** (2026-08-22, same GitHub account, org login
+`ventouxlabs`). **Older sections of this file are point-in-time records and were deliberately left
+un-rewritten** — their `bearyjd` links still resolve, because `github.com` redirects after a
+transfer. Do not "fix" them.
+
+**The one class of URL that does NOT redirect is GitHub Pages.** Verified by request, not assumed:
+
+| URL | Result |
+|---|---|
+| `ventouxlabs.github.io/relais/privacy-policy.html` | **200**, byte-identical to `docs/privacy-policy.html` |
+| `bearyjd.github.io/relais/privacy-policy.html` | **404** |
+| `github.com/bearyjd/relais/releases/download/…` | **206** — redirects and serves |
+
+That 404 is why the transfer was done **before** the privacy-policy URL was entered into the Play
+Console. A dead privacy-policy URL found during review is a policy strike, not a note. Live doc
+references were re-pointed in the same change; `docs/store-submission.md` carries the detail.
+
+Also verified post-transfer, because these are the expensive silent failures:
+- **All four `RELEASE_*` signing secrets survived** (`RELEASE_KEYSTORE_BASE64`, `RELEASE_KEY_ALIAS`,
+  `RELEASE_KEY_PASSWORD`, `RELEASE_STORE_PASSWORD`). Had they not, the next release would have failed
+  at signing, weeks later, for a reason that looks unrelated.
+- Pages `build_type: workflow`, already rebuilt at the new host on its own. **Do not count on that** —
+  `static.yml` only triggers on pushes touching `skills/**` or `docs/privacy-policy.html`, so after a
+  transfer nothing normally rebuilds it. Dispatch it manually and re-check.
+- Local `origin` re-pointed to `git@github.com:ventouxlabs/relais.git`.
+
+### Play submission — in progress, steps 1–3
+
+Console work started 2026-08-22. `docs/store-submission.md` now opens with a **14-step transcription
+order** (#299) — start there, not at gate 1. Settled during this session:
+
+- **Account type is Organization** → exempt from the 12-testers/14-day closed-testing gate. Upload
+  straight to **Production**. (#299)
+- **Free, not Paid** — irreversible in that direction, and correct: a free app can add IAP later.
+  Relais ships with **no monetization**, deliberately; reasoning on **#300**. (#301)
+- **Package name `com.ventouxlabs.relais`** — `build.gradle.kts:231`. Note `namespace` is still
+  `cc.grepon.relais`; Play cares about the **applicationId**, not the namespace.
+- Staged for upload: `~/app-full-playsafe-release.aab` (78,022,931 bytes) and `~/relais-fgs-demo.mp4`.
+
+Open PRs at time of writing: the URL re-point (this change). Issues: **#300** (monetization decision,
+open as a record).
+
+### Two traps found this session
+
+- **`gh` is failing with TLS handshake timeouts on this machine** while plain `curl` to
+  `api.github.com` with the same token works in ~3s. Not GitHub, not the repo — the `gh` client's
+  network stack. Merges and API calls were routed through `curl` instead. If `gh` hangs, do that.
+- **`git reset --hard` destroyed the uncommitted `report-worker/wrangler.toml` config** (the local
+  KV id + custom-domain route that must never be committed). Restored from a captured diff and
+  verified byte-identical. This file's own header has warned about `reset --hard` since an earlier
+  incident — **use `git pull --ff-only`**. The wrangler config is uncommitted *by design*; treat it
+  as precious local state, not noise.
+
+---
+
+## 2026-08-19 — **v1.0.20 SHIPPED. Every remaining item is Play Console work only JD can do.**
 
 ### State
 
