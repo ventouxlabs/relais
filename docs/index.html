@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relais — Your own relay station for AI</title>
+<meta name="description" content="Relais turns an Android phone into a headless, always-on LLM node: it runs a language model on the device and serves it over your LAN as an OpenAI-compatible API.">
+<style>
+  /* Relais brand: amber signal-relay on near-black, monospace (DESIGN.md).
+     Token block is shared verbatim with privacy-policy.html — keep them in sync. */
+  :root{--amber:#FFB000;--charcoal:#0B0B0D;--panel:#16171A;--line:#2A2B30;--paper:#EDEAE3;--muted:#8A8780;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--charcoal);color:var(--paper);
+       font-family:ui-monospace,'JetBrains Mono','Cascadia Mono',Menlo,Consolas,monospace;
+       font-size:15px;line-height:1.65}
+  main{max-width:44rem;margin:0 auto;padding:3rem 1.5rem 5rem}
+
+  /* Wordmark + the one signature motion: the beacon pulses, nothing else. */
+  .wordmark{color:var(--amber);font-weight:700;letter-spacing:.35em;font-size:1.4rem}
+  .dot{display:inline-block;width:.6em;height:.6em;border-radius:50%;
+       background:var(--amber);margin-right:.6em;vertical-align:baseline;
+       animation:pulse 900ms ease-in-out infinite alternate}
+  @keyframes pulse{from{opacity:.3}to{opacity:1}}
+  @media (prefers-reduced-motion:reduce){.dot{animation:none}}
+
+  h1{font-size:1.05rem;color:var(--muted);font-weight:400;letter-spacing:.15em;
+     text-transform:uppercase;margin:.4rem 0 0}
+  .lede{margin-top:1.6rem}
+  hr{border:0;border-top:1px solid var(--line);margin:2.4rem 0}
+  h2{color:var(--amber);font-size:.95rem;letter-spacing:.12em;text-transform:uppercase;
+     margin:2.4rem 0 .9rem}
+  a{color:var(--amber);text-decoration:none;border-bottom:1px solid var(--line)}
+  a:hover{border-bottom-color:var(--amber)}
+  code{background:var(--panel);border:1px solid var(--line);border-radius:4px;
+       padding:.08em .35em;font-size:.9em}
+
+  /* Terminal block. Scrolls inside itself so the page body never scrolls sideways. */
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:6px;
+      padding:1rem 1.1rem;overflow-x:auto;font-size:.85rem;line-height:1.7;margin:0}
+  pre code{background:none;border:0;padding:0;font-size:inherit}
+  .prompt{color:var(--muted);user-select:none}
+  .flag{color:var(--amber)}
+  .note{color:var(--muted);font-size:.85rem;margin-top:.7rem}
+
+  /* Readout rows: label left, value right, hairline between — the app's own rhythm. */
+  .rows{margin-top:.4rem}
+  .row{display:flex;justify-content:space-between;gap:1.5rem;
+       padding:.55rem 0;border-bottom:1px solid var(--line)}
+  .row:last-child{border-bottom:0}
+  .row .k{color:var(--paper);white-space:nowrap}
+  .row .v{color:var(--muted);text-align:right;font-size:.85rem}
+  @media (max-width:32rem){
+    .row{flex-direction:column;gap:.15rem}
+    .row .v{text-align:left}
+  }
+
+  ul{padding-left:1.1rem}
+  li{margin:.45rem 0}
+  li::marker{color:var(--amber)}
+  .links{margin-top:1.2rem;display:flex;flex-wrap:wrap;gap:.6rem 1.4rem}
+  footer{color:var(--muted);font-size:.85rem;margin-top:3.5rem}
+</style>
+</head>
+<body>
+<main>
+  <div class="wordmark"><span class="dot"></span>RELAIS</div>
+  <h1>Your own relay station for AI</h1>
+
+  <p class="lede">Relais turns an Android phone into a <strong>headless, always-on LLM node</strong>.
+     It runs a language model directly on the phone's GPU and neural silicon, and serves it over
+     your LAN as a standard OpenAI-compatible API. Point any OpenAI client at the phone and it
+     answers.</p>
+
+  <p>Install it on a spare phone, plug it in, put it on a shelf. There is no chat UI to babysit —
+     it auto-starts, survives Doze, recovers from crashes and OOM kills, and draws a few watts.
+     It is inference infrastructure you leave running.</p>
+
+  <hr>
+
+  <h2>Talk to it</h2>
+  <pre><code><span class="prompt">$</span> curl <span class="flag">-k</span> https://192.168.1.42:8443/v1/chat/completions \
+    -H "Authorization: Bearer $RELAIS_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"gemma-4-E4B-it",
+         "messages":[{"role":"user","content":"ping"}]}'</code></pre>
+  <p class="note">The LAN surface is <strong>HTTPS on :8443</strong>, with a TLS certificate
+     generated on the device — hence <code>-k</code>, or pin the cert. Plain HTTP on :8080 is bound
+     to loopback only and is not reachable from the network. The bearer key is generated on-device
+     and stored encrypted; the node is found automatically over mDNS.</p>
+
+  <h2>Endpoints</h2>
+  <div class="rows">
+    <div class="row"><span class="k">/v1/chat/completions</span><span class="v">OpenAI chat · streaming SSE</span></div>
+    <div class="row"><span class="k">/v1/messages</span><span class="v">Anthropic-compatible</span></div>
+    <div class="row"><span class="k">/generate</span><span class="v">native multimodal · text, image, audio</span></div>
+    <div class="row"><span class="k">/v1/embeddings · /v1/rerank</span><span class="v">vectors and reranking</span></div>
+    <div class="row"><span class="k">/v1/rag/documents · /v1/rag/query</span><span class="v">on-device retrieval</span></div>
+    <div class="row"><span class="k">/v1/audio/transcriptions · /speech</span><span class="v">speech in and out</span></div>
+    <div class="row"><span class="k">/v1/images/generations</span><span class="v">image generation</span></div>
+    <div class="row"><span class="k">/v1/models · /v1/batch · /v1/sessions</span><span class="v">catalog, batching, state</span></div>
+    <div class="row"><span class="k">/health · /metrics</span><span class="v">liveness · Prometheus</span></div>
+  </div>
+
+  <h2>What it is not</h2>
+  <p>Relais will not outrun a desktop GPU on raw tokens per second, and does not pretend to. Its
+     value is different: <strong>always-on, low-power, private, zero-marginal-cost inference</strong>.
+     Use it for small-model workloads, agents, automation, and home-lab pipelines that need a local
+     endpoint that is simply always there.</p>
+
+  <h2>Sovereignty</h2>
+  <ul>
+    <li>Inference happens on the device. Prompts and completions never leave your network, and once
+        a model is downloaded Relais runs fully offline.</li>
+    <li>No cloud calls, no per-token bill, no third party in the loop. No analytics, no telemetry,
+        no account system.</li>
+    <li>The API is served only on your local network, behind an access key you control. You start
+        and stop it.</li>
+    <li>You operate this infrastructure; you do not rent it.</li>
+  </ul>
+
+  <h2>Requirements</h2>
+  <div class="rows">
+    <div class="row"><span class="k">Android</span><span class="v">12 or newer</span></div>
+    <div class="row"><span class="k">Device</span><span class="v">one LiteRT-LM supports on GPU</span></div>
+    <div class="row"><span class="k">Storage</span><span class="v">the default model is a ~3.7 GB download</span></div>
+    <div class="row"><span class="k">License</span><span class="v">AGPL-3.0 · forked from google-ai-edge/gallery</span></div>
+  </div>
+
+  <hr>
+
+  <div class="links">
+    <a href="https://github.com/ventouxlabs/relais">Source on GitHub</a>
+    <a href="https://github.com/ventouxlabs/relais/releases">Releases</a>
+    <a href="privacy-policy.html">Privacy policy</a>
+  </div>
+
+  <footer>VentouxLabs · bryn@ventouxadvisoryco.com</footer>
+</main>
+</body>
+</html>

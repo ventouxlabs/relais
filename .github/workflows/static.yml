@@ -8,6 +8,7 @@ on:
     paths:
       - 'skills/**'
       - 'docs/privacy-policy.html'
+      - 'docs/index.html'
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -42,6 +43,8 @@ jobs:
           rsync -rr --exclude='staging' ./skills/ staging/skills/
           # Privacy policy at a stable URL for the Play Console (docs/privacy-policy.md is the source of truth)
           cp docs/privacy-policy.html staging/privacy-policy.html
+          # Landing page at the site root. Both pages share one token block — keep them in sync.
+          cp docs/index.html staging/index.html
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
