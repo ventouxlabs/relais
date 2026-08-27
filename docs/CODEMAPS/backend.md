@@ -1,8 +1,10 @@
 # Backend — HTTP API & Node Lifecycle
 
-<!-- Generated: 2026-08-17 | Files scanned: RelaisHttpServer(~1900L)+Engine(1026L)+extracted handler/gate files + embed/rerank/rag/tts/batch/nodetools + report-worker | main @ 4a283858 -->
+<!-- Generated: 2026-08-25 | Files scanned: RelaisHttpServer(2202L)+Engine(1026L)+extracted handler/gate files + embed/rerank/rag/tts/batch/nodetools + report-worker | main @ 4679d924 -->
 
-## Routes (RelaisHttpServer — now pure parse→gate→dispatch over ~20 `handleX(ctx: RequestContext)` handlers)
+## Routes (RelaisHttpServer, **2202L** — pure parse→gate→dispatch over ~20 `handleX(ctx: RequestContext)` handlers)
+**No route changes since 2026-07-30.** The 19 paths below match `docs/openapi.yaml` exactly
+(cross-checked 2026-08-25), so the spec needed no regeneration this pass.
 Auth: bearer token, checked before dispatch; all routes except `/health` gated.
 ```
 GET  /health                       → handleHealth                          (no auth)
@@ -70,7 +72,15 @@ Resident engine lifecycle, `generate()` backend dispatcher (GPU/NPU/TPU), `gener
 ## Admission / backpressure
 Shared semaphore for normal inference (chat/generate/audio/TTS); exclusive drain-all for image-gen. Unprovisioned features: 501 (not registered) / 503+Retry-After (provisioning in progress, kicks background fetch) / 200 (ready).
 
-## Client egress — NOT a server route [NEW #258]
+## Client egress — NOT a server route [#258 + durable send #273]
+**The send is retried, not one-shot.** `chat/ContentReportSendStep.kt#attemptReportSend()` records
+each attempt against the row (`sendState`/`sendAttempts`/`lastAttemptAt`, schema **v7**) and
+schedules `worker/ReportSendWorker` per the pure policy in `chat/ContentReportRetry.kt` — which
+classifies **429 apart from 5xx apart from other 4xx**, so a rate-limited attempt waits out the
+Worker's own 60-minute window instead of burning an attempt. Throttling can therefore never be what
+permanently fails a report. See `data.md` for the columns and `frontend.md` for the review-screen
+SEND affordance. Coverage: `ContentReportRetryTest` + `ReportSendWorkerTest` (JVM).
+
 `chat/ContentReportDelivery.kt` POSTs an opted-in report to the fixed compile-time endpoint
 `https://report.ventouxlabs.com/report` (redirects disabled, `IOException`-narrow catch,
 `finally`-cleanup; no SSRF pinning needed — no attacker-controlled host). Receiver:

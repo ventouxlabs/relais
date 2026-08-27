@@ -141,6 +141,13 @@ echo 'RATE_LIMIT_SALT = "local-dev-only"' > .dev.vars
 npx wrangler dev -c wrangler.local.toml --port 8787 --local
 ```
 
+⚠ **Use that command, not `npm run dev`.** `package.json` does define `dev` as a bare `wrangler dev`,
+but bare `wrangler dev` reads the committed `wrangler.toml` — whose `[[kv_namespaces]]` block is
+commented out on purpose — so it does not pick up the local binding this flow sets up. The `-c
+wrangler.local.toml --local` form above is the supported local path. The four scripts in
+`package.json` are `typecheck`, `test`, `dev`, `deploy`; every one used by this runbook is spelled
+out here.
+
 In a second shell, run the checks under "Verify a deploy" below with
 `BASE=http://127.0.0.1:8787` — they are written against `$BASE` so the same three commands serve
 both local and deployed. The plaintext guard is locally verifiable too

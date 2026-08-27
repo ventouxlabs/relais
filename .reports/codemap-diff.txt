@@ -1,38 +1,87 @@
-Codemap refresh — 2026-08-17 (previous: 2026-08-04 @ afc237c1; now: main @ 4a283858)
+Codemap refresh — 2026-08-25 (previous: 2026-08-17; now: main @ 4679d924)
 
-Files changed since last scan (codemap-relevant):
-- NEW subsystem: content reporting (#258) — chat/ContentReportDialog, ContentReportSink,
-  ContentReportDelivery, ContentReportOutcome, ContentReportShaping, ContentReportsActivity,
-  data/ReportEntities + ReportDao; Room v5 → v6 (MIGRATION_5_6, content_reports).
-- NEW component: report-worker/ (Cloudflare Worker) — deployed at report.ventouxlabs.com,
-  plaintext guard (isPlaintextRequest) added 2026-08-17 (#276); workers_dev/preview_urls pinned.
-- Releases: v1.0.17, v1.0.18 published since last scan; v1.0.19 tagged 2026-08-17.
-- RelaisHttpServer 2202L → ~1900L (no route changes — extraction/cleanup only).
+Baseline note: the last sync's header said "main @ 4a283858", but that was the PRE-scan commit.
+The commit that actually last touched docs/CODEMAPS/ is 981602a1 (#282, 2026-08-17) — and it
+updated ONLY frontend.md. Per-file baselines therefore differed, which is how the data.md drift
+below survived. Baselines are now uniform at 4679d924.
 
-Codemap updates (all in place; diff % = changed/total lines by numstat):
-- architecture.md  12/52  (23%) — report-worker component, server line count
-- backend.md       15/84  (18%) — "Client egress" section (report delivery + Worker summary)
-- data.md          20/46  (43%) — v6, ContentReport row, ReportDao, egress block; >30% flagged,
-                                   shown in PR for approval; nothing removed, additions + marker cleanup
-- frontend.md      19/71  (27%) — reporting UI section (dialog, notice guard, review screen)
-- dependencies.md  19/52  (37%) — Room v6 note, releases row, report-worker deps, external hosts;
-                                   mostly additive
+19 commits since 981602a1.
 
-New dependencies detected: none in the Android catalog since 08-04; report-worker toolchain
-(wrangler ^4, vitest ^3, TS ^5.7, node>=22) now recorded.
+=== DRIFT FOUND (documentation was wrong, not merely incomplete) ===
 
-Architecture changes: one new egress leg (report.ventouxlabs.com — the only developer-bound
-host); no new HTTP server routes.
+1. data.md described Room v6 while the code shipped v7 — IN THE SAME PR that touched the codemaps.
+   #282 added MIGRATION_6_7 and the sendState/sendAttempts/lastAttemptAt columns, updated
+   frontend.md, and left data.md asserting:
+       "No delivery-status column exists — a failed opt-in send is unrecoverable (#273 tracks retry)"
+   All three clauses were false on merge. Verified against RelaisDatabase.kt (version = 7,
+   MIGRATION_6_7 registered) and ReportEntities.kt (all three columns present).
 
-Staleness flags (>90 days, cross-referenced with source changes):
-- CONTRIBUTING.md — last commit 2025-04-14 (490 days). Inherited upstream-gallery text ("not
-  currently ready for code contributions") predates the AGPL relicense, the public repo, and
-  DEVELOPMENT.md's contributor onboarding. Whether to accept contributions is a maintainer
-  policy call — flagged for JD, deliberately NOT rewritten by this sync.
-- All other root + docs/ files touched within 90 days. RUNBOOK.md (08-03) predates the report
-  subsystem but covers node operation only; report-worker ops live in report-worker/README.md
-  (current). No change made.
+2. RelaisHttpServer line count wrong in TWO codemaps. architecture.md and backend.md both said
+   "~1900L"; the file measures 2202L (wc -l, 2026-08-25). The 08-17 report recorded an extraction
+   2202L -> ~1900L that is not reflected in the file on main. A third stale copy of this number
+   lives in CLAUDE.md ("~1700 lines") — flagged for the maintainer, NOT edited by this sync
+   (CLAUDE.md is operator instruction, not generated doc).
 
-Doc generation sources present: report-worker/package.json (scripts documented in its README —
-no drift), docs/openapi.yaml (routes cross-checked against RelaisHttpServer dispatch — no new
-routes since 08-04, so not regenerated this pass). No .env.example, no Dockerfile in this repo.
+3. dependencies.md said compileSdk/targetSdk 35 (now 36, #284), room schema v6 (now v7), and
+   listed releases only through "v1.0.19 tagged" (v1.0.19 and v1.0.20 are both published).
+   Robolectric 4.16 was absent entirely despite being the gating dependency for the 36 bump.
+
+=== Codemap updates (diff % = changed/total lines by numstat) ===
+- architecture.md   10/58   (17%) — 2202L correction + measurement warning, file count 330, baseline
+- backend.md        16/94   (17%) — 2202L, openapi parity note, retry in Client egress
+- data.md           44/74   (59%) — v7 + send-state columns + retry policy; DownloadResumePolicy
+                                    [>30% — diff shown to maintainer for approval]
+- dependencies.md   57/101  (56%) — targetSdk 36 + Robolectric gate, schema v7, v1.0.20 + signing
+                                    continuity, org move + gitleaks licence break, CI workflow
+                                    table, Pages site
+                                    [>30% — diff shown to maintainer for approval]
+- frontend.md        7/87    (8%) — baseline + re-verified counts (ui/ 90, customtasks/ 38, chat/ 22,
+                                    all unchanged); #287 download-resume pointer
+
+Nothing was removed except claims that were false (see DRIFT above). All other edits are additive.
+
+=== Architecture changes ===
+- No new HTTP routes. docs/openapi.yaml's 19 paths match RelaisHttpServer's dispatch exactly
+  (cross-checked 2026-08-25), so the spec was NOT regenerated.
+- New pure-logic file: data/DownloadResumePolicy.kt (#287) — separates WorkManager ENQUEUED-as-start
+  from ENQUEUED-as-resume. JVM-tested.
+- New component outside the app: a GitHub Pages landing page (docs/index.html), published by
+  static.yml alongside the privacy policy and skills/.
+- Repo moved bearyjd/relais -> ventouxlabs/relais (2026-08-22).
+
+=== New dependencies detected ===
+None in the Android catalog beyond the Robolectric 4.14.1 -> 4.16 bump (which was required by
+targetSdk 36, not chosen). report-worker toolchain unchanged (wrangler ^4, vitest ^3, TS ^5.7,
+node>=22).
+
+=== CI changes ===
+- secret-scan.yml: gitleaks-action -> pinned gitleaks CLI. The Action requires a paid licence for
+  ORGANIZATION-owned repos, so the org move turned a REQUIRED check permanently red and blocked
+  every PR. The CLI is MIT-licensed. 8.x removed `detect`; full-history scan is `gitleaks git`.
+- build_android.yaml: now compiles the androidTest probe suite (#285) — compile only; probes need
+  hardware and do not run in CI.
+- static.yml: added docs/index.html to both the copy step and the paths trigger. Omitting the
+  trigger would have made the page deploy once and silently never update again.
+
+=== Doc generation sources ===
+- report-worker/package.json — 4 scripts (typecheck, test, dev, deploy). FIXED a real drift: the
+  README documented 3 of 4, and `npm run dev` is a trap — bare `wrangler dev` reads the committed
+  wrangler.toml whose [[kv_namespaces]] block is commented out, so it does not pick up the local
+  binding. README now says to use the `-c wrangler.local.toml --local` form and why.
+- docs/openapi.yaml — checked against server routes, no drift, not regenerated.
+- No .env.example anywhere: worker secrets go through `wrangler secret put`, app secrets through
+  EncryptedSharedPreferences. Nothing to generate.
+- No Dockerfile / docker-compose in this repo.
+
+=== Staleness (>90 days, cross-referenced with source changes) ===
+- CONTRIBUTING.md — 498 days (2025-04-14). STILL the inherited upstream-gallery text ("not
+  currently ready for code contributions"), which predates the AGPL relicense, the public repo,
+  DEVELOPMENT.md's contributor onboarding, and now the org move and a public landing page.
+  Deliberately NOT rewritten for the second sync running: whether to accept outside contributions
+  is a maintainer policy call, and auto-generating a contributing guide would decide it. It is
+  also the same decision as the CLA question raised on #300 — settle them together.
+- Inherited-upstream files, left alone by design: Android/README.md (439d),
+  .github/ISSUE_TEMPLATE/*.md (433-460d), and 11 bundled skill definitions under
+  Android/src/app/src/main/assets/skills/ (101-145d). The skills are shipped app assets, not
+  project docs; their age reflects stable content, not neglect.
+- docs/RUNBOOK.md (2026-08-03) and all other root + docs/ files are within 90 days.
