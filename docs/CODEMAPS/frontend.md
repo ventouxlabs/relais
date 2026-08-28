@@ -1,6 +1,11 @@
 # Frontend — UI (unified Relais shell over still-live inherited Gallery code)
 
-<!-- Generated: 2026-08-17 | Files scanned: RelaisAppShell + chat/ + Dashboard/Models screens + full ui/(90) + customtasks/(38) import+DI graph | main @ 4a283858 -->
+<!-- Generated: 2026-08-25 | Files scanned: RelaisAppShell + chat/(22) + Dashboard/Models screens + full ui/(90) + customtasks/(38) import+DI graph | main @ 4679d924 -->
+
+> Re-verified 2026-08-25: `ui/` 90 files, `customtasks/` 38, `chat/` 22 — unchanged since the last
+> sync. No UI changes landed in this window; the only user-visible behavior change is that an
+> interrupted model download now resumes instead of appearing stalled (#287, pure policy in
+> `data/DownloadResumePolicy.kt` — see `data.md`).
 
 > ⚠️ **Reachability here is not visible to an import graph.** `ModelManagerViewModel` constructor-injects
 > `Set<@JvmSuppressWildcards CustomTask>`, and `@Provides @IntoSet` modules in `customtasks/agentchat/`,
