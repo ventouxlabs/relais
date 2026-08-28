@@ -3,7 +3,7 @@
 <!-- Generated: 2026-08-25 | Files scanned: RelaisHttpServer(2202L)+Engine(1026L)+extracted handler/gate files + embed/rerank/rag/tts/batch/nodetools + report-worker | main @ 4679d924 -->
 
 ## Routes (RelaisHttpServer, **2202L** — pure parse→gate→dispatch over ~20 `handleX(ctx: RequestContext)` handlers)
-**No route changes since 2026-07-30.** The 19 paths below match `docs/openapi.yaml` exactly
+**No route changes since 2026-07-30.** The 20 paths below match `docs/openapi.yaml` exactly
 (cross-checked 2026-08-25), so the spec needed no regeneration this pass.
 Auth: bearer token, checked before dispatch; all routes except `/health` gated.
 ```

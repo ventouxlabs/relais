@@ -41,7 +41,7 @@ below survived. Baselines are now uniform at 4679d924.
 Nothing was removed except claims that were false (see DRIFT above). All other edits are additive.
 
 === Architecture changes ===
-- No new HTTP routes. docs/openapi.yaml's 19 paths match RelaisHttpServer's dispatch exactly
+- No new HTTP routes. docs/openapi.yaml's 20 paths match RelaisHttpServer's dispatch exactly
   (cross-checked 2026-08-25), so the spec was NOT regenerated.
 - New pure-logic file: data/DownloadResumePolicy.kt (#287) — separates WorkManager ENQUEUED-as-start
   from ENQUEUED-as-resume. JVM-tested.
