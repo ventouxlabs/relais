@@ -1,0 +1,110 @@
+# The privacy-policy URL is a Play compliance artifact: it is on file with Google, and until this
+# workflow existed nothing in CI looked at it. It broke silently on 2026-08-22 (repo transfer to the
+# ventouxlabs org — github.com URLs redirect, GitHub Pages URLs do NOT) and was caught only because a
+# human happened to be mid-submission and checked by hand. Three written "remember to curl this"
+# warnings in docs/store-submission.md are documentation substituting for automation, and they fail
+# exactly when attention is elsewhere — which is the condition under which it broke. See #303.
+#
+# Three failure modes, and which job catches each:
+#   1. The URL dies (transfer, rename, Pages disabled)      -> `live`
+#   2. The served page drifts from docs/privacy-policy.html -> `live` (the diff, not the 200)
+#   3. docs/privacy-policy.md is edited alone               -> `twins`
+#
+# (3) is the one a liveness check cannot see. static.yml names the .md as the source of truth but
+# triggers on the .html, so editing the .md alone deploys nothing, leaves live == .html, and passes
+# a live-vs-repo diff while the served policy no longer reflects the source of truth.
+name: Privacy policy
+
+on:
+  schedule:
+    # Weekly, Mondays 09:00 UTC. This content changes on the order of once a quarter; a job that
+    # fails loudly and rarely is worth more than a daily one people learn to scroll past.
+    # NOTE: GitHub disables scheduled workflows after 60 days with no repository activity.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "docs/privacy-policy.md"
+      - "docs/privacy-policy.html"
+      - ".github/workflows/privacy-policy.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  twins:
+    name: source and served copy agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Effective dates match across both copies
+        run: |
+          set -euo pipefail
+          # Tolerates both spellings in use: "**Effective date:** <ISO>" (.md) and
+          # "Effective <ISO>" (.html).
+          extract() {
+            grep -oiE 'effective[^0-9]{0,20}[0-9]{4}-[0-9]{2}-[0-9]{2}' "$1" \
+              | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1
+          }
+          md=$(extract docs/privacy-policy.md || true)
+          html=$(extract docs/privacy-policy.html || true)
+
+          # An empty extraction must fail rather than compare "" == "" and pass silently.
+          if [ -z "$md" ] || [ -z "$html" ]; then
+            echo "::error::no 'Effective <ISO date>' line found (md='$md' html='$html'). Both copies must carry one — it is the only machine-checkable link between them."
+            exit 1
+          fi
+          if [ "$md" != "$html" ]; then
+            echo "::error::effective dates disagree — .md says $md, .html says $html. docs/privacy-policy.md is the source of truth (see static.yml); update the .html twin, or the served policy will not match it."
+            exit 1
+          fi
+          echo "effective date $md, consistent across .md and .html"
+
+      - name: Twins changed together
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          base="${{ github.base_ref }}"
+          git fetch --no-tags origin "+refs/heads/${base}:refs/remotes/origin/${base}"
+          changed=$(git diff --name-only "origin/${base}...HEAD" -- \
+            docs/privacy-policy.md docs/privacy-policy.html)
+          md=$(printf '%s\n' "$changed" | grep -c 'privacy-policy\.md$' || true)
+          html=$(printf '%s\n' "$changed" | grep -c 'privacy-policy\.html$' || true)
+
+          if [ "$md" != "$html" ]; then
+            echo "::error::privacy-policy.md and privacy-policy.html must change together (md=$md html=$html). They are twins of one document: the .md is the source of truth and the .html is what Google is served. Editing the .md alone deploys nothing and silently leaves the published policy stale."
+            exit 1
+          fi
+          echo "policy twins in step (both changed: $md)"
+
+  live:
+    name: published policy is live and matches the repo
+    # Deliberately NOT on pull_request: a PR that edits the policy has not deployed yet, so the live
+    # page would legitimately differ and fail every policy PR — training people to ignore this check.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: URL is live and byte-identical to docs/privacy-policy.html
+        run: |
+          set -euo pipefail
+          URL=https://ventouxlabs.github.io/relais/privacy-policy.html
+
+          code=$(curl -sL -o /tmp/live.html -w '%{http_code}' --max-time 30 "$URL")
+          if [ "$code" != "200" ]; then
+            echo "::error::$URL returned $code. The Play Console has this exact URL on file; a dead policy URL is a compliance failure, not a broken link."
+            exit 1
+          fi
+
+          # The diff is the load-bearing half: a 200-only check passes throughout a silent drift.
+          if ! diff -u docs/privacy-policy.html /tmp/live.html > /tmp/policy.diff; then
+            echo "::error::the live policy has drifted from docs/privacy-policy.html — a deploy is missing or failed. Re-run 'Deploy static content to Pages' (static.yml), which triggers on pushes touching docs/privacy-policy.html."
+            echo "--- first 40 lines of the difference (repo copy vs live) ---"
+            head -40 /tmp/policy.diff
+            exit 1
+          fi
+          echo "live, 200, byte-identical: $URL"
