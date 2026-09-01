@@ -1,6 +1,6 @@
 # Dependencies, Flavors & Manifest Surface
 
-<!-- Generated: 2026-08-25 | Files scanned: build.gradle.kts + libs.versions.toml + AndroidManifest + src/{full,degoogled,playsafe} + report-worker/package.json + .github/workflows | main @ 4679d924 -->
+<!-- Generated: 2026-08-29 | Files scanned: build.gradle.kts + libs.versions.toml + AndroidManifest + src/{full,degoogled,playsafe} + report-worker/package.json + .github/workflows | main @ 6359a6da -->
 
 ## External dependencies (catalog: `Android/src/gradle/libs.versions.toml`)
 | Dep | Version | Purpose | Flavor |
@@ -84,6 +84,7 @@ protection still matches it.
 | `release.yaml` | signed artifacts + GMS-leak / Play-permission / 16 KB-alignment gates → draft release |
 | `report-worker.yml` | boots **real workerd** (unit tests + `--dry-run` can't see workerd-only failures, #268) |
 | `static.yml` | GitHub Pages deploy — `skills/**`, `docs/privacy-policy.html`, **`docs/index.html`** |
+| `privacy-policy.yml` [NEW] | weekly (Mon 09:00 UTC) + PR-on-touch: `twins` checks `docs/privacy-policy.md`/`.html` carry the same `Effective <ISO>` date and change together; `live` (non-PR only) diffs the served `ventouxlabs.github.io` copy byte-for-byte against the repo copy (#303, catches the org-move Pages-URL break silently missed 2026-08-22) |
 
 **`static.yml` triggers on paths, so a new published file must be added to the trigger** or it
 deploys once and every later edit silently doesn't publish. Branch protection on `main` requires:

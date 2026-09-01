@@ -1,87 +1,29 @@
-Codemap refresh — 2026-08-25 (previous: 2026-08-17; now: main @ 4679d924)
+Codemap refresh — 2026-08-29 (previous: 2026-08-25 @ f66ca5e7; now: main @ 6359a6da)
 
-Baseline note: the last sync's header said "main @ 4a283858", but that was the PRE-scan commit.
-The commit that actually last touched docs/CODEMAPS/ is 981602a1 (#282, 2026-08-17) — and it
-updated ONLY frontend.md. Per-file baselines therefore differed, which is how the data.md drift
-below survived. Baselines are now uniform at 4679d924.
+3 commits since f66ca5e7:
+  bddbf982  docs: bring CLAUDE.md up to current context (#307)
+  4679d924  feat(site): landing page at the Pages root (#305)   [already reflected in 08-25 scan]
+  6359a6da  ci(303): privacy-policy liveness, fidelity, and twin-sync checks (#308)
 
-19 commits since 981602a1.
+Only #308 touches anything a codemap describes: it adds `.github/workflows/privacy-policy.yml`.
+No files under Android/src/main, report-worker/src, or report-worker's own tests changed in this
+window (confirmed via `git diff --stat 4679d924..HEAD -- Android/ report-worker/`), so
+architecture.md, backend.md, data.md, and frontend.md describe unchanged ground truth — left
+untouched rather than re-stamped, since nothing in their domain was re-verified this pass.
 
-=== DRIFT FOUND (documentation was wrong, not merely incomplete) ===
+=== Update made ===
+dependencies.md — added a row to the "CI workflows" table for `privacy-policy.yml`: two jobs,
+`twins` (PR-gated: effective-date match + md/html co-change) and `live` (scheduled/dispatch only:
+byte-diff of the served ventouxlabs.github.io copy against the repo copy). Noted it exists because
+the 2026-08-22 org-move Pages-URL break (see [[relais-dual-review-disjoint]]-adjacent history, #303)
+was caught by a human mid-submission, not by CI — nothing looked at the live policy URL before.
+Freshness header bumped to 2026-08-29 @ 6359a6da.
 
-1. data.md described Room v6 while the code shipped v7 — IN THE SAME PR that touched the codemaps.
-   #282 added MIGRATION_6_7 and the sendState/sendAttempts/lastAttemptAt columns, updated
-   frontend.md, and left data.md asserting:
-       "No delivery-status column exists — a failed opt-in send is unrecoverable (#273 tracks retry)"
-   All three clauses were false on merge. Verified against RelaisDatabase.kt (version = 7,
-   MIGRATION_6_7 registered) and ReportEntities.kt (all three columns present).
+Diff size: 1 file changed, ~4 lines added (table row) — well under the 30% approval threshold,
+applied in place without asking.
 
-2. RelaisHttpServer line count wrong in TWO codemaps. architecture.md and backend.md both said
-   "~1900L"; the file measures 2202L (wc -l, 2026-08-25). The 08-17 report recorded an extraction
-   2202L -> ~1900L that is not reflected in the file on main. A third stale copy of this number
-   lives in CLAUDE.md ("~1700 lines") — flagged for the maintainer, NOT edited by this sync
-   (CLAUDE.md is operator instruction, not generated doc).
+=== Staleness check ===
+All five codemaps now carry a header within the last 4 days (2026-08-25 or 2026-08-29). No file
+is stale by the 90-day bar.
 
-3. dependencies.md said compileSdk/targetSdk 35 (now 36, #284), room schema v6 (now v7), and
-   listed releases only through "v1.0.19 tagged" (v1.0.19 and v1.0.20 are both published).
-   Robolectric 4.16 was absent entirely despite being the gating dependency for the 36 bump.
-
-=== Codemap updates (diff % = changed/total lines by numstat) ===
-- architecture.md   10/58   (17%) — 2202L correction + measurement warning, file count 330, baseline
-- backend.md        16/94   (17%) — 2202L, openapi parity note, retry in Client egress
-- data.md           44/74   (59%) — v7 + send-state columns + retry policy; DownloadResumePolicy
-                                    [>30% — diff shown to maintainer for approval]
-- dependencies.md   57/101  (56%) — targetSdk 36 + Robolectric gate, schema v7, v1.0.20 + signing
-                                    continuity, org move + gitleaks licence break, CI workflow
-                                    table, Pages site
-                                    [>30% — diff shown to maintainer for approval]
-- frontend.md        7/87    (8%) — baseline + re-verified counts (ui/ 90, customtasks/ 38, chat/ 22,
-                                    all unchanged); #287 download-resume pointer
-
-Nothing was removed except claims that were false (see DRIFT above). All other edits are additive.
-
-=== Architecture changes ===
-- No new HTTP routes. docs/openapi.yaml's 20 paths match RelaisHttpServer's dispatch exactly
-  (cross-checked 2026-08-25), so the spec was NOT regenerated.
-- New pure-logic file: data/DownloadResumePolicy.kt (#287) — separates WorkManager ENQUEUED-as-start
-  from ENQUEUED-as-resume. JVM-tested.
-- New component outside the app: a GitHub Pages landing page (docs/index.html), published by
-  static.yml alongside the privacy policy and skills/.
-- Repo moved bearyjd/relais -> ventouxlabs/relais (2026-08-22).
-
-=== New dependencies detected ===
-None in the Android catalog beyond the Robolectric 4.14.1 -> 4.16 bump (which was required by
-targetSdk 36, not chosen). report-worker toolchain unchanged (wrangler ^4, vitest ^3, TS ^5.7,
-node>=22).
-
-=== CI changes ===
-- secret-scan.yml: gitleaks-action -> pinned gitleaks CLI. The Action requires a paid licence for
-  ORGANIZATION-owned repos, so the org move turned a REQUIRED check permanently red and blocked
-  every PR. The CLI is MIT-licensed. 8.x removed `detect`; full-history scan is `gitleaks git`.
-- build_android.yaml: now compiles the androidTest probe suite (#285) — compile only; probes need
-  hardware and do not run in CI.
-- static.yml: added docs/index.html to both the copy step and the paths trigger. Omitting the
-  trigger would have made the page deploy once and silently never update again.
-
-=== Doc generation sources ===
-- report-worker/package.json — 4 scripts (typecheck, test, dev, deploy). FIXED a real drift: the
-  README documented 3 of 4, and `npm run dev` is a trap — bare `wrangler dev` reads the committed
-  wrangler.toml whose [[kv_namespaces]] block is commented out, so it does not pick up the local
-  binding. README now says to use the `-c wrangler.local.toml --local` form and why.
-- docs/openapi.yaml — checked against server routes, no drift, not regenerated.
-- No .env.example anywhere: worker secrets go through `wrangler secret put`, app secrets through
-  EncryptedSharedPreferences. Nothing to generate.
-- No Dockerfile / docker-compose in this repo.
-
-=== Staleness (>90 days, cross-referenced with source changes) ===
-- CONTRIBUTING.md — 498 days (2025-04-14). STILL the inherited upstream-gallery text ("not
-  currently ready for code contributions"), which predates the AGPL relicense, the public repo,
-  DEVELOPMENT.md's contributor onboarding, and now the org move and a public landing page.
-  Deliberately NOT rewritten for the second sync running: whether to accept outside contributions
-  is a maintainer policy call, and auto-generating a contributing guide would decide it. It is
-  also the same decision as the CLA question raised on #300 — settle them together.
-- Inherited-upstream files, left alone by design: Android/README.md (439d),
-  .github/ISSUE_TEMPLATE/*.md (433-460d), and 11 bundled skill definitions under
-  Android/src/app/src/main/assets/skills/ (101-145d). The skills are shipped app assets, not
-  project docs; their age reflects stable content, not neglect.
-- docs/RUNBOOK.md (2026-08-03) and all other root + docs/ files are within 90 days.
+No new external dependencies, no new architecture/routes beyond the one CI job above.
