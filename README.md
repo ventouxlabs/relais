@@ -1,3 +1,18 @@
+<!-- glowup:hero start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg">
+  <img alt="Relais" src="docs/assets/banner.svg">
+</picture>
+
+[![Build](https://img.shields.io/github/actions/workflow/status/ventouxlabs/relais/build_android.yaml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=build)](https://github.com/ventouxlabs/relais/actions/workflows/build_android.yaml)
+[![License](https://img.shields.io/github/license/ventouxlabs/relais?style=for-the-badge)](LICENSE)
+![Kotlin](https://img.shields.io/badge/Kotlin-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)
+![Android](https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white)
+![Cloudflare Workers](https://img.shields.io/badge/Cloudflare_Workers-F38020?style=for-the-badge&logo=cloudflareworkers&logoColor=white)
+![Gradle](https://img.shields.io/badge/Gradle-02303A?style=for-the-badge&logo=gradle&logoColor=white)
+<!-- glowup:hero end -->
+
 # Relais
 
 **Turn a spare Android phone into an always-on AI appliance — your own relay station for local inference.**
