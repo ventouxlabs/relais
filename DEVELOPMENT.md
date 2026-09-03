@@ -8,7 +8,7 @@ operating a running node see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 > Code contributions are **not currently open** — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Prerequisites
-- Android Studio, or a JDK 17 + Android SDK (build-tools + platform **35**).
+- Android Studio, or a JDK 17 + Android SDK (build-tools + platform **36**).
 - A device/emulator on **arm64-v8a or x86_64**, **Android 12+ (minSdk 31)** — the litertlm LLM AAR ships only those ABIs.
 - The **first** build of any newly-added dependency needs network (not `--offline`).
 

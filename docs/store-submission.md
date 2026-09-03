@@ -131,7 +131,7 @@ IzzyOnDroid (#123) was **closed as not planned** on 2026-08-05 — reasoning in
 
 ---
 
-## Gate 1 — GenAI in-app content reporting (DONE, pending one dashboard step)
+## Gate 1 — GenAI in-app content reporting (✅ CLEARED)
 
 Play's [AI-Generated Content policy](https://support.google.com/googleplay/android-developer/answer/13985936)
 requires that apps generating content with AI **"contain in-app user reporting or flagging features
@@ -154,9 +154,12 @@ opted-in report now actually arrives rather than being dropped on the first netw
 is enforced by the Worker itself — `isPlaintextRequest` refuses any request the edge marks
 plaintext with `403 https required` (added after the deployed Worker was observed **accepting and
 storing a report POSTed over plain http** — the zone's Always Use HTTPS was off; verify per
-`report-worker/README.md`, required after every deploy). Remaining before this gate
-is fully clear: one dashboard-only step — the edge Rate Limiting rule `report-worker/README.md`
-lists. The zone's *Always Use HTTPS* toggle is now defense in depth, still worth flipping.
+`report-worker/README.md`, required after every deploy). **Both dashboard steps are done
+(2026-09-02):** the zone's *Always Use HTTPS* is on — verified independently by an unauthenticated
+plain-`http` request to `report.ventouxlabs.com/report` now returning a `301` to `https` at the edge,
+before the request ever reaches the Worker — and the edge Rate Limiting rule
+(`report-worker-flood-guard`: hostname `report.ventouxlabs.com` + path contains `/report`, 60
+req/min/IP, block 1h) is in place. Gate 1 has no remaining steps.
 
 ### The requirement has two halves, and only one is easy
 
@@ -401,9 +404,9 @@ than being deleted once satisfied (it had already been incomplete four times bef
       there was nothing to re-type there. Verified by reading the file, not assumed.
 
 The endpoint itself is deployed: `report.ventouxlabs.com` (Cloudflare Worker, custom domain,
-`report-worker/README.md`). Gate 1 is done pending the one dashboard-only step that runbook still
-lists (the edge Rate Limiting rule) — it does not block this declaration. The "encrypted in transit:
-Yes" answer no longer rests on dashboard state: the Worker refuses edge-marked plaintext itself
+`report-worker/README.md`). Both zone-dashboard steps that runbook lists — the edge Rate Limiting
+rule and Always Use HTTPS — are done (2026-09-02). The "encrypted in transit:
+Yes" answer no longer rests on dashboard state alone: the Worker also refuses edge-marked plaintext itself
 (`isPlaintextRequest` → `403 https required`), verifiable by curl per that README.
 
 ## ✅ Gate 2 — target API level (CLEARED)
@@ -681,10 +684,9 @@ some locales.
 
 ## Order for the operator
 
-1. **Land Gate 1** (in-app content reporting), **including the opt-in send** — **DONE as of
-   v1.0.19**: capture shipped in v1.0.18, the opt-in send merged in #274, and the endpoint is
-   deployed at `report.ventouxlabs.com`. The local record alone would not have met the "to
-   developers" half. What remains is the dashboard-only work gate 1 lists above.
+1. **Gate 1** (in-app content reporting) — **✅ CLEARED, no remaining steps**: capture shipped in
+   v1.0.18, the opt-in send merged in #274, the endpoint is deployed at `report.ventouxlabs.com`,
+   and both zone-dashboard steps (Rate Limiting rule, Always Use HTTPS) were completed 2026-09-02.
 2. **Decide Gate 2**: submit before 2026-08-31 at targetSdk 35, or bump to 36 first.
 3. Record the **Gate 3** FGS video and write the four declarations.
 4. Create the app in Play Console, enrol in Play App Signing, upload the AAB.
