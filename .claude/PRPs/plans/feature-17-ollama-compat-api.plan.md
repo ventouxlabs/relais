@@ -1564,12 +1564,12 @@ corrected) · M5 (cross-plan sequencing table above) · L1 (`:979-1019`, `endpoi
    plan defers it; the answer changes the priority, not the design.
 4. **`docs/ollama-api.md` naming** — the repo's existing docs are `docs/<thing>-api.md`; confirm that is
    the wanted filename rather than folding into `docs/openapi.yaml` alone.
-5. **Merge order against feature-20** — the one decision this plan cannot make for itself. feature-20
-   edits `RelaisHttpServer.kt:1300/1349/1356/1644/1747`, inside the response objects Task 5 rewrites.
-   This plan assumes **feature-20 lands first** and that Task 5's edit inventory is then re-measured
-   from scratch. If the intended order is the reverse, say so before the branch is cut — the table in
-   Task 5 is the deliverable that has to change, and re-measuring after the fact is exactly the
-   copied-forward-numbers failure `CLAUDE.md` warns about.
-6. **Is the single-JSON-object framing on the `format`→`stream:false` path acceptable**, or should the
-   route commit an NDJSON header and re-frame? This plan accepts it and measures it in the Task 9
-   probe. If a target client rejects it, the fallback is specified but unbuilt.
+5. ~~Merge order against feature-20~~ **DECIDED (JD, 2026-09-07, via HANDOFF build order): feature-20
+   B1-A lands first.** This plan's assumption holds — Task 5's edit inventory against
+   `RelaisHttpServer.kt:1300/1349/1356/1644/1747` must be re-measured from scratch against feature-20's
+   actual landed diff before Task 5 starts, not against the line numbers in this plan today.
+6. ~~Is the single-JSON-object framing on the `format`→`stream:false` path acceptable?~~ **DECIDED (JD,
+   2026-09-07): accept it, document it as a risk.** This is a narrow combination — structured output
+   AND explicitly non-streaming — that real Ollama clients rarely hit; the fallback (committing an
+   NDJSON header and re-framing) stays specified-but-unbuilt in the Risks table, and Task 9's probe
+   still measures a real client's behavior against the accepted framing rather than assuming it's safe.

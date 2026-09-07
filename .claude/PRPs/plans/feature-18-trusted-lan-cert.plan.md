@@ -551,8 +551,11 @@ private fun ActionLink(label: String, onClick: () -> Unit) {
   mutate each assertion against the pre-change gate and confirm it goes RED before trusting it** —
   two shipped tests in this repo passed under the bug they claimed to pin. Manual curl is not coverage.
 - **GOTCHA**: Today's structure means `/health` is **unmetered**; after this it is rate-limited. That
-  is a fix, but a monitoring script polling `/health` hard will start seeing 429s — **call it out in
-  the PR body and `SECURITY.md`, and decide the budget deliberately.** Note `/health` uses
+  is a fix, but a monitoring script polling `/health` hard will start seeing 429s. **Decided (JD,
+  2026-09-07): use the existing `rateLimiter.allow(ip)` budget unchanged — `RATE_LIMIT = 30` per
+  `RATE_WINDOW_MS = 60_000` (`RelaisHttpServer.kt:87-88`), the same budget every other route already
+  gets.** No new constant, no route special-casing — that's what makes the gate uniform. Call this out
+  in the PR body and `SECURITY.md`. Note `/health` uses
   `startsWith` while `/ca.crt` must be exact `==` (a `startsWith("/ca.crt")` would exempt
   `/ca.crtXYZ`). (ii) **The 401 deliberately still precedes the rate limiter**, so failed-auth requests
   remain unmetered and brute-force against `/v1/*` stays unlimited — this restructure does **not** fix
@@ -1209,24 +1212,27 @@ the *client*, this authenticates the *server*. Would compose cleanly on top of t
    key only does occasional JCA signing. If it works, the CA private key never exists as a file.
    **Resolve with `CaKeystoreProbe` (T10), not by reasoning** — extrapolating the leaf constraint to the
    CA key is exactly the failure shape recorded in `relais-claim-stronger-than-code`.
-2. **`/health` becoming rate-limited (T2)** — acceptable, and what budget? `RelaisHttpGate` makes the
-   auth-exempt-route budget a single named value, so this needs one number. Someone's monitoring may
-   be polling it hard. Related: Decision 10 leaves failed-auth requests unmetered — confirm that is
-   the trade you want, or schedule the separate brute-force meter.
+2. ~~`/health` becoming rate-limited (T2)~~ **DECIDED (JD, 2026-09-07): yes, use the existing 30/60s
+   budget unchanged (`RATE_LIMIT`/`RATE_WINDOW_MS`, `RelaisHttpServer.kt:87-88`) — no new constant.**
+   Decision 10's unmetered-failed-auth trade-off is accepted as documented; no separate brute-force
+   meter scheduled for now.
 3. **Is a QR an acceptable new element type at all?** DESIGN.md already settles *placement* (CONFIGURE);
    this is narrowly about the element. Approve, or is share-sheet + fingerprint text enough for v1?
 4. **`com.google.zxing:core` vs a ~200-line hand-rolled encoder** (T7) — dependency footprint and
    GMS-gate confidence vs code to own.
-5. **Keep NameConstraints or drop them?** They are defense-in-depth only, and if enumerated wrong they
-   break the loopback path (research R3). Dropping is defensible.
+5. ~~Keep NameConstraints or drop them?~~ **DECIDED (JD, 2026-09-07): keep them**, scoped to the node's
+   own SAN set. Defense in depth against a key-extraction scenario, not against a routine bug — enumerate
+   carefully so they don't break the loopback path (research R3), and cover the loopback-still-works
+   case explicitly in `RelaisCertMintTest`.
 6. **Document the system-store CA install at all, or `--cacert`-only?** Documenting it is more useful
    and more dangerous.
 7. **Is A1 right — does Android Tailscale really expose no cert issuance to third-party apps?** If it
    somehow does, (b) is worth revisiting for a genuinely publicly-trusted cert.
-8. **Restrict SANs to RFC1918, or keep overlay addresses in the cert (Δ10)?** Keeping them is the
-   entire Tailscale story and is why option (b) can be demoted; the cost is that the leaf discloses
-   the node's overlay addresses to any unauthenticated LAN scanner that completes a `ClientHello`.
-   Recommendation: keep them, document it, and add the opt-out only if JD wants it.
+8. ~~Restrict SANs to RFC1918, or keep overlay addresses in the cert (Δ10)?~~ **DECIDED (JD,
+   2026-09-07): keep all LAN addresses, no opt-out.** An attacker already on the LAN sees the node's
+   IP the moment it completes a `ClientHello` to scan it; the SAN list doesn't meaningfully add to
+   what's already visible. This preserves the Tailscale story and keeps option (b) demoted. Document
+   the disclosure in Δ10 and `SECURITY.md`; no config surface needed.
 ### Critic review disposition (`critic-18.md`, 0 CRITICAL · 4 HIGH · 6 MEDIUM · 3 LOW)
 
 Fixed: H1 (Cross-plan & Dependencies section, rebased onto the "all of #18 before #09" decision —

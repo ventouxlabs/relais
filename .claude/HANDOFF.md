@@ -102,18 +102,26 @@ after #18 T2; #17 edits the exact response objects #20 B1-A touches
 (`RelaisHttpServer.kt:1300/1349/1356/1644/1747`); #19 and #20 share the `RelaisEngine.kt:663-706` seam
 and `resetIncrementsForTest` — #19 rebases. Each plan's `Cross-plan` section names its shared hunks.
 
-**Decisions still JD's (new, in addition to the older list below — mapped to steps in the table above):**
-- #18 Q5 NameConstraints keep/drop · Q8 opt-out of RFC1918 addresses in the SAN · Q2 the exempt-route
-  rate-limit budget as a number, and whether unmetered failed-auth (401 precedes the limiter, Decision 10)
-  is accepted or gets a follow-up issue.
-- #22 stepper ladder: a 5-min step never reaches `IDLE_TTL_MIN_MINUTES = 1` — adopt 1/5/15/30/60 or
-  raise the floor to 5. Decides whether `RelaisIdleTtl.kt` re-enters the file list.
+**Five decisions RESOLVED (JD, 2026-09-07) — plans updated, ready to build against:**
+- ✅ #18 Q2 — exempt-route rate-limit budget: **the existing 30/60s (`RATE_LIMIT`/`RATE_WINDOW_MS`),
+  unchanged.** No new constant. Unmetered-failed-auth (Decision 10) accepted as-is, no follow-up scheduled.
+- ✅ #18 Q5 — NameConstraints: **keep them**, scoped to the node's own SAN set.
+- ✅ #18 Q8 — RFC1918/overlay SANs: **no opt-out, keep all LAN addresses.** Documented as a pre-auth
+  disclosure in Δ10 and SECURITY.md; not worth a config surface.
+- ✅ #22 stepper ladder: **non-linear 1/5/15/30/60**, keeps the 1-minute floor. `RelaisIdleTtl.kt` is
+  back in the file list (`IDLE_TTL_LADDER` + `nextRung`, plus a new `RelaisIdleTtlLadderTest.kt`) —
+  file count 14 → 15.
+- ✅ #17 Q6 — single-JSON-object framing on `format`+`stream:false`: **accepted**, documented as a
+  risk, fallback stays specified-but-unbuilt. (Merge-order-vs-#20 also confirmed: #20 B1-A first,
+  matching the build order below.)
+
+**Still open (unresolved, not blocking the build order below from starting):**
 - #22 `/v1/audio/transcriptions` is the **primary engine** on the idle path (was misfiled in NOT Building):
-  bounded-hold or keep 503 — needs an on-device number first.
+  bounded-hold or keep 503 — needs an on-device number first, so this can't be decided from a desk.
 - Does gap 6 (a *correct* reload-failure brake: persisted "loaded, no successful generate yet" marker,
-  cleared by the first successful `generate`) get its own plan?
-- #17 Q6: single-JSON-object framing on the `format`+`stream:false` path — accept, or build the fallback.
-- Resolved by me, object if wrong: #09 before #22 on `assembleDashboardStatus`; #20 B1-A before #17.
+  cleared by the first successful `generate`) get its own plan? Not urgent — nothing in the build order
+  depends on it.
+- Resolved by me earlier, object if wrong: #09 before #22 on `assembleDashboardStatus`.
 
 Planners recommend a fresh critic + `/codex review` on each revision before implementation
 ([[relais-dual-review-disjoint]]: 0/5 overlap last time). Do it per plan as it comes up in the build

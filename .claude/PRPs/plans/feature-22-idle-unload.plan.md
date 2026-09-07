@@ -46,7 +46,7 @@ it targeted, and was cut rather than shipped as false reassurance (*Notes → Cu
 - **Complexity:** Large (6 shipped-code surfaces + a real Prometheus histogram + an on-device probe)
 - **Source PRD:** N/A
 - **PRD Phase:** N/A
-- **Estimated Files:** 14 changed — 1 CREATE (`IdleUnloadProbe.kt`) + 13 UPDATE (9 under `main/`, 3 JVM tests, 1 doc), plus `triage/TriageControlActivity.kt` read-only as the `Stepper` source. (Down from 16: cutting the reload breaker removed `RelaisIdleTtl.kt` and `RelaisIdleTtlTest.kt`. `RelaisIdleTtl.kt` returns to the list only if open question 2 is answered by raising `IDLE_TTL_MIN_MINUTES`.)
+- **Estimated Files:** 15 changed — 1 CREATE (`IdleUnloadProbe.kt`) + 14 UPDATE (10 under `main/`, 4 JVM tests, 1 doc), plus `triage/TriageControlActivity.kt` read-only as the `Stepper` source. (Cutting the reload breaker removed `RelaisIdleTtlTest.kt`'s breaker cases, but **`RelaisIdleTtl.kt` returns to the list**: open question 2 was decided as a non-linear ladder (1/5/15/30/60), which adds `IDLE_TTL_LADDER` + `nextRung` to that file — Task 3 — plus its own test file.)
 
 ## UX Design
 
@@ -400,7 +400,8 @@ class ToolCallingProbe {
 | `.../RelaisEngine.kt` | UPDATE | `recordEngineUnload()` call site in `releaseIfIdle` (:978-980); public `idleSeconds` accessor for the private `lastActivityAtMs` (:230); load-duration instrumentation around `ensureInitialized` (:332-355); **and move `wasIdleUnloaded = false` from `:353` to the start of the init attempt** (task 4b) |
 | `.../RelaisMetrics.kt` | UPDATE | Two counters/gauges × the 3-step pattern **plus one real histogram** (bounds array, lock, `_bucket`/`_sum`/`_count` render, **and** a `resetIncrementsForTest` entry) |
 | `.../RelaisConfig.kt` | UPDATE | **One** new key: the remembered last non-zero TTL |
-| `.../RelaisConfigureActivity.kt` | UPDATE | `IDLE UNLOAD` `ToggleRow` + `IDLE AFTER` `Stepper` pair |
+| `.../RelaisIdleTtl.kt` | UPDATE | **Decided 2026-09-07:** `IDLE_TTL_LADDER = intArrayOf(1,5,15,30,60)` + pure `nextRung()` for Task 3's stepper |
+| `.../RelaisConfigureActivity.kt` | UPDATE | `IDLE UNLOAD` `ToggleRow` + `IDLE AFTER` `Stepper` pair, stepping by ladder rung via `nextRung()` |
 | `.../triage/TriageControlActivity.kt` | — (read only) | Source of the `Stepper` pattern; **do not modify** |
 | `.../core/NodeState.kt` | UPDATE | Add `NodeState.IDLE` and its precedence rule in `computeNodeState` |
 | `.../core/RelaisNodeController.kt` | UPDATE | **The only production caller** of `computeNodeState` (`:32`, positional args) — adding a parameter breaks it. Grep-verified: `TilePresentation.kt` and `RelaisWidget.kt` *consume* the enum but do not call the function |
@@ -408,6 +409,7 @@ class ToolCallingProbe {
 | `.../tile/TilePresentation.kt` | UPDATE | Exhaustive `when` at :51-57 (`tilePresentation`) **and** :77-81 (`tileAction`) must handle `IDLE`; `tileAction` needs an explicit `IDLE -> START` decision against its no-cold-start KDoc |
 | `.../widget/RelaisWidget.kt` | UPDATE | Exhaustive `when` at :117-123 (`StatusLine`) must handle `IDLE` — **and `:95` `canRun` is an `==`, not a `when`**, so the compiler will *not* flag it; it must be edited by hand or the RUN button dies on an idle node |
 | `.../test/java/cc/grepon/relais/RelaisIdleTtlConfigTest.kt` | UPDATE | Toggle round-trip + stepper-floor tests (already Robolectric) |
+| `.../test/java/cc/grepon/relais/RelaisIdleTtlLadderTest.kt` | **CREATE** | Pure `nextRung()` coverage: every adjacent transition, floor/ceiling clamps, off-ladder starting values |
 | `.../test/java/cc/grepon/relais/RelaisMetricsIncrementsTest.kt` | UPDATE | Delta-asserting counter tests + the histogram render/reset tests |
 | `.../test/java/cc/grepon/relais/NodeStateTest.kt` | UPDATE | Truth-table rows for `IDLE` and for `ERROR`-beats-`IDLE`. **Its helper calls `computeNodeState` positionally (`:22-29`)** while `RelaisNodeController.kt:31-38` uses named args — append the new parameter **last** or it silently mis-binds here |
 | `Android/src/app/src/androidTest/java/cc/grepon/relais/IdleUnloadProbe.kt` | **CREATE** | The only place the reload time and cross-cycle leak behavior can be measured |
@@ -448,11 +450,11 @@ class ToolCallingProbe {
 ### Task 3 — Configure-screen controls (the headline gap)
 
 - **ACTION:** Add `IDLE UNLOAD` and `IDLE AFTER` rows to `RelaisConfigureActivity`.
-- **IMPLEMENT:** Add `KEY_IDLE_TTL_LAST_NONZERO_MINUTES` to `RelaisConfig` plus `idleTtlLastNonZeroMinutes(ctx)` / `setIdleTtlLastNonZeroMinutes(ctx, v)`, mirroring `:414-419`. In the composable, `var idleTtl by remember { mutableStateOf(RelaisConfig.idleTtlMinutes(ctx)) }`. `ToggleRow("IDLE UNLOAD", idleTtl > 0) { … }` writes `IDLE_TTL_DISABLED_MINUTES` when turning off (after saving the current value as last-non-zero), and restores the remembered value — falling back to `IDLE_TTL_DEFAULT_MINUTES` — when turning on. Render the `IDLE AFTER` row only when `idleTtl > 0`: a label, a `Stepper("–")`, a `"$idleTtl min"` readout, a `Stepper("+")`, stepping by **5** and clamped through the existing `setIdleTtlMinutes`. **Clamp the decrement with `.coerceAtLeast(RelaisIdleTtl.IDLE_TTL_MIN_MINUTES)`** — see the GOTCHA; the toggle owns disabling, the stepper never does.
+- **IMPLEMENT:** Add `KEY_IDLE_TTL_LAST_NONZERO_MINUTES` to `RelaisConfig` plus `idleTtlLastNonZeroMinutes(ctx)` / `setIdleTtlLastNonZeroMinutes(ctx, v)`, mirroring `:414-419`. Add `internal val IDLE_TTL_LADDER = intArrayOf(1, 5, 15, 30, 60)` to `RelaisIdleTtl` (decided by JD, 2026-09-07 — non-linear so it reaches the existing 1-minute floor; see the GOTCHA this replaces). In the composable, `var idleTtl by remember { mutableStateOf(RelaisConfig.idleTtlMinutes(ctx)) }`. `ToggleRow("IDLE UNLOAD", idleTtl > 0) { … }` writes `IDLE_TTL_DISABLED_MINUTES` when turning off (after saving the current value as last-non-zero), and restores the remembered value — falling back to `IDLE_TTL_DEFAULT_MINUTES` — when turning on. Render the `IDLE AFTER` row only when `idleTtl > 0`: a label, a `Stepper("–")`, a `"$idleTtl min"` readout, a `Stepper("+")`. Each tap moves to the adjacent **ladder rung**, not a fixed increment: `fun nextRung(current: Int, ladder: IntArray, up: Boolean): Int` finds the ladder index whose value is `>= current` (or the last index, if none), then steps `+1`/`-1` within `ladder.indices`, clamped — so a value that isn't itself on the ladder (e.g. a config imported from an older build) still moves to the nearest neighbor rather than getting stuck. `setIdleTtlMinutes` is still called with the resulting rung value, so its existing clamp is a no-op safety net, not the mechanism.
 - **MIRROR:** UI_PATTERN (`ToggleRow`, `Stepper`), CONFIG_PATTERN, and the `remember` idiom at `RelaisConfigureActivity.kt:145-147`.
 - **IMPORTS:** `Stepper` is `private` in `triage/TriageControlActivity.kt` — **copy the composable into `RelaisConfigureActivity.kt`** (matching how each screen keeps its own private row composables) rather than making it public or introducing a shared UI module. Existing Compose imports in the file already cover `Row`/`Box`/`Text`/`clickable`/`RoundedCornerShape`; add `FontWeight` if absent.
-- **GOTCHA:** No Material `Switch` exists anywhere in the Relais screens and strings are hardcoded UPPERCASE monospace (no `strings.xml`) — DESIGN.md is explicit. Do not add either. **The 5-minute step has a trap:** decrementing from 5 lands on 0, and `sanitizeIdleTtlMinutes` (`RelaisConfig.kt:421-423`) treats `v <= IDLE_TTL_DISABLED_MINUTES` as the **disabled sentinel** — so the user reads "turned it down" and gets "turned it off", with the `ToggleRow` still showing `on`. Clamp the decrement at `IDLE_TTL_MIN_MINUTES` (`RelaisIdleTtl.kt:49` = 1). Note the ladder 5/10/15/… then never reaches that documented floor of 1, so **pick one and write it down**: either a non-linear ladder (1/5/15/30/60) that reaches 1, or a 5-minute floor with `IDLE_TTL_MIN_MINUTES` raised to match. Shipping a documented-valid value that the UI cannot produce is the thing to avoid.
-- **VALIDATE:** Robolectric round-trip in `RelaisIdleTtlConfigTest`; visually confirm against DESIGN.md's label-left/value-right rule on device.
+- **GOTCHA:** No Material `Switch` exists anywhere in the Relais screens and strings are hardcoded UPPERCASE monospace (no `strings.xml`) — DESIGN.md is explicit. Do not add either. `nextRung` must be a pure, JVM-testable function (put it in `RelaisIdleTtl.kt`, not inline in the composable) — decrementing off the bottom of the ladder must land on `IDLE_TTL_MIN_MINUTES` (1), never on `IDLE_TTL_DISABLED_MINUTES` (0); the toggle owns disabling, the stepper never does. Incrementing off the top must clamp at 60, not overflow into `IDLE_TTL_MAX_MINUTES` if that differs.
+- **VALIDATE:** New pure-function test `RelaisIdleTtlLadderTest` (or added to `RelaisIdleTtlConfigTest`): every adjacent-rung transition in `[1,5,15,30,60]`, decrement-at-1 stays 1, increment-at-60 stays 60, and an off-ladder starting value (e.g. 10, from an old config) moves to the nearest neighbor in the expected direction. Robolectric round-trip in `RelaisIdleTtlConfigTest`; visually confirm against DESIGN.md's label-left/value-right rule on device.
 
 ### Task 4 — `NodeState.IDLE` + `/health` `state` field
 
@@ -681,7 +683,10 @@ plan.
 **Open questions for the user**
 
 1. **Task 4 vs the in-flight feature-09 dashboard rework** — should this plan take `NodeState.IDLE` and let feature-09 rebase onto it, or wait? They collide on `assembleDashboardStatus`. (feature-18 also rewrites `handleHealth`; see the coordination note.)
-2. **Stepper ladder and the 1-minute floor.** A 5-minute step never reaches the documented `IDLE_TTL_MIN_MINUTES = 1` (`RelaisIdleTtl.kt:49`), so a valid value is unreachable from the UI. Either adopt a non-linear ladder (1/5/15/30/60) that reaches it, or raise the documented minimum to 5. Not a decision to leave to the implementer.
+2. ~~Stepper ladder and the 1-minute floor.~~ **DECIDED (JD, 2026-09-07): non-linear ladder 1 / 5 / 15
+   / 30 / 60 minutes**, keeping the existing 1-minute floor (useful for verifying idle-unload fires
+   without a long wait during testing/battery-constrained use). See Task 3's IMPLEMENT below for the
+   mechanism.
 3. **Is gap 6 worth a plan of its own?** The reload-failure breaker was cut (above) because it could not detect the crash-idle-crash loop it targeted. A "loaded but never generated" marker would work, but it is a different feature. Leave gap 6 open, or commission it?
 
 **Findings accepted from review, and the one declined**
@@ -690,8 +695,10 @@ Every finding in `critic-22.md` (0 CRITICAL · 3 HIGH · 7 MEDIUM · 4 LOW) was 
 source before being applied. All three HIGHs held and are fixed above. Six of the seven MEDIUMs held
 and are fixed; **MEDIUM 4 — the `SharedPreferences` write inside the engine lock — dissolved with the
 Task 4 cut** rather than being fixed, since the write it described no longer exists anywhere in the
-plan. Note also that no task now touches `shouldUnloadIdleEngine` at all, so `RelaisIdleTtl.kt` and
-its pure-logic suite `RelaisIdleTtlTest.kt` have both left the Files-to-Change table. Of the four
+plan. Note also that no task touches `shouldUnloadIdleEngine` itself, so `RelaisIdleTtlTest.kt`'s
+existing breaker-adjacent cases stay cut — but **`RelaisIdleTtl.kt` is back in the Files-to-Change
+table** (Task 3, `IDLE_TTL_LADDER`/`nextRung`, per the 2026-09-07 stepper-ladder decision), with its
+own new `RelaisIdleTtlLadderTest.kt`. Of the four
 LOWs: L1 (four off-by-one citations) fixed — `RelaisConfigureActivity.kt` remember idiom is
 `:145-147`, `RelaisWidget.kt` `StatusLine` is `:117-123`, `TilePresentation.kt` `tileAction` is
 `:77-81`, `releaseIfIdle`'s KDoc starts at `:937`. L2 (idle gauge reads process uptime on a
