@@ -144,7 +144,7 @@ proc B ──►  ────────►  one base URL, one client key  │
 **Research item — SPKI pinning**
 - **KEY_INSIGHT:** TOFU pinning gives real protection against a spoofed mDNS advertisement without a CA.
 - **APPLIES_TO:** Tasks 2 and 6.
-- **GOTCHA:** **Pin the leaf SPKI, not the certificate DER.** `getpeercert(binary_form=True)` hands you the whole DER, and hashing that is the obvious-but-wrong move: feature-18 re-mints the leaf on every LAN-IP change and at 90-day expiry, **reusing the leaf key** specifically so an SPKI pin survives (`feature-18-trusted-lan-cert.plan.md:29`, `:143`). A DER pin turns every DHCP lease change into this plan's own mandated hard raise. Pin the **end-entity** key, not the CA's — they differ (`:158`). Separately: if feature-18 lands, trusting its CA may replace pinning entirely — simpler and survives rotation. Check feature-18's status at build time.
+- **GOTCHA:** **Pin the leaf SPKI, not the certificate DER.** `getpeercert(binary_form=True)` hands you the whole DER, and hashing that is the obvious-but-wrong move: feature-18 re-mints the leaf on every LAN-IP change and at 90-day expiry, **reusing the leaf key** specifically so an SPKI pin survives (`feature-18-trusted-lan-cert.plan.md:29`, `:143`). A DER pin turns every DHCP lease change into this plan's own mandated hard raise. Pin the **end-entity** key, not the CA's — they differ (`:158`). Separately: if feature-18 lands, trusting its CA may replace pinning entirely — simpler and survives rotation. Check feature-18's status at build time. **Extraction mechanism (codex P1, PR #310): the stdlib has no X.509 parser to pull the SPKI out of the DER — shell out to `openssl x509 -pubkey -noout -inform DER` (see Task 2's GOTCHA) rather than adding a pip dependency or falling back to a DER pin.**
 
 ## Patterns to Mirror
 
@@ -297,6 +297,20 @@ the two-live-node manual smoke test in *Validation Commands*.
 - **MIRROR:** MODULE_DOCSTRING_AS_RUNBOOK, SERVICE/HANDLER_PATTERN, ERROR_HANDLING.
 - **IMPORTS:** `json`, `os`, `ssl`, `socket`, `hashlib`, `threading`, `time`, `http.client`, `http.server`, `sys` — all stdlib.
 - **GOTCHA:** `3` is `THERMAL_HOT_THRESHOLD` from `core/NodeState.kt:20`; annotate the constant with that source the way `webhook-receiver.py` annotates `HEADER`. **Pin the leaf SPKI, not the cert DER.** `ssl.getpeercert(binary_form=True)` gives the whole DER; hash instead the public key extracted from it, because feature-18 re-mints the leaf on every LAN-IP change and at 90-day expiry while **reusing the leaf key** precisely so an SPKI pin survives (`feature-18-trusted-lan-cert.plan.md:29`, `:143`). A cert-DER pin turns every DHCP lease change into this plan's own mandated hard raise. Pin the **end-entity** SPKI, not the CA's (`:158` — they differ). TOFU still means recording on **first** contact; a changed pin afterwards must **raise**, never silently re-pin.
+
+  **Codex review (P1, PR #310): Python's stdlib has no X.509 parser and no API to pull the SPKI
+  out of the DER `ssl.getpeercert(binary_form=True)` returns.** `ssl`/`hashlib` alone can only hash
+  the *whole* DER, which is exactly the cert-DER pin this GOTCHA says not to do (it breaks on every
+  feature-18 re-mint). This plan is stdlib-only (see Files to Change / M4's honest size note), so
+  the fix cannot be "add `cryptography`" without abandoning that constraint outright. **Fix: shell
+  out to the system `openssl` binary** — `openssl x509 -pubkey -noout -inform DER` on the raw DER
+  bytes (stdin, via `subprocess.run(["openssl", "x509", "-pubkey", "-noout", "-inform", "DER"],
+  input=der_bytes, capture_output=True, check=True)`), then hash the returned PEM public key with
+  `hashlib.sha256`. `openssl` is present on effectively every Linux/macOS box this router would run
+  on (it's what curl's `--pinnedpubkey` already assumes for the very same pin, `:143`); this is a
+  runtime dependency on a system binary, not a new pip package, so it does not reopen M4. If
+  `openssl` is absent, fail closed at startup with a clear error naming the missing binary — never
+  silently fall back to a cert-DER pin.
 - **VALIDATE:** `python3 -m unittest discover -s scripts -p 'test_*.py'` (selection tests) — **not** `python3 -m unittest scripts.test_relais_router`, which needs a `scripts/__init__.py` that does not exist. The mode-`0600` refusal is observable by `chmod 644` and re-running.
 
 ### Task 3 — OpenAI-compatible front end with SSE pass-through
@@ -497,6 +511,17 @@ ss -ltnp | grep 8000     # must show 127.0.0.1:8000, never 0.0.0.0:8000
 | The single-file script grows a UI, persistence, and metrics | Medium | Medium | Those are the explicit signal to stop and adopt a real reverse proxy instead |
 
 ## Notes
+
+### Codex findings disposition (PR #310, 2026-09-07)
+
+- **P1 — fixed.** `codex review --base main` on PR #310 found that Task 2's SPKI-pinning GOTCHA
+  named the right thing to pin (leaf SPKI, not cert DER) but no way to extract it: Python's stdlib
+  has no X.509 parser. Fixed by shelling out to the system `openssl` binary
+  (`openssl x509 -pubkey -noout -inform DER`) rather than adding a pip dependency (which would
+  reopen the "single-file, stdlib-only" decision below) or silently falling back to a DER pin
+  (which breaks on every feature-18 re-mint — the exact failure this plan's own Testing Strategy
+  row 6c exists to prevent). Still **DO NOT BUILD** — Task 1's LiteLLM evaluation gate is unchanged
+  and unaffected by this fix.
 
 **Decisions made**
 

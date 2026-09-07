@@ -35,7 +35,7 @@ my network, and so my tooling keeps working when the phone's DHCP lease changes.
 | **Complexity** | **Large** |
 | **Source PRD** | N/A |
 | **PRD Phase** | N/A |
-| **Estimated Files** | **43 total** — **32 code/res** (17 created: 7 main Kotlin + 7 JVM tests + 3 probes; 15 updated: 9 main Kotlin + `file_paths.xml` + `proguard-rules.pro` + a conditional `build.gradle.kts` + 3 existing JVM tests) **+ 11 docs** (1 created: `docs/tls-trust.md`; 10 updated). Scope a PR off the 32, not the 43. T2 is one of those PRs on its own |
+| **Estimated Files** | **44 total** — **33 code/res** (17 created: 7 main Kotlin + 7 JVM tests + 3 probes; 16 updated: 10 main Kotlin (adds `RelaisNodeService.kt` for T5b) + `file_paths.xml` + `proguard-rules.pro` + a conditional `build.gradle.kts` + 3 existing JVM tests) **+ 11 docs** (1 created: `docs/tls-trust.md`; 10 updated). Scope a PR off the 33, not the 44. T2 is one of those PRs on its own |
 
 ## Cross-plan & Dependencies
 
@@ -450,6 +450,7 @@ private fun ActionLink(label: String, onClick: () -> Unit) {
 | `Android/src/app/src/main/java/cc/grepon/relais/RelaisCertSection.kt` | **CREATE** | The CONFIGURE Composable section. `RelaisConfigureActivity.kt` is already 387 lines; CLAUDE.md says extract rather than grow |
 | `Android/src/app/src/main/java/cc/grepon/relais/RelaisCertExport.kt` | **CREATE** | FileProvider write + `ACTION_SEND` for `relais-ca.crt` |
 | `Android/src/app/src/main/java/cc/grepon/relais/RelaisTls.kt` | UPDATE | Becomes the thin Android shim: read config → call `RelaisCertMint` → build the socket. Two keystores |
+| `Android/src/app/src/main/java/cc/grepon/relais/RelaisNodeService.kt` | UPDATE | **T5b (new, closes codex P1 on T5):** owns `httpsServer`, so it — not `RelaisTls` — registers the `NetworkCallback` and does the stop/reconstruct on LAN-up |
 | `Android/src/app/src/main/java/cc/grepon/relais/RelaisLanIp.kt` | UPDATE | Add `allLanAddresses()`; keep `lanIpv4()`/`localLanIp()` as-is |
 | `Android/src/app/src/main/java/cc/grepon/relais/RelaisHttpServer.kt` | UPDATE | T2 gate restructure; `GET /ca.crt` arm + handler; `endpointLabel` arm |
 | `Android/src/app/src/main/java/cc/grepon/relais/RelaisConfig.kt` | UPDATE | `caKeystorePassword(context)` mirroring `:342-350` |
@@ -653,13 +654,23 @@ private fun ActionLink(label: String, onClick: () -> Unit) {
   can never create key material; see T8). **Boot race:** when `allLanAddresses()` returns empty at
   bind time (the usual state on `BOOT_COMPLETED` — `RelaisBootReceiver.kt:27-30` starts the service
   before DHCP completes, and `RelaisNodeService.kt:190` binds `0.0.0.0:8443` immediately), mint the
-  loopback-only cert to get the listener up, **and register a one-shot
-  `ConnectivityManager.NetworkCallback`; on the first `onAvailable` that yields a non-loopback address,
-  re-mint the leaf (same key) and close + re-create the 8443 listener.** Without this an auto-started
+  loopback-only cert to get the listener up, **and expose `fun needsLanReissue(context: Context):
+  Boolean` plus `fun reissueForLan(context: Context)` (re-mints the leaf with the SAME key) so the
+  caller in T5b below can force a re-mint once an interface comes up.**  Without this an auto-started
   appliance serves a cert with no LAN SAN for its entire uptime and every LAN client fails hostname
   verification until a human restarts it — the exact scenario `README.md:149` advertises. Upgrade path: if `relais_tls.p12` exists but has
   no CA in the chain, generate the CA and re-mint — keep the old leaf key if extractable, else
   generate a new one.
+
+  **Codex review (P1, PR #310): `RelaisTls` cannot itself close and recreate the 8443 listener — it
+  has no reference to it.** `RelaisNodeService` holds the `httpsServer: RelaisHttpServer?` field
+  (`RelaisNodeService.kt:70`) and is the only thing that can call `httpsServer?.stop()`
+  (`:234`) and construct a replacement (`:190`). `RelaisHttpServer` itself owns the bound
+  `ServerSocket`/accept loop (`RelaisHttpServer.kt:185-195`). A `NetworkCallback` registered inside
+  `RelaisTls.buildServerSocket` can re-mint the keystore but has no path to make the *running*
+  listener serve the new cert. **Fix, see T5b:** move the `NetworkCallback` registration to
+  `RelaisNodeService` (which already owns `httpsServer` and the service lifecycle), not to
+  `RelaisTls`. `RelaisTls` only mints; `RelaisNodeService` re-mints-and-restarts.
 - **MIRROR**: CONFIG_ACCESSOR_PATTERN (`RelaisConfig.kt:342-350`); LOGGING_PATTERN (`RelaisTls.kt:73`).
 - **IMPORTS**: `java.security.cert.X509Certificate` added to the existing set.
 - **GOTCHA**: (i) `ks.setKeyEntry(alias, privateKey, pass, chain)` — the chain array must be
@@ -668,10 +679,8 @@ private fun ActionLink(label: String, onClick: () -> Unit) {
   established trust to break. (iii) `RelaisNodeService.kt:189-190` constructs both listeners; the
   loopback one passes `tls = false` and must keep short-circuiting at `RelaisTls.kt:53` before any
   cert work. (iv) Re-minting on a cold start adds latency to `start()` — mint lazily inside the
-  existing `buildServerSocket` call at `RelaisHttpServer.kt:191`, not at app init. (v) The rebind must
-  be **idempotent and single-shot** — unregister the callback after the first successful rebind, or a
-  flapping Wi-Fi link re-creates the listener repeatedly. (vi) `ConnectivityManager.NetworkCallback`
-  needs no new permission (`ACCESS_NETWORK_STATE` is already at `AndroidManifest.xml:42`).
+  existing `buildServerSocket` call at `RelaisHttpServer.kt:191`, not at app init. (v) `needsLanReissue`
+  is a pure check callable from `RelaisNodeService`'s callback without touching the listener.
   (vii) **R8**: `build.gradle.kts:146` sets `isMinifyEnabled = true` for release and
   `proguard-rules.pro` has **zero** BouncyCastle rules today (verified: no match). BC resolves its
   provider and `SecureRandom` reflectively, and per `relais-R8-minification-ci-blindspot` every keep
@@ -680,6 +689,36 @@ private fun ActionLink(label: String, onClick: () -> Unit) {
 - **VALIDATE**: `./gradlew testFullOpenDebugUnitTest testFullPlaysafeDebugUnitTest testDegoogledOpenDebugUnitTest`;
   then T10's `CertTrustProbe` on hardware **on a release (minified) APK**, plus the reboot check in
   Manual Validation.
+
+### T5b — Restart the 8443 listener when the LAN comes up (new, closes codex P1 on T5)
+
+- **ACTION**: UPDATE `RelaisNodeService.kt`. **Depends on T5.**
+- **IMPLEMENT**: In the branch that constructs `httpsServer` (`:190`), after `RelaisTls.certInfo`
+  mints the initial (possibly loopback-only) cert, check `RelaisTls.needsLanReissue(applicationContext)`;
+  if true, register a one-shot `ConnectivityManager.NetworkCallback` on the service's own
+  `ConnectivityManager`. On the first `onAvailable` that yields a non-loopback address: call
+  `RelaisTls.reissueForLan(applicationContext)` (mints with the same key, per T5's invariant), then
+  on the SAME thread that owns `httpsServer` — post to the service's main-thread handler, do not
+  call from the callback's own thread — do `httpsServer?.stop(); httpsServer =
+  RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0").also {
+  it.start() }`, mirroring the exact construction at `:190`. Unregister the callback immediately
+  after the first successful rebind (in a `finally` around the stop/restart, not just after a
+  successful re-mint) so a flapping Wi-Fi link can't re-create the listener repeatedly.
+- **MIRROR**: the `httpsServer` construction site itself (`RelaisNodeService.kt:190`) — T5b must
+  produce a byte-for-byte-identical `RelaisHttpServer` construction, just later and inside the
+  callback.
+- **IMPORTS**: `android.net.ConnectivityManager`, `android.net.Network`, `android.net.NetworkRequest`.
+- **GOTCHA**: (i) `NetworkCallback.onAvailable` runs on a binder/handler thread, not the service's
+  own thread — hopping to the thread that owns `httpsServer` before touching it avoids a data race
+  with an in-flight `accept()` on the old socket. (ii) In-flight connections on the old listener are
+  dropped by `stop()`; that's acceptable for a listener that's been serving an untrusted loopback-only
+  cert to LAN clients anyway — nothing was trusting it. (iii) A second `NetworkCallback` firing after
+  the first successful rebind (e.g. two interfaces coming up close together) must be a no-op — guard
+  with a single `AtomicBoolean` set before the re-mint, not after, so a slow re-mint can't let two
+  callbacks both proceed. (iv) `ACCESS_NETWORK_STATE` is already granted (`AndroidManifest.xml:42`);
+  no manifest change needed.
+- **VALIDATE**: no JVM test reaches `RelaisNodeService` (it's a `Service`); this is manual-only —
+  covered by the reboot-then-LAN-curl acceptance criterion in Notes and Manual Validation step 9.
 
 ### T6 — `GET /ca.crt`
 
@@ -1041,7 +1080,7 @@ curl --cacert relais-ca.crt https://<phone-ip>:8443/health   # must verify, not 
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| **Boot-start race mints a loopback-only cert for the whole uptime.** `RelaisBootReceiver.kt:27-30` starts the service on `BOOT_COMPLETED`; `RelaisNodeService.kt:190` binds `0.0.0.0:8443` before DHCP completes, so `allLanAddresses()` is empty and the leaf gets no LAN SAN. Re-issue is computed **only at node start**, so every LAN client fails hostname verification until a human restarts — in exactly the unattended appliance mode `README.md:149` advertises | **High** (auto-start is the advertised deployment) | **High** — a working demo and a broken appliance | T5 registers a one-shot `ConnectivityManager.NetworkCallback` and re-mints + rebinds :8443 on the first non-loopback address (no new permission — `AndroidManifest.xml:42`). Acceptance criterion covers reboot-then-LAN-curl. **Not** covered by any JVM test or probe — this one is manual |
+| **Boot-start race mints a loopback-only cert for the whole uptime.** `RelaisBootReceiver.kt:27-30` starts the service on `BOOT_COMPLETED`; `RelaisNodeService.kt:190` binds `0.0.0.0:8443` before DHCP completes, so `allLanAddresses()` is empty and the leaf gets no LAN SAN. Re-issue is computed **only at node start**, so every LAN client fails hostname verification until a human restarts — in exactly the unattended appliance mode `README.md:149` advertises | **High** (auto-start is the advertised deployment) | **High** — a working demo and a broken appliance | T5b (in `RelaisNodeService`, which owns `httpsServer`) registers a one-shot `ConnectivityManager.NetworkCallback` and re-mints + stops/reconstructs the 8443 listener on the first non-loopback address (no new permission — `AndroidManifest.xml:42`). Acceptance criterion covers reboot-then-LAN-curl. **Not** covered by any JVM test or probe — this one is manual |
 | **R8 strips BouncyCastle's reflective provider lookups in release.** `build.gradle.kts:146` has `isMinifyEnabled = true`; `proguard-rules.pro` has **zero** BC rules today | Medium | **High** — release APK fails to mint or handshake while every debug check is green | Per `relais-R8-minification-ci-blindspot`, CI runs no R8 and every keep rule here was earned from a real on-device failure. Acceptance criterion requires the mint + LAN handshake on a **release** APK, not `FullOpenDebug` |
 | **T8 mints a CA on the main thread from a settings screen** — ANR plus key material for a node never started | Medium | Medium | `certInfoOrNull` (load-only) + `LaunchedEffect`/`Dispatchers.IO` + an explicit never-started render state (T8) |
 | **Conscrypt rejects the EC-CA-signed RSA leaf on-device**, or serves the chain differently than the JVM | Medium | **High** — the feature does not work at all | `CertTrustProbe` (T10) gates the ship. The JVM test structurally cannot catch this (JSSE ≠ conscrypt). Fallback: an RSA CA, costing QR size but not correctness |
@@ -1060,6 +1099,15 @@ curl --cacert relais-ca.crt https://<phone-ip>:8443/health   # must verify, not 
 | QR is a new visual element with no DESIGN.md precedent | Medium | Low | Needs JD's explicit sign-off; amber-on-charcoal, no new color, no motion |
 
 ## Notes
+
+### Codex findings disposition (PR #310, 2026-09-07)
+
+- **P1 — fixed.** `codex review --base main` on PR #310 found that T5's `NetworkCallback`
+  re-mint-and-rebind was specified inside `RelaisTls`, which has no reference to the running
+  8443 listener (`RelaisNodeService` owns `httpsServer`; `RelaisHttpServer` owns the bound socket).
+  Split the task: T5 now only exposes `needsLanReissue`/`reissueForLan` (pure mint logic); the new
+  **T5b** in `RelaisNodeService.kt` owns the callback registration and the stop/reconstruct of
+  `httpsServer`. Files to Change, the Risks table, and the file count (43 → 44) updated.
 
 ### Stated assumptions
 

@@ -404,11 +404,31 @@ overlap on three surfaces and feature-18's are the load-bearing ones.
      ```
      The gate at `:265-272` becomes `val scheme = authorized(authorization) ?: run { reply(401, …); return }` instead of `if (!authorized(authorization))`. **This is the only call site** — grep to confirm before changing it. One parse, one compare, and the scheme is available to step 3 without re-parsing the header.
   3. Pure `internal fun rejectsAsCrossSite(secFetchSite: String?): Boolean` — `true` **only** for `"cross-site"` and `"same-site"`. `null`, `"none"`, `"same-origin"` and any unrecognised value → `false`. Parse `sec-fetch-site` in the header loop (`:244-262`) alongside `accept`. Immediately after the gate's successful `authorized()` call: `if (scheme == AuthScheme.BASIC && rejectsAsCrossSite(secFetchSite)) { reply(403, …); return }`. Bearer requests never reach the check.
+
+     **Codex review (P2, PR #310): the `null`-allowed branch is still CSRF-able for STATE-CHANGING
+     requests.** A browser/WebView that omits `Sec-Fetch-Site` entirely (the header is Fetch-Metadata,
+     not universal — older Safari, some embedded WebViews, some proxies strip it) reads as `null` and
+     is allowed by design, so a foreign page loaded in such a client can still fire an authenticated
+     Basic `POST /select-model` once credentials are cached. **Fix, scoped to state-changing methods
+     only** so GET navigation (including the meta-refresh reload, which also has no `Sec-Fetch-Site`
+     guarantee) is untouched: add `origin` and `referer` to the header loop (`:244-262`), and change
+     the check to `internal fun rejectsAsCrossSite(method: String, secFetchSite: String?, origin:
+     String?, referer: String?, host: String?): Boolean`. When `secFetchSite` is present, behavior is
+     unchanged (only `cross-site`/`same-site` reject). **When `secFetchSite` is absent AND `method !=
+     "GET"`:** extract the host from `origin` (preferred) or else `referer`, lowercase, and compare
+     against the request's `host` header (also lowercased, port included) — mismatch, or absent
+     `origin`/`referer` both, **rejects**. GET requests with absent `Sec-Fetch-Site` keep the old
+     behavior (allowed) regardless of `origin`/`referer`, because a GET is not the state change this
+     guard exists to stop and the address-bar/meta-refresh cases have no `Origin`/`Referer` to check
+     either. Pin this with **test 8j** (new, distinct from 8i's six `Sec-Fetch-Site`-value cases):
+     `POST /select-model`, no `Sec-Fetch-Site`, no `Origin`/`Referer` → 403; same request with
+     `Origin: https://<node-host>` → passes the CSRF check (still needs a valid model id to 200);
+     same request with `Origin: https://evil.example` → 403.
   4. On the 401, when `accept?.contains("text/html") == true`, add `WWW-Authenticate: Basic realm="Relais", charset="UTF-8"`. `reply()` already takes `headers: List<String> = emptyList()` (`:223-226`) — **no new seam is needed**.
 - **MIRROR:** AUTH_PATTERN in *Patterns to Mirror* — one predicate, one credential, one constant-time compare; ERROR_HANDLING for the gate's early return.
 - **IMPORTS:** `android.util.Base64` (already imported in `RelaisHttpServer.kt`).
 - **GOTCHA:** Wrap the base64 decode in `runCatching` — malformed input must return `null`, never throw. **Do not add a length check or an early `return false`** before the compare; that reintroduces the timing signal the constant-time compare exists to remove. The scheme parse is the only nullable step and it is not key-dependent, so it leaks nothing. `accept` is lowercased at parse (`:257`); lowercase `sec-fetch-site` the same way and compare against lowercase literals. **Allow `none`** — see research item 4; rejecting it `403`s the operator's very first address-bar navigation, which is the feature. **The bare-key tightening is wire-visible**: today `header?.removePrefix("Bearer ")` returns the header *unchanged* when the prefix is absent, so `Authorization: <rawkey>` is accepted. This task rejects it. Every doc and the README specify `Bearer`; the acceptance is an accident of `removePrefix`, not a contract. Record it in `SECURITY.md` and `.claude/HANDOFF.md` and pin it with test 8g.
-- **VALIDATE:** tests #8a-8h; `curl -i` still gets a bare 401; manual checks 1-3 and 6.
+- **VALIDATE:** tests #8a-8j (8j is the new Origin/Referer-fallback test for method-scoped `Sec-Fetch-Site`-absent requests); `curl -i` still gets a bare 401; manual checks 1-3 and 6.
 
 ### Task 4 — Extend `DashboardStatus` with the selector inputs
 
@@ -692,7 +712,7 @@ curl -sk -u ":$KEY" https://$IP:8443/ | grep -c 'class="label">/</td>'   # expec
 | **R1** — `/experiments` is unreachable from a browser today (401 on navigation) despite an in-page key input at `RelaisExperiments.kt:167`; a pre-existing bug this plan only incidentally relieves | **Certain** (verified) | Medium | File as its own issue so the finding survives independently of this PR; do **not** scope its redesign here |
 | **R2** — Self-signed cert interstitial appears before the auth prompt | Certain | Low | Document in RUNBOOK; inherent to the TLS posture |
 | **R3** — **Accepting Basic converts an explicit credential into an ambient one across ~20 routes** (rewritten; the previous "the carrier changes but the credential does not" framing was a false premise) | **Certain** | **Medium** | The mechanism, stated honestly: today a `Bearer` header must be set by script, and a cross-origin request carrying it triggers a CORS preflight this server fails (no `Access-Control-*` anywhere — grepped). Cached **Basic** credentials are re-attached by the UA itself, no script, no preflight; and `Content-Type` is never enforced on the JSON routes (`:259` parsed, read only for multipart at `:443`/`:624`), so a cross-site *simple* POST reaches `handleOpenAi`. Impact is capped at **side effects, no read** — the response is opaque without CORS — but that still buys an attacker page unmetered inference, RAG corpus injection, session mutation and batch-job creation. **Mitigation (Task 3): the `Sec-Fetch-Site` guard runs at the gate for every Basic-authenticated request**, not on `/select-model` alone. Residual: a browser too old to send `Sec-Fetch-Site` gets no protection — acceptable on a trusted LAN, documented in `SECURITY.md` |
-| **R3b** — The `Sec-Fetch-Site` rule is easy to get wrong in the direction that breaks the feature | Medium | Medium | Reject **only** `cross-site` and `same-site`. Allow `none` — that is what an address-bar navigation sends, and an attacker page cannot produce it. A reviewer working from the obvious-sounding "reject unless `same-origin`" will 403 the first page load; test 8i pins all six cases |
+| **R3b** — The `Sec-Fetch-Site` rule is easy to get wrong in the direction that breaks the feature | Medium | Medium | Reject **only** `cross-site` and `same-site`. Allow `none` — that is what an address-bar navigation sends, and an attacker page cannot produce it. A reviewer working from the obvious-sounding "reject unless `same-origin`" will 403 the first page load; test 8i pins all six cases. **For state-changing (non-GET) requests specifically**, an absent header falls back to an `Origin`/`Referer` same-host check rather than being allowed outright (codex P2 review, PR #310) — test 8j |
 | **R4** — **A second `SET MODEL` mid-swap persists a selection whose swap was silently dropped** (re-diagnosed; the mitigation previously cited the wrong line) | Medium | **High** | The guard is the `swapDispatching` CAS at `RelaisEngine.kt:410`, **not** `startupInProgress` at `:413` (which is merely *set* there). `swapDispatching` clears only in the `finally` at `:471`, so a mid-swap call no-ops — config would say B, engine serve A, no retry ever scheduled, `303` reads as success. The disabled-form UI guard does not cover it: the meta refresh can repaint an unlocked form in the window between persist and `startupInProgress = true`, and a stale tab can POST at any time. **Fix (Tasks 7-8): the swap function returns whether it won the CAS; dispatch first, persist only on `true`, answer `503 + Retry-After` otherwise.** Residual: `true` means the thread started, not that it succeeded — it can still bail at `:431` — which is what the pending hint surfaces |
 | **R5** — R8 minification is on in release and CI runs none of it | Low | High | No reflection added, so no new keep rules expected — but confirm on the on-device release gate, since CI cannot |
 | **R6** — Timing side-channel reintroduced while refactoring `authorized()` | Low | High | No length check, no early return before `MessageDigest.isEqual`; called out in Task 3 and in security review. The scheme parse is the only nullable step and is not key-dependent, so returning `null` for an unknown scheme leaks nothing |
@@ -759,6 +779,15 @@ itself wrong — those are marked **fixed, corrected**.
 | **M5** | Not self-contained — six specific gaps | **Fixed** — `RelaisRuntimeCompat`, `ModelSwitch`, `RelaisModelSwap`, `RelaisModelRegistry` added to Mandatory Reading; a Visibility-facts block added; `provisionedIds`' `Set` return stated; `endpointLabel` corrected to `:1877-1900` with its insertion point named |
 | **L1** | Citation drift (`endpointLabel` `:1879-1897` → `:1877-1900`; copy Appendix "L258-273" in a 272-line file) | **Fixed** — both corrected. A third drift the review did not catch is also fixed: the swap dispatch was cited at `:1165` (the `SwapThenRetry` arm) when the call itself is at `:1171` |
 | **L2** | Font stack is an unapproved `DESIGN.md` deviation | **Fixed** — dropped, not deferred. `DESIGN.md:41` mandates bundled `FontFamily.Monospace`; the change was inert anyway (`default-src 'none'` blocks `font-src`) |
+
+### Codex findings disposition (PR #310, 2026-09-07)
+
+- **P2 — fixed.** `codex review --base main` on PR #310 found that Task 3's `null`-allowed branch
+  (added for H1 above) is still CSRF-able for browsers/WebViews that omit `Sec-Fetch-Site` entirely,
+  since a foreign page loaded there can fire an authenticated Basic `POST /select-model`. Fixed by
+  scoping an `Origin`/`Referer` same-host fallback to non-GET methods only, so GET navigation
+  (including the meta-refresh reload, which has the same missing-header property) is unaffected.
+  New test 8j; R3b updated to describe the method-scoped fallback.
 
 ### Alternatives considered and rejected
 

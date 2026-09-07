@@ -6,7 +6,39 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-07 — ⏩ START HERE. **Eight PRP plans critic-reviewed and REVISED. Still UNCOMMITTED. Decisions below are JD's.**
+## 2026-09-07 — ⏩ START HERE. **Eight PRP plans critic-reviewed and REVISED. Committed, PR #310 open. Decisions below are JD's.**
+
+**PR:** [#310](https://github.com/ventouxlabs/relais/pull/310) `docs/prp-plans-critic-revised` → `main`.
+`/codex review --base main` ran and **GATE: FAIL** (2 P1 / 1 P2) — both P1s and the P2 are now **fixed
+in the plans** (see below), pushed as a third commit. Not merged — still awaiting JD's read of the five
+open decisions below ([[review-before-suggesting-merge]]: green CI/gate ≠ reviewed by a human).
+
+### Codex review round (2026-09-07, done — fixes applied directly, planner subagents had exited)
+
+`codex review --base main` on the full PR diff (all 9 files) found 3 issues, cross-checked against the
+8 critic passes above (low raw overlap, consistent with [[relais-dual-review-disjoint]] — codex checks
+mechanism reachability the critics didn't probe as deeply):
+
+- **P1 (fixed) — #18's `NetworkCallback` re-mint (T5) had no path to the running listener.** `RelaisTls`
+  can mint a new cert but has no reference to `httpsServer` (owned by `RelaisNodeService.kt:70`) or the
+  bound socket (owned by `RelaisHttpServer.kt:185-195`) — so the boot-before-DHCP fix from the critic
+  round was inert. Split into a new **T5b** in `RelaisNodeService.kt`: it owns the callback and does the
+  stop/reconstruct; T5 now only exposes `needsLanReissue`/`reissueForLan`. File count 43 → 44.
+- **P1 (fixed) — #23's leaf-SPKI pin (H4 fix) had no extraction mechanism.** Python stdlib has no X.509
+  parser to pull the SPKI out of `ssl.getpeercert(binary_form=True)`'s DER. Fixed by shelling out to
+  the system `openssl x509 -pubkey -noout -inform DER` binary rather than adding a pip dependency
+  (would reopen the stdlib-only decision) or falling back to a DER pin (breaks on every #18 re-mint).
+  Still DO NOT BUILD.
+- **P2 (fixed) — #09's `Sec-Fetch-Site` null-fallback (H1 fix) still CSRF-able for headerless clients.**
+  A browser/WebView that omits the header entirely was allowed outright. Fixed by adding an
+  `Origin`/`Referer` same-host fallback, **scoped to non-GET methods only** so address-bar navigation
+  and the meta-refresh reload (which also lack the header) stay unaffected. New test 8j.
+
+Each plan's `Notes → Codex findings disposition` has the full writeup. **Lesson for next time:** the
+planner subagents (`plan-cert`, `plan-tier2`, `plan-dashboard`, etc.) had already exited by the time
+this review ran — they're one-shot dispatches, not persistent workers. Route a fix-forward review to
+the plan owner only while it's still live in the same session; otherwise apply the fix directly and
+note it as codex-found rather than critic-found in the plan's disposition section.
 
 ### Critic round + revision round (2026-09-07, both done)
 
