@@ -59,6 +59,18 @@ SIGSEGV. G4 (`comet`) — gemma still builds the **full multimodal** engine and 
 **Open:** upstream LiteRT-LM bug to file (gemma-4-E4B null-deref at first inference on Tensor G5; serves
 on G4; Qwen3 serves on G5). Single G5 unit available, so all-Pixel-10 vs single-unit-fault unconfirmed.
 
+> **UPDATE 2026-09-06 — the pre-flight gate above no longer exists; do not re-add it.** E4B was
+> re-verified to init + serve (text, sustained decode, and vision) on Tensor G5 with **no SIGSEGV** on
+> **litertlm 0.12.0** (2026-07-12, on `rango`) — the model×SoC bug above is fixed on that version.
+> `RelaisEngine.kt:341-343` records the gate's removal. **litertlm 0.12.0 is what ships**
+> (`libs.versions.toml`), so the crash this section describes is not reproducible on the current build.
+> Reconciling with the discriminator matrix above: this bug is version-dependent after all — **fixed on
+> 0.12.0, still reproduces on 0.11.0 and 0.13.1** (the two versions actually tested above). A litertlm
+> version bump past 0.12.0 can silently reintroduce a first-inference-only crash on G5; re-run this
+> section's discriminator matrix on any future bump before assuming E4B still serves there. This is
+> also load-bearing for feature-22 (idle-unload): a reload after a bump-induced regression would hit
+> the crash on every idle-triggered re-init, not just once at boot.
+
 ---
 
 ## Q1 — Can the active backend be read back programmatically? **NO.**

@@ -78,7 +78,7 @@ step says so.
 
 | # | PR | Plan tasks | Needs decided first | Hardware | Unblocks / why here |
 |---|---|---|---|---|---|
-| 0 | `docs: reconcile G5/E4B claim; file bugs 1–6 as issues` | none (bug 5 docs fix: `SPIKE-FINDINGS.md:32-33`, CLAUDE.md) | — | — | Every later PR cites the settled facts; bugs 1/2/4 get closed by steps 3/2/7, so the issues need to exist |
+| 0 | ✅ **DONE** `docs: reconcile G5/E4B claim; file bugs 1–6 as issues` | — | — | — | Landed 2026-09-07 — `SPIKE-FINDINGS.md`/`CLAUDE.md` reconciled; issues #311-#315 filed (bug 5 needed no issue, fixed directly). **Process deviation:** committed onto PR #310 rather than its own branch — trying a separate branch off `main` conflicted on `HANDOFF.md`, since this file is one continuously-edited log and #310 already carries the whole day's HANDOFF history. Not worth the branch juggling for a docs-only step; steps 1+ (real code) will get their own branches as planned. |
 | 1 | `feat(metrics): TTFT + decode-start latency` — **#20 B0 + B1-A** | B0 (static gate, needs `:app:assembleFullOpenDebug` once to grep the AAR), B1-A1–A4 | — | rango: B1-A4 measures the `convStartNs`→`sendStartNs` gap and writes it to `docs/litertlm-native-api.md` | Smallest diff, touches the `RelaisEngine.kt:663-706` seam and the response objects that #17 and #19 both edit — landing first means they rebase onto one stable shape |
 | 2a | `fix(security): extract HTTP gate` — **#18 T2 only** | T2 (`RelaisHttpGate.decide` + `RelaisHttpGateTest`, SECURITY.md Δ7 wording) | **Q2** exempt-route rate-limit budget; accept unmetered failed-auth or file follow-up | comet smoke: `/health`, a 401, a 429 | Closes bug 2. Ships alone because #09 and every later HTTP change assume the new `authorized()` shape |
 | 2b | `feat(tls): per-node CA + SAN leaf + QR trust` — **#18 rest** | T1, T3–T12 | **Q5** NameConstraints, **Q8** RFC1918 SAN opt-out | rango: `CertTrustProbe` (conscrypt accepts EC-CA-signed RSA leaf — plan is gated on it), boot-before-DHCP re-mint, then a **release-build inference check** (BouncyCastle may need R8 keep rules — [[relais-r8-minification-ci-blindspot]]) | 43 files, the biggest step. Must precede #09 because #09 edits `authorized()`/`recordRequest` on top of T2 and #18 mirrors `handleDashboard` lines #09 no longer moves |
@@ -127,10 +127,9 @@ Planners recommend a fresh critic + `/codex review` on each revision before impl
 ([[relais-dual-review-disjoint]]: 0/5 overlap last time). Do it per plan as it comes up in the build
 order, not all eight again.
 
-**Bug 6 (add to the list below):** `RelaisDiscovery.updateModel` has zero callers and its KDoc claims a
-model switch needs a process restart — false since #180 hot-swaps in-process
-(`RelaisEngine.kt:409-431`). **The mDNS TXT `model=` goes stale after every swap.** Found by plan-tier2
-pushing back on a critic finding.
+**Bug 6** (`RelaisDiscovery.updateModel` has zero callers, KDoc falsely claims a restart keeps the TXT
+fresh — found by plan-tier2 pushing back on a critic finding) is filed as
+[#313](https://github.com/ventouxlabs/relais/issues/313), folded into the bug list below.
 
 ---
 
@@ -187,18 +186,15 @@ alone) → #09 delta → #22 gap-closure → #17 → #18 rest → #19/#21 → #2
   (`RelaisHttpServer.kt:1165` → `RelaisEngine.ensureModelSwapInBackground`).
 - #22 vs #09 collide on `assembleDashboardStatus` — order them.
 
-### Bugs found as planning by-product — file as issues
+### Bugs found as planning by-product — ALL FILED (2026-09-07)
 
-1. `/experiments` is a browser page that **401s on navigation** (no way to supply the key from a browser).
-2. The guard at `RelaisHttpServer.kt:265-286` bundles auth + rate-limit + body-cap in one negated condition →
-   `/health` skips all three, so **`SECURITY.md:19-22` overstates the posture**. #18 T2 fixes it standalone.
-3. `/v1/models` lists non-provisioned models since #180 (see decision above).
-4. `RelaisMetrics.kt:38` cites `RelaisMetricsLeakTest`, which does not exist.
-5. **Stale settled fact:** `RelaisEngine.kt:341-343` records the G5/E4B pre-flight gate was **removed** —
-   E4B verified on shipped litertlm **0.12.0** (2026-07-12, rango). `SPIKE-FINDINGS.md:32-33` and CLAUDE.md
-   still call the SIGSEGV live. Reconciliation: fixed on 0.12.0, broken on 0.11.0 and 0.13.1 — so a version
-   bump can reintroduce a first-inference crash, which idle-unload reloads multiply. Needs a small docs PR;
-   agent memory already updated.
+1. [#311](https://github.com/ventouxlabs/relais/issues/311) — `/experiments` 401s on browser navigation.
+2. [#314](https://github.com/ventouxlabs/relais/issues/314) — guard at `:265-286` bundles auth+rate-limit+body-cap; `/health` skips all three. #18 T2 fixes it.
+3. [#312](https://github.com/ventouxlabs/relais/issues/312) — `/v1/models` lists non-provisioned models since #180.
+4. [#315](https://github.com/ventouxlabs/relais/issues/315) — `RelaisMetrics.kt:38` cites a nonexistent `RelaisMetricsLeakTest`.
+5. ~~Stale G5/E4B claim~~ **FIXED directly** (no issue needed) — `SPIKE-FINDINGS.md` and `CLAUDE.md` both
+   updated 2026-09-07 with the 0.12.0-fixed / 0.11.0-and-0.13.1-broken reconciliation.
+6. [#313](https://github.com/ventouxlabs/relais/issues/313) — mDNS TXT `model=` goes stale after every #180 hot-swap.
 
 ### Process notes from this session
 

@@ -38,7 +38,9 @@ flag any UI code that doesn't match `DESIGN.md`.
 ## Before touching a bug report or feature request
 Read, in order: this file → `SPIKE-FINDINGS.md` (settled, do-not-re-derive device/backend facts —
 e.g. the Tensor G5 `gemma-4-E4B` first-inference SIGSEGV is a known upstream LiteRT-LM bug, not a
-Relais bug) → `.claude/HANDOFF.md` (latest section only, for current repo/PR state) → the relevant
+Relais bug — **fixed on the shipped litertlm 0.12.0, still reproduces on 0.11.0/0.13.1**; re-check
+`SPIKE-FINDINGS.md`'s 2026-09-06 update before assuming either direction on a version bump) →
+`.claude/HANDOFF.md` (latest section only, for current repo/PR state) → the relevant
 `*-api.md` under `docs/` for the endpoint in question. `Bug_Reporting_Guide.md` is the human-facing
 repro checklist (device/SoC, logcat tags, curl commands); `.agent_native/agent_roadmap.md` tracks
 known gaps in agent-autonomous reproduction/verification for this repo — check it before assuming a
