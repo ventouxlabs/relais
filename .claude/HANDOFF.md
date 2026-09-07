@@ -6,7 +6,143 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-08-22 — ⏩ START HERE. **Repo moved to the `ventouxlabs` org. Play submission in progress.**
+## 2026-09-07 — ⏩ START HERE. **Eight PRP plans critic-reviewed and REVISED. Still UNCOMMITTED. Decisions below are JD's.**
+
+### Critic round + revision round (2026-09-07, both done)
+
+Eight `critic` agents (opus) reviewed the plans against `1276a351` with a shared adversarial brief
+(premise, ≥8 citation spot-checks, control-flow correctness, security, testability honesty, scope,
+cross-plan collisions). Full reports were in the session scratchpad only — **not preserved**; every
+finding's disposition is recorded in each plan's `Notes → Critic findings disposition`. Then the original
+planners revised in place. All eight: **APPROVE-WITH-FIXES**; #20's B2 was **REJECTED and excised**.
+
+| Plan | Conf before / after critic / after revision | Fixed / declined | Files / tasks | Verdict on the revision |
+|---|---|---|---|---|
+| 09 | 7 / **4** / 6 | 12 / 0 | 12 / 10, **two PRs** | model-switch skipped `refuseIfIncompatible` → bricked node; Basic auth = API-wide CSRF → gate-wide `Sec-Fetch-Site` guard (rejects `cross-site`/`same-site`, allows `none`); Task 1 cut, zero visibility changes in `RelaisHttpServer.kt` |
+| 17 | 7 / 5 / 6 | 11 / 3 | 12 / 12, 30 tests | `/api/chat` bypassed `withInferenceAdmission` → wrapper in the router branch (widening it is impossible, `inline` is load-bearing at `:451/:463`); streaming tool calls were dropped; per-request wire; `/api/generate` passes `sessionKey = null` (peer-IP fallback would share a session across a NAT) |
+| 18 | 6 / 7 / 7 | 13 / 1 | 43 / 12 | citations tightest of the eight; T2 gate extracted to pure `RelaisHttpGate.decide` + 8 RED-proven rows; boot-before-DHCP loopback cert → `NetworkCallback` re-mint; settings screen can no longer mint the CA; Δ10 SAN disclosure added |
+| 19 | 8 / 7 / 8 | 11 / 1 | 15 / 11 | A9 didn't compile (`try`-scoped vars in `finally`); cache halved sampling; energy is whole-device → **disclosed, not subtracted**, series renamed `relais_decode_window_energy_*`; histogram bounds were 10× too small |
+| 20 | 9-7-4 / 7-3 / **8-7** | 9 / 0 | 7 / 8 (was 13/11), XL→M | **B2 prefix reuse excised to an appendix**: cache key omitted image/audio bytes → the exact KV leak it existed to prevent. TTFT now captures `convStartNs` AND `sendStartNs`; the gap is the prefill measurement, written to the inventory by B1-A4 |
+| 21 | 7 / 6 / 6 | 10 / 0 | 5 / 6 | Task 4 was a tautology (`buildPromptParts` never sees the body) → `parseTools(body)`; `/v1/models` does a **blocking allowlist fetch** on cold/expired/failing cache — inside HA's 10 s flow |
+| 22 | 6 / 5 / 5 | 12 / 1 | 14 / 7 | **Task 4 breaker CUT** (cleared on startup init, and the G5 fault fires in `generate` after the clear — could never trip); IDLE now after `lastInitFailed`; `wasIdleUnloaded=false` moves to the START of the init attempt (today's `:353` is reached only on success → failed reload would read IDLE forever); gap 6 is now honestly OPEN |
+| 23 | 8 / 5 / 5 | 11 / 2 | 3 / 8 | still DO NOT BUILD. 4 of 7 (planner: 6 of 9) 503s mean "retry HERE"; retry impossible with unbuffered `rfile`; eligibility `ready \|\| IDLE`; pin the leaf SPKI; bind **loopback only** (planner's call) |
+
+Declines were all evidence-backed; three were critic citations off by one line. Planners found **six
+defects the critics missed** (17: no fan-out object, NAT session sharing; 09: `authorized()` must return
+`AuthScheme?`; 19: histogram bounds, a `-1` sentinel that pages every plugged-in node; 23: see bug 6).
+Pattern across all eight: line citations were accurate, the defects were **control flow** — a gate
+bypassed, a guard cleared before the fault it watches, a key missing a dimension, a private symbol
+assumed reachable from a JVM test. Read the plan's mechanism, not its line numbers.
+
+**Build order (settled, supersedes the one below):** #20 B1-A → **all of #18** → #09 PR-A (auth /
+refresh / log hygiene) → #09 PR-B (selector) → #22 → #17 → #19 → #21 → #23 never. Reasons: #09 moves
+nothing now but edits `authorized()`/`recordRequest` after #18 T2; #17 edits the exact response objects
+#20 B1-A touches (`RelaisHttpServer.kt:1300/1349/1356/1644/1747`); #19 and #20 share the
+`RelaisEngine.kt:663-706` seam and `resetIncrementsForTest` — #19 rebases. Each plan's `Cross-plan`
+section names its shared hunks.
+
+**Decisions still JD's (new, in addition to the older list below):**
+- #18 Q5 NameConstraints keep/drop · Q8 opt-out of RFC1918 addresses in the SAN · Q2 the exempt-route
+  rate-limit budget as a number, and whether unmetered failed-auth (401 precedes the limiter, Decision 10)
+  is accepted or gets a follow-up issue.
+- #22 stepper ladder: a 5-min step never reaches `IDLE_TTL_MIN_MINUTES = 1` — adopt 1/5/15/30/60 or
+  raise the floor to 5. Decides whether `RelaisIdleTtl.kt` re-enters the file list.
+- #22 `/v1/audio/transcriptions` is the **primary engine** on the idle path (was misfiled in NOT Building):
+  bounded-hold or keep 503 — needs an on-device number first.
+- Does gap 6 (a *correct* reload-failure brake: persisted "loaded, no successful generate yet" marker,
+  cleared by the first successful `generate`) get its own plan?
+- #17 Q6: single-JSON-object framing on the `format`+`stream:false` path — accept, or build the fallback.
+- Resolved by me, object if wrong: #09 before #22 on `assembleDashboardStatus`; #20 B1-A before #17.
+
+Planners recommend a fresh critic + `/codex review` on each revision before implementation
+([[relais-dual-review-disjoint]]: 0/5 overlap last time). Do it per plan as it comes up in the build
+order, not all eight again.
+
+**Bug 6 (add to the list below):** `RelaisDiscovery.updateModel` has zero callers and its KDoc claims a
+model switch needs a process restart — false since #180 hot-swaps in-process
+(`RelaisEngine.kt:409-431`). **The mDNS TXT `model=` goes stale after every swap.** Found by plan-tier2
+pushing back on a critic finding.
+
+---
+
+## 2026-09-06 — **Gate 1 cleared, repo glowup merged (#309). Eight PRP plans written.** (plans since revised — see above)
+
+### State of `main` (`1276a351`)
+
+- **PR #309 merged** (squash): repo-glowup branding (`docs/assets/banner.svg`, `social-preview.{svg,png,jpg}`,
+  README hero + badges, GitHub About/topics) and **Play Gate 1 marked CLEARED** in `docs/store-submission.md` —
+  the Cloudflare edge Rate Limiting rule (`report-worker-flood-guard`, 60 req/min/IP, block 1h) and
+  *Always Use HTTPS* were done by JD in the dashboard and verified independently (plain-`http` to
+  `report.ventouxlabs.com/report` → 301 at the edge). The wrangler OAuth token has only `zone (read)`, so
+  neither can be automated from here.
+- **#258 closed** as stale — it claimed no report affordance existed; the feature shipped in v1.0.18/#274.
+- Still JD-only: **upload `docs/assets/social-preview.png` at Settings → General → Social preview**
+  (no API for it), and the Play Console transcription (`docs/store-submission.md`, 14-step order). JD said
+  they were **stuck on a Console step** but never said which — ask before resuming that thread. After
+  submission: append what was done to `docs/distribution.md` (#122's own acceptance criterion), then close
+  #122 → #102 → #97.
+- Open issues are now only #97/#102/#122 (distribution), #288 (deferred decision), #69 (hardware-blocked),
+  #300 (decision record). **The buildable backlog is empty** — hence the plans below.
+
+### Eight PRP plans in `.claude/PRPs/plans/` — written 2026-09-06 (critic-reviewed + revised 2026-09-07, see above; table below is the ORIGINAL state)
+
+JD asked "what other features should we offer" → "plan first and second tier features" → "full /prp-plan them".
+Five `planner` agents (opus) wrote them in the full PRP template. `git status` shows feature-09 modified and
+17/18/19/20/21/22/23 untracked.
+
+| Plan | Cx | Conf | One-line |
+|---|---|---|---|
+| `feature-09-web-dashboard` | M | 7 | **~70% already shipped** (`GET /` → `handleDashboard`, `RelaisDashboard.kt`, 26 tests). Delta: model-switch form, HTTP Basic for browsers, ring-buffer self-recording fix |
+| `feature-17-ollama-compat-api` | L | 7 | `/api/*` shim, 3 new files, bearer stays mandatory, forces `stream:false` when `format` set (Relais hard-400s stream+response_format) |
+| `feature-18-trusted-lan-cert` | L | 6 | **Today's cert has zero SANs** — that's why `-k`. Per-node EC CA + RSA leaf, QR trust path, JVM `SSLServerSocket` handshake test. Gated on a conscrypt probe |
+| `feature-19-power-energy-metrics` | M | 8 | **Watts unobservable while plugged in** (net charge current). Raw current always, mW only on battery, `_valid` series |
+| `feature-20-native-benchmark-and-prefix-reuse` | XL | 9/7/4 | `getBenchmarkInfo()` is a DEAD END per the inventory; TTFT already computed+discarded at `RelaisEngine.kt:744` → ships alone. Prefix reuse = privacy (KV leak) question first |
+| `feature-21-home-assistant` | S/M | 7 | HA OS can't trust a self-signed LAN cert (needs `REQUESTS_CA_BUNDLE`, unsettable on HA OS) → Container/Supervised only; target core `litellm`; Ollama path depends on #17 |
+| `feature-22-idle-unload` | L | 6 | **Already shipped (#178).** Gaps: TTL setter has zero callers (pinned 15 min, can't disable), no metrics, `/health` conflates idle/loading/dead, **no reload-failure breaker** |
+| `feature-23-multi-node-router` | M | 8 | Labelled DO NOT BUILD; Task 1 = evaluate LiteLLM proxy before writing code |
+
+Three of the eight premises were partly already built (09, 22, and the dashboard-adjacent bits) — the planners
+caught it by grepping. Same lesson as the native-API rule in CLAUDE.md: verify the "not shipped" claim too.
+
+**Suggested build order:** #20 B1-A (TTFT, tiny) → #18 T2 (auth-guard restructure, security prereq, ships
+alone) → #09 delta → #22 gap-closure → #17 → #18 rest → #19/#21 → #20 B2 spike → #23 never (for now).
+
+**Decisions only JD can make** (each recorded under the plan's Notes → Open questions):
+- `/v1/models` → provisioned-only? Client-visible change; closes the #180 footgun (non-provisioned models
+  listed, 404 on every turn). Affects 17, 21.
+- #18: `/health` becoming rate-limited OK, what budget? zxing vs hand-rolled QR? document system-store CA
+  install (new risk) or `--cacert`-only?
+- #20: scope prefix reuse to session-memory (#5)? Is `DEFAULT_SEED = 0` (`RelaisEngine.kt:55,141`)
+  intentional — default requests are near-deterministic and nobody documented it.
+- #09: amend `docs/dashboard-copy.md:95` — "restart to apply" is wrong, the code hot-swaps
+  (`RelaisHttpServer.kt:1165` → `RelaisEngine.ensureModelSwapInBackground`).
+- #22 vs #09 collide on `assembleDashboardStatus` — order them.
+
+### Bugs found as planning by-product — file as issues
+
+1. `/experiments` is a browser page that **401s on navigation** (no way to supply the key from a browser).
+2. The guard at `RelaisHttpServer.kt:265-286` bundles auth + rate-limit + body-cap in one negated condition →
+   `/health` skips all three, so **`SECURITY.md:19-22` overstates the posture**. #18 T2 fixes it standalone.
+3. `/v1/models` lists non-provisioned models since #180 (see decision above).
+4. `RelaisMetrics.kt:38` cites `RelaisMetricsLeakTest`, which does not exist.
+5. **Stale settled fact:** `RelaisEngine.kt:341-343` records the G5/E4B pre-flight gate was **removed** —
+   E4B verified on shipped litertlm **0.12.0** (2026-07-12, rango). `SPIKE-FINDINGS.md:32-33` and CLAUDE.md
+   still call the SIGSEGV live. Reconciliation: fixed on 0.12.0, broken on 0.11.0 and 0.13.1 — so a version
+   bump can reintroduce a first-inference crash, which idle-unload reloads multiply. Needs a small docs PR;
+   agent memory already updated.
+
+### Process notes from this session
+
+- `main` is protected (5 required checks); a direct push was rejected → always branch + PR. After a
+  squash-merge, local `main` diverges; this session used `git reset --hard origin/main` on a **clean**
+  tree and `report-worker/wrangler.toml` survived (checked after) — but the header's warning stands, prefer
+  `git pull --ff-only`.
+- A mid-flight format change to running planner agents works via `SendMessage`, but agents that finish
+  before the message lands need a second round-trip; budget for it.
+
+---
+
+## 2026-08-22 — **Repo moved to the `ventouxlabs` org. Play submission in progress.**
 
 ### The repo moved — URLs below this section are pre-transfer
 
