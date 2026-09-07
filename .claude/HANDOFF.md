@@ -34,14 +34,43 @@ Pattern across all eight: line citations were accurate, the defects were **contr
 bypassed, a guard cleared before the fault it watches, a key missing a dimension, a private symbol
 assumed reachable from a JVM test. Read the plan's mechanism, not its line numbers.
 
-**Build order (settled, supersedes the one below):** #20 B1-A → **all of #18** → #09 PR-A (auth /
-refresh / log hygiene) → #09 PR-B (selector) → #22 → #17 → #19 → #21 → #23 never. Reasons: #09 moves
-nothing now but edits `authorized()`/`recordRequest` after #18 T2; #17 edits the exact response objects
-#20 B1-A touches (`RelaisHttpServer.kt:1300/1349/1356/1644/1747`); #19 and #20 share the
-`RelaisEngine.kt:663-706` seam and `resetIncrementsForTest` — #19 rebases. Each plan's `Cross-plan`
-section names its shared hunks.
+### Implementation order — one PR per step, in this sequence
 
-**Decisions still JD's (new, in addition to the older list below):**
+Rules that apply to every step: (1) before cutting the branch, run a fresh `critic` on the *revised* plan
+and `/codex review` on it — 0/5 overlap between the two last time ([[relais-dual-review-disjoint]]);
+(2) `/codex review` the diff before merge, and re-run it after every fix commit; (3) anything that
+touches the engine, the HTTP gate, TLS, or the dashboard gets a **smoke-launch on hardware** before
+merge — every test layer here has been green on a broken build twice ([[relais-isolation-testing-blindspot]]).
+Live node = Pixel 9 `comet`; destructive/G5 work = spare Pixel 10 `rango`. Do not run Gradle unless the
+step says so.
+
+| # | PR | Plan tasks | Needs decided first | Hardware | Unblocks / why here |
+|---|---|---|---|---|---|
+| 0 | `docs: reconcile G5/E4B claim; file bugs 1–6 as issues` | none (bug 5 docs fix: `SPIKE-FINDINGS.md:32-33`, CLAUDE.md) | — | — | Every later PR cites the settled facts; bugs 1/2/4 get closed by steps 3/2/7, so the issues need to exist |
+| 1 | `feat(metrics): TTFT + decode-start latency` — **#20 B0 + B1-A** | B0 (static gate, needs `:app:assembleFullOpenDebug` once to grep the AAR), B1-A1–A4 | — | rango: B1-A4 measures the `convStartNs`→`sendStartNs` gap and writes it to `docs/litertlm-native-api.md` | Smallest diff, touches the `RelaisEngine.kt:663-706` seam and the response objects that #17 and #19 both edit — landing first means they rebase onto one stable shape |
+| 2a | `fix(security): extract HTTP gate` — **#18 T2 only** | T2 (`RelaisHttpGate.decide` + `RelaisHttpGateTest`, SECURITY.md Δ7 wording) | **Q2** exempt-route rate-limit budget; accept unmetered failed-auth or file follow-up | comet smoke: `/health`, a 401, a 429 | Closes bug 2. Ships alone because #09 and every later HTTP change assume the new `authorized()` shape |
+| 2b | `feat(tls): per-node CA + SAN leaf + QR trust` — **#18 rest** | T1, T3–T12 | **Q5** NameConstraints, **Q8** RFC1918 SAN opt-out | rango: `CertTrustProbe` (conscrypt accepts EC-CA-signed RSA leaf — plan is gated on it), boot-before-DHCP re-mint, then a **release-build inference check** (BouncyCastle may need R8 keep rules — [[relais-r8-minification-ci-blindspot]]) | 43 files, the biggest step. Must precede #09 because #09 edits `authorized()`/`recordRequest` on top of T2 and #18 mirrors `handleDashboard` lines #09 no longer moves |
+| 3 | `feat(dashboard): Basic auth, auto-refresh, log hygiene` — **#09 PR-A** | tasks 2–6 | — | comet browser check: first address-bar visit (`Sec-Fetch-Site: none`) allowed, meta-refresh reload allowed, cross-site POST 403 | Closes bug 1 (`/experiments` 401). Gate-wide `Sec-Fetch-Site` guard depends on 2a's `AuthScheme?` |
+| 4 | `feat(dashboard): model selector` — **#09 PR-B** | tasks 7–10 | amend `docs/dashboard-copy.md:95` (hot-swap, not restart) and §1.4 L93 (lexicographic order — catalog order is a blocking fetch) | rango: select a known-incompatible model → refused; double-submit during swap → second is a no-op *before* persist; swap smoke | Touches the swap path — fold **bug 6** (`RelaisDiscovery.updateModel` re-register after swap) in here, it is the same call site |
+| 5 | `feat(engine): idle-unload gaps` — **#22** | tasks 1–3, 5–8 (4 is cut) | **stepper ladder** (1/5/15/30/60 vs floor→5); **audio transcriptions** bounded-hold or 503 (needs an on-device number — measure it in this step's probe first); whether **gap 6** gets its own plan | rango: `IdleUnloadProbe` incl. forced reload failure → `/health` reads ERROR not IDLE | Rebases on 3/4 (`assembleDashboardStatus`) and 2a/2b (`handleHealth`). Adds `NodeState.IDLE` that #23 keys on |
+| 6 | `feat(api): Ollama-compatible /api/*` — **#17** | tasks 1–12 | **Q6** single-object framing on `format`+`stream:false`; **bug 3** `/v1/models` provisioned-only (affects `/api/tags` parity) | desktop: real `ollama serve` for Task 10's four wire-field checks (`stream` default is *undocumented* — prove it empirically first); comet: `OllamaCompatProbe`, thermal 503 through the Ollama envelope | Rebases on 1 (response objects) and 3 (sole owner of `RequestContext` widening). Largest test count (30) |
+| 7 | `feat(metrics): battery/power/energy` — **#19** | A1–A11 | — | **on battery, unplugged**: A7 perfetto cross-check gates A11's README figure; plugged-in nodes must show `_valid=0` and no per-1k gauge | Closes bug 4. Rebases on 1 (`:706` seam, `resetIncrementsForTest`) and 5 (metrics adjacency). Last engine-touching step |
+| 8 | `docs: Home Assistant integration page` — **#21** | tasks 1–6 | bug 3 answer (page documents what `/v1/models` returns) | a HA Container/Supervised instance; `/v1/models` timed **cold** and once **offline** | Docs-only after 6 lands (Ollama section says "auth-blocked, proxy required"). Can slot anywhere after 6 |
+| — | **#23** | Task 1 LiteLLM-proxy evaluation *only*, if ever | — | — | DO NOT BUILD. Re-verify its 503 taxonomy and `ready`/IDLE contract against whatever 5 shipped before touching it |
+
+Parallelism: 0 and 1 can run together; 2a and 1 can run together; everything from 2b on is serial
+because each step rebases on the previous one's hunks. Steps 6 and 7 are independent of each other
+*after* 5 — if two people are working, split there.
+
+Decisions by the step that needs them: **Q2 → 2a · Q5/Q8 → 2b · copy amendments → 4 · stepper /
+audio / gap 6 → 5 · Q6 + bug 3 → 6**. Nothing is needed before step 1 starts.
+
+Why this sequence, in one line each: #09 moves nothing now but edits `authorized()`/`recordRequest`
+after #18 T2; #17 edits the exact response objects #20 B1-A touches
+(`RelaisHttpServer.kt:1300/1349/1356/1644/1747`); #19 and #20 share the `RelaisEngine.kt:663-706` seam
+and `resetIncrementsForTest` — #19 rebases. Each plan's `Cross-plan` section names its shared hunks.
+
+**Decisions still JD's (new, in addition to the older list below — mapped to steps in the table above):**
 - #18 Q5 NameConstraints keep/drop · Q8 opt-out of RFC1918 addresses in the SAN · Q2 the exempt-route
   rate-limit budget as a number, and whether unmetered failed-auth (401 precedes the limiter, Decision 10)
   is accepted or gets a follow-up issue.
