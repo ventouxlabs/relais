@@ -570,8 +570,8 @@ object RelaisMetrics {
   }
 
   /**
-   * Coarse quantile from any bucketed histogram (HUD only) — the generic form of [quantile], which
-   * is hardwired to the latency series. Caller holds the lock guarding [counts]/[count].
+   * Coarse quantile from a bucketed histogram (HUD only). Caller holds the lock guarding
+   * [counts]/[count].
    */
   private fun bucketQuantile(q: Double, count: Long, counts: LongArray, bounds: DoubleArray): Double {
     if (count == 0L) return 0.0
@@ -584,17 +584,9 @@ object RelaisMetrics {
     return bounds.last()
   }
 
-  /** Coarse quantile from the cumulative histogram (HUD only). Caller holds [histLock]. */
-  private fun quantile(q: Double): Double {
-    if (latencyCount == 0L) return 0.0
-    val target = q * latencyCount
-    var cumulative = 0L
-    for (i in bucketBoundsSec.indices) {
-      cumulative += bucketCounts[i]
-      if (cumulative >= target) return bucketBoundsSec[i]
-    }
-    return bucketBoundsSec.last()
-  }
+  /** Coarse quantile from the latency histogram (HUD only). Caller holds [histLock]. */
+  private fun quantile(q: Double): Double =
+    bucketQuantile(q, latencyCount, bucketCounts, bucketBoundsSec)
 }
 
 /** Lets [RelaisMetrics] read the rate-limiter's tracked-IP count without a back-reference. */
