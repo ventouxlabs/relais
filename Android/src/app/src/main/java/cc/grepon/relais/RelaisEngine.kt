@@ -181,17 +181,27 @@ data class RelaisResult(
    */
   val finishReason: String = RelaisFinishReason.STOP,
   /**
-   * Seconds from conversation creation to the first VISIBLE token — the user-visible wait for the
-   * node to say anything, with queue wait and the thermal cool-down excluded (both happen before
-   * the conversation is created). Null, never 0.0, on every path that runs no per-token callback:
-   * the blocking tool lane ([generateWithToolsLocked]) and AICore, plus a cancel that landed before
-   * the first visible token. A zero here would be a fabricated measurement.
+   * Seconds from conversation creation to the first visible token the CLIENT COULD OBSERVE — the
+   * user-visible wait for the node to say anything, with queue wait and the thermal cool-down
+   * excluded (both happen before the conversation is created).
+   *
+   * Null, never 0.0 — a zero would be a fabricated measurement:
+   *  - on paths with no per-token callback at all: the blocking tool lane
+   *    ([generateWithToolsLocked]) and AICore;
+   *  - when no visible token was decoded (e.g. a cancel during the thinking phase);
+   *  - when streaming and the first visible token never reached the consumer — a cooperative
+   *    cancel that returned before the write, or a broken pipe that threw during it.
+   *
+   * Note this is NOT simply "a visible token was decoded": decoding also starts the throughput
+   * window, which deliberately counts tokens the client may never receive. See [RelaisTtftTracker]
+   * for why the two differ, and why the non-streaming path counts the reply-buffer append as
+   * delivery.
    */
   val timeToFirstTokenSec: Double? = null,
   /**
    * Same endpoint as [timeToFirstTokenSec] but measured from `sendMessageAsync`, so it excludes
    * conversation creation. The difference between the two IS the system-prompt/history prefill.
-   * Null on the same paths and for the same reason.
+   * Null under exactly the same conditions, so the two series stay comparable.
    */
   val decodeStartLatencySec: Double? = null,
 )
@@ -714,6 +724,11 @@ object RelaisEngine {
           var tokens = 0
           var firstTokenNs = 0L
           var lastTokenNs = 0L
+          // TTFT is tracked SEPARATELY from firstTokenNs, which is the throughput window's start
+          // and advances on every decoded visible token — including ones the two cooperative-cancel
+          // returns below stop from ever reaching a streaming client. Only tokens the client can
+          // observe count as a TTFT; see [RelaisTtftTracker].
+          val ttft = RelaisTtftTracker(streaming = onToken != null)
           // Running cancel bookkeeping (issue #22). `canceled` stops streaming; `truncated` records a
           // device-protective thermal cut (-> finish_reason="length") and is set ONLY via a THERMAL
           // cancel, never a broken-pipe abort (client gone -> no reader -> stays "stop"). Mutated only
@@ -770,6 +785,9 @@ object RelaisEngine {
                 lastTokenNs = now
                 tokens++
                 sb.append(delta)
+                // Non-streaming: the append above IS delivery — the token comes back in the
+                // response body even if a cancel returns immediately below. Inert when streaming.
+                ttft.onVisibleTokenDecoded(now)
                 if (cancelState.get().canceled) return
                 // Cooperative cancel: thermal-truncate (device-protective) or client disconnect
                 // (onToken throws on a broken pipe). It stops streaming to the client AND — via
@@ -784,6 +802,8 @@ object RelaisEngine {
                 }
                 try {
                   onToken?.invoke(delta)
+                  // Streaming: the delta is on the wire only once invoke returns without throwing.
+                  ttft.onVisibleTokenDelivered(now)
                 } catch (t: Throwable) {
                   cancelState.updateAndGet { RelaisFinishReason.applyCancel(it, DecodeCancelCause.BROKEN_PIPE) }
                   requestNativeStop()
@@ -811,11 +831,11 @@ object RelaisEngine {
           RelaisMetrics.recordThroughput(tokens, tokS, backend.name)
           RelaisMetrics.recordCompletionTokens(tokens) // Feature #10: visible-token distribution
           ThermalGovernor.onDecodeThroughput(tokS)
-          // Null (not 0.0) when no visible token was ever decoded — e.g. a cancel that landed
-          // during the thinking phase. Nothing is recorded in that case.
-          val ttftSec = if (firstTokenNs > 0L) (firstTokenNs - convStartNs) / 1e9 else null
-          val decodeStartSec =
-            if (firstTokenNs > 0L && sendStartNs > 0L) (firstTokenNs - sendStartNs) / 1e9 else null
+          // Null (not 0.0) when no visible token ever reached the client — a cancel during the
+          // thinking phase, or one that returned before the first delta made it to the socket.
+          // Nothing is recorded in that case.
+          val ttftSec = ttft.timeToFirstTokenSec(convStartNs)
+          val decodeStartSec = ttft.decodeStartLatencySec(sendStartNs)
           ttftSec?.let { RelaisMetrics.recordTimeToFirstToken(it) }
           decodeStartSec?.let { RelaisMetrics.recordDecodeStartLatency(it) }
           RelaisResult(
