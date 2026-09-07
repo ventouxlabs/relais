@@ -180,6 +180,20 @@ data class RelaisResult(
    * per-token truncation seam; the HTTP layer derives `"tool_calls"` from [toolCalls] when present.
    */
   val finishReason: String = RelaisFinishReason.STOP,
+  /**
+   * Seconds from conversation creation to the first VISIBLE token — the user-visible wait for the
+   * node to say anything, with queue wait and the thermal cool-down excluded (both happen before
+   * the conversation is created). Null, never 0.0, on every path that runs no per-token callback:
+   * the blocking tool lane ([generateWithToolsLocked]) and AICore, plus a cancel that landed before
+   * the first visible token. A zero here would be a fabricated measurement.
+   */
+  val timeToFirstTokenSec: Double? = null,
+  /**
+   * Same endpoint as [timeToFirstTokenSec] but measured from `sendMessageAsync`, so it excludes
+   * conversation creation. The difference between the two IS the system-prompt/history prefill.
+   * Null on the same paths and for the same reason.
+   */
+  val decodeStartLatencySec: Double? = null,
 )
 
 /**
@@ -660,6 +674,13 @@ object RelaisEngine {
               )
             else -> ConversationConfig(initialMessages = initialMessages, samplerConfig = request.samplerConfig())
           }
+        // TTFT baseline. Taken here, not at sendMessageAsync below, because the comment above says
+        // the system prompt + history are prefilled by createConversation — so a clock started at
+        // the send would exclude the dominant term. sendStartNs below measures the other end; the
+        // gap between the two series is the prefill, which is how that claim gets tested rather
+        // than assumed. Deliberately NOT reqStartNs (:585): that is taken before the engine lock
+        // and includes queue wait + the thermal cool-down above.
+        val convStartNs = System.nanoTime()
         val conversation = e.createConversation(conversationConfig)
         // True native mid-decode stop (issue #165, verified in #125): once a cooperative cancel is
         // decided in the callback, halt the native decode via `conversation.cancelProcess()` so the
@@ -672,6 +693,9 @@ object RelaisEngine {
         // here (not inside the try body) so the finally can join it.
         val cancelRequested = AtomicBoolean(false)
         val stopThread = AtomicReference<Thread?>(null)
+        // Declared out here for the same reason as stopThread: assigned inside the try body, read
+        // where the result is built.
+        var sendStartNs = 0L
         fun requestNativeStop() {
           if (cancelRequested.compareAndSet(false, true)) {
             stopThread.set(
@@ -703,6 +727,7 @@ object RelaisEngine {
           // content through; the default (off) passes emptyMap() — byte-for-byte the prior behavior.
           val extraContext =
             if (request.enableThinking) mapOf("enable_thinking" to "true") else emptyMap()
+          sendStartNs = System.nanoTime()
           conversation.sendMessageAsync(
             Contents.of(contents),
             object : MessageCallback {
@@ -786,6 +811,13 @@ object RelaisEngine {
           RelaisMetrics.recordThroughput(tokens, tokS, backend.name)
           RelaisMetrics.recordCompletionTokens(tokens) // Feature #10: visible-token distribution
           ThermalGovernor.onDecodeThroughput(tokS)
+          // Null (not 0.0) when no visible token was ever decoded — e.g. a cancel that landed
+          // during the thinking phase. Nothing is recorded in that case.
+          val ttftSec = if (firstTokenNs > 0L) (firstTokenNs - convStartNs) / 1e9 else null
+          val decodeStartSec =
+            if (firstTokenNs > 0L && sendStartNs > 0L) (firstTokenNs - sendStartNs) / 1e9 else null
+          ttftSec?.let { RelaisMetrics.recordTimeToFirstToken(it) }
+          decodeStartSec?.let { RelaisMetrics.recordDecodeStartLatency(it) }
           RelaisResult(
             text = sb.toString(),
             backend = backend,
@@ -793,6 +825,8 @@ object RelaisEngine {
             completionTokens = tokens,
             reasoning = reasoningSb.toString().takeIf { it.isNotEmpty() },
             finishReason = RelaisFinishReason.forCompletion(cancelState.get().truncated),
+            timeToFirstTokenSec = ttftSec,
+            decodeStartLatencySec = decodeStartSec,
           )
         } finally {
           // Join the cancel thread (if any) before closing so cancelProcess() and close() never run
