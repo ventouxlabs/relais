@@ -114,6 +114,32 @@ Per-endpoint p95 lets you alert on one route degrading without the other masking
     description: "p95 inference latency for {{ $labels.endpoint }} has been > 60s for 10m."
 ```
 
+## Time to first token — deliberately NO alert yet
+
+`relais_time_to_first_token_seconds` and `relais_decode_start_latency_seconds` ship with a dashboard
+panel and no alert **on purpose**. Every rule in this file has a threshold grounded in a measured
+number; TTFT has none yet — it has never been measured on hardware (the open TODO is
+`docs/litertlm-native-api.md` §8.2). A "TTFT p95 > N seconds" rule written today would be picking N
+out of the air, and an alert that pages on a fabricated number is worse than no alert: it trains
+whoever carries the pager to ignore it.
+
+**What would ground one:** run the §8.2 measurement on a real node, per SoC and per model, at a
+realistic prompt size. TTFT scales with prompt length, so the threshold has to be stated against a
+prompt size or it will page on every long-context request. Once there is a baseline, the natural
+rule is a regression against it rather than an absolute:
+
+```yaml
+# DO NOT ENABLE until <BASELINE> is a measured number, not a guess.
+# - alert: RelaisTtftRegression
+#   expr: histogram_quantile(0.95, sum by (le) (rate(relais_time_to_first_token_seconds_bucket[10m]))) > <BASELINE * 2>
+#   for: 15m
+```
+
+Note also that thermal throttling already surfaces via `RelaisThermalSevere` and
+`RelaisThroughputFloor`, and queue wait via `RelaisEndpointLatencyP95` — the most likely causes of a
+TTFT spike are therefore already covered by grounded rules. A TTFT alert would add resolution, not
+coverage.
+
 ## Node down / restart loop
 
 ```yaml

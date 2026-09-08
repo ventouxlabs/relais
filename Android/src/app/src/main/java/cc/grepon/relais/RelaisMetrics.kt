@@ -104,6 +104,24 @@ object RelaisMetrics {
   private var completionTokenSum = 0L
   private val tokenHistLock = Any()
 
+  // Time-to-first-token histograms (feature-20). Two series over the SAME bucket bounds, sharing
+  // one endpoint (the first visible token) but differing in where the clock starts:
+  //   relais_time_to_first_token_seconds  — from conversation creation (the user-visible wait)
+  //   relais_decode_start_latency_seconds — from sendMessageAsync (decode only)
+  // Their difference is the system-prompt/history prefill. Histograms, not the last-value gauge
+  // shape relais_decode_tokens_per_second uses: TTFT's tail is the interesting part. Label-free
+  // (security M6). Independent counts + locks so neither series can skew the other.
+  private val ttftBucketBoundsSec = doubleArrayOf(0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0)
+  private val ttftBucketCounts = LongArray(ttftBucketBoundsSec.size + 1) // last == +Inf
+  private var ttftCount = 0L
+  private var ttftSum = 0.0
+  private val ttftHistLock = Any()
+
+  private val decodeStartBucketCounts = LongArray(ttftBucketBoundsSec.size + 1) // last == +Inf
+  private var decodeStartCount = 0L
+  private var decodeStartSum = 0.0
+  private val decodeStartHistLock = Any()
+
   // Thermal-event counter (Feature #10). The existing `relais_thermal_status` gauge only shows the
   // status at scrape time; a transient SEVERE between two scrapes is invisible. This counter,
   // incremented on every status change by the ThermalGovernor listener, captures those transients.
@@ -222,6 +240,33 @@ object RelaisMetrics {
       tokenBucketCounts[idx]++
     }
   }
+
+  /**
+   * Records seconds from conversation creation to the first visible token (feature-20). Callers
+   * MUST skip this when they have no measurement — a 0.0 sample is indistinguishable from a real
+   * sub-250 ms TTFT once it is in a bucket.
+   */
+  fun recordTimeToFirstToken(sec: Double) {
+    if (sec < 0.0) return
+    synchronized(ttftHistLock) {
+      ttftCount++
+      ttftSum += sec
+      ttftBucketCounts[ttftBucketIndex(sec)]++
+    }
+  }
+
+  /** Records seconds from `sendMessageAsync` to the first visible token (feature-20). */
+  fun recordDecodeStartLatency(sec: Double) {
+    if (sec < 0.0) return
+    synchronized(decodeStartHistLock) {
+      decodeStartCount++
+      decodeStartSum += sec
+      decodeStartBucketCounts[ttftBucketIndex(sec)]++
+    }
+  }
+
+  private fun ttftBucketIndex(sec: Double): Int =
+    ttftBucketBoundsSec.indexOfFirst { sec <= it }.takeIf { it >= 0 } ?: ttftBucketBoundsSec.size
 
   /**
    * Increments the thermal-event counter for a status change (Feature #10). Call from the
@@ -378,6 +423,34 @@ object RelaisMetrics {
       line("relais_completion_tokens_count $completionTokenCount")
     }
 
+    line("# HELP relais_time_to_first_token_seconds Seconds from conversation creation to the first visible token. Excludes queue wait and thermal cool-down. This is the user-visible wait.")
+    line("# TYPE relais_time_to_first_token_seconds histogram")
+    synchronized(ttftHistLock) {
+      var cumulative = 0L
+      for (i in ttftBucketBoundsSec.indices) {
+        cumulative += ttftBucketCounts[i]
+        line("relais_time_to_first_token_seconds_bucket{le=\"${ttftBucketBoundsSec[i]}\"} $cumulative")
+      }
+      cumulative += ttftBucketCounts[ttftBucketBoundsSec.size]
+      line("relais_time_to_first_token_seconds_bucket{le=\"+Inf\"} $cumulative")
+      line("relais_time_to_first_token_seconds_sum $ttftSum")
+      line("relais_time_to_first_token_seconds_count $ttftCount")
+    }
+
+    line("# HELP relais_decode_start_latency_seconds Seconds from sendMessageAsync to the first visible token. Subtract from relais_time_to_first_token_seconds to get prompt/history prefill time.")
+    line("# TYPE relais_decode_start_latency_seconds histogram")
+    synchronized(decodeStartHistLock) {
+      var cumulative = 0L
+      for (i in ttftBucketBoundsSec.indices) {
+        cumulative += decodeStartBucketCounts[i]
+        line("relais_decode_start_latency_seconds_bucket{le=\"${ttftBucketBoundsSec[i]}\"} $cumulative")
+      }
+      cumulative += decodeStartBucketCounts[ttftBucketBoundsSec.size]
+      line("relais_decode_start_latency_seconds_bucket{le=\"+Inf\"} $cumulative")
+      line("relais_decode_start_latency_seconds_sum $decodeStartSum")
+      line("relais_decode_start_latency_seconds_count $decodeStartCount")
+    }
+
     line("# HELP relais_thermal_events_total Thermal status-change events by level (catches transients the gauge misses).")
     line("# TYPE relais_thermal_events_total counter")
     for ((level, v) in thermalEventCounts) {
@@ -442,6 +515,8 @@ object RelaisMetrics {
     val now = System.currentTimeMillis()
     val (p50, p95) =
       synchronized(histLock) { quantile(0.50) to quantile(0.95) }
+    val ttftP50 =
+      synchronized(ttftHistLock) { bucketQuantile(0.50, ttftCount, ttftBucketCounts, ttftBucketBoundsSec) }
     return JSONObject()
       .put("uptime_seconds", (now - startMs) / 1000.0)
       .put("model_id", RelaisConfig.modelId(context))
@@ -455,6 +530,7 @@ object RelaisMetrics {
       .put("webhook_failed_total", webhookFailedTotal.get())
       .put("decode_tokens_per_second", lastDecodeTokS)
       .put("inference_p50_seconds", p50)
+      .put("ttft_p50_seconds", ttftP50)
       .put("inference_p95_seconds", p95)
       .put("thermal_status", ThermalGovernor.statusValue)
       .put("thermal_headroom", ThermalGovernor.headroomOrSentinel())
@@ -480,20 +556,37 @@ object RelaisMetrics {
       completionTokenCount = 0L
       completionTokenSum = 0L
     }
+    synchronized(ttftHistLock) {
+      ttftBucketCounts.fill(0L)
+      ttftCount = 0L
+      ttftSum = 0.0
+    }
+    synchronized(decodeStartHistLock) {
+      decodeStartBucketCounts.fill(0L)
+      decodeStartCount = 0L
+      decodeStartSum = 0.0
+    }
     thermalEventCounts.clear()
   }
 
-  /** Coarse quantile from the cumulative histogram (HUD only). Caller holds [histLock]. */
-  private fun quantile(q: Double): Double {
-    if (latencyCount == 0L) return 0.0
-    val target = q * latencyCount
+  /**
+   * Coarse quantile from a bucketed histogram (HUD only). Caller holds the lock guarding
+   * [counts]/[count].
+   */
+  private fun bucketQuantile(q: Double, count: Long, counts: LongArray, bounds: DoubleArray): Double {
+    if (count == 0L) return 0.0
+    val target = q * count
     var cumulative = 0L
-    for (i in bucketBoundsSec.indices) {
-      cumulative += bucketCounts[i]
-      if (cumulative >= target) return bucketBoundsSec[i]
+    for (i in bounds.indices) {
+      cumulative += counts[i]
+      if (cumulative >= target) return bounds[i]
     }
-    return bucketBoundsSec.last()
+    return bounds.last()
   }
+
+  /** Coarse quantile from the latency histogram (HUD only). Caller holds [histLock]. */
+  private fun quantile(q: Double): Double =
+    bucketQuantile(q, latencyCount, bucketCounts, bucketBoundsSec)
 }
 
 /** Lets [RelaisMetrics] read the rate-limiter's tracked-IP count without a back-reference. */

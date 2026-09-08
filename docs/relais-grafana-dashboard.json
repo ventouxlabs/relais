@@ -259,6 +259,64 @@
           "legendFormat": "restarts"
         }
       ]
+    },
+    {
+      "id": 11,
+      "title": "Time to first token (p50 / p95 / p99)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Seconds from conversation creation to the first visible token the client could observe. Excludes queue wait and thermal cool-down, so this is model time, not request latency — compare against the global inference-latency panel to see queueing. Counts only tokens that actually reached the client; paths with no per-token callback (blocking tool lane, AICore) contribute no sample rather than a zero.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 39 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(relais_time_to_first_token_seconds_bucket{instance=\"$instance\"}[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(relais_time_to_first_token_seconds_bucket{instance=\"$instance\"}[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(relais_time_to_first_token_seconds_bucket{instance=\"$instance\"}[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Prefill vs decode start (means)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Why there are two TTFT series: they share an endpoint (the first visible token) and differ only in where the clock starts, so their DIFFERENCE is the system-prompt/history prefill. Means, not quantiles — a difference of two quantiles is not the quantile of the difference, so subtracting p95s would be meaningless. If 'prefill (difference)' is large, prefill happens at conversation creation and dominates the wait; if it sits near zero, prefill is lazy and the two series agree.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 39 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(relais_time_to_first_token_seconds_sum{instance=\"$instance\"}[5m]) / clamp_min(rate(relais_time_to_first_token_seconds_count{instance=\"$instance\"}[5m]), 0.001)",
+          "legendFormat": "mean TTFT (from conversation creation)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(relais_decode_start_latency_seconds_sum{instance=\"$instance\"}[5m]) / clamp_min(rate(relais_decode_start_latency_seconds_count{instance=\"$instance\"}[5m]), 0.001)",
+          "legendFormat": "mean decode start (from sendMessageAsync)"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(relais_time_to_first_token_seconds_sum{instance=\"$instance\"}[5m]) / clamp_min(rate(relais_time_to_first_token_seconds_count{instance=\"$instance\"}[5m]), 0.001) - rate(relais_decode_start_latency_seconds_sum{instance=\"$instance\"}[5m]) / clamp_min(rate(relais_decode_start_latency_seconds_count{instance=\"$instance\"}[5m]), 0.001)",
+          "legendFormat": "prefill (difference)"
+        }
+      ]
     }
   ]
 }

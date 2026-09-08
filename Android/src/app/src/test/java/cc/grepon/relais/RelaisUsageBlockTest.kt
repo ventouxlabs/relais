@@ -173,4 +173,84 @@ class RelaisUsageBlockTest {
     // Tolerant of a malformed stream_options (not an object) — no throw, defaults false.
     assertFalse(streamIncludeUsage(JSONObject("""{"stream_options":"nope"}""")))
   }
+
+  // ---------------------------------------------------------------------------
+  // Tests 7-11 — attachRelaisExtras (feature-20)
+  //
+  // This is the seam every live emission site routes through. It exists so the TTFT field's
+  // placement and its omit-on-null rule are pinned by a JVM test instead of by four inline
+  // .put() chains inside private socket handlers, which no device-free test can reach.
+  // ---------------------------------------------------------------------------
+
+  private fun resultWithTtft(sec: Double?) =
+    RelaisResult(
+      text = "hi",
+      backend = RelaisBackend.GPU_LITERTLM,
+      decodeTokensPerSec = 5.0,
+      completionTokens = 2,
+      timeToFirstTokenSec = sec,
+    )
+
+  @Test
+  fun `attachRelaisExtras puts x_relais_ttft_ms at the top level when a TTFT was measured`() {
+    val obj = JSONObject().put("usage", buildUsageObject("hello world", 2))
+
+    attachRelaisExtras(obj, resultWithTtft(2.481))
+
+    // Placement is asserted BEFORE presence so that nesting the field inside `usage` fails with a
+    // message naming that defect, rather than tripping the presence assertion first.
+    assertFalse(
+      "x_relais_ttft_ms must NOT be nested inside the usage sub-object",
+      obj.getJSONObject("usage").has("x_relais_ttft_ms"),
+    )
+    assertTrue("x_relais_ttft_ms must be present when a TTFT exists", obj.has("x_relais_ttft_ms"))
+    assertEquals(
+      "seconds must be converted to whole milliseconds",
+      2481,
+      obj.getInt("x_relais_ttft_ms"),
+    )
+    assertEquals(
+      "usage must still be exactly the three standard OpenAI keys",
+      3,
+      obj.getJSONObject("usage").length(),
+    )
+  }
+
+  @Test
+  fun `attachRelaisExtras omits x_relais_ttft_ms entirely when there is no measurement`() {
+    // The blocking tool lane runs no per-token callback, so timeToFirstTokenSec is structurally
+    // null there. A strict client must see no key at all — never 0, never JSON null.
+    val obj = JSONObject().put("usage", buildUsageObject("hello world", 0))
+
+    attachRelaisExtras(obj, resultWithTtft(null))
+
+    assertFalse(
+      "x_relais_ttft_ms must be ABSENT, not 0 and not null, when unmeasured",
+      obj.has("x_relais_ttft_ms"),
+    )
+    assertTrue("the usage note must still be attached", obj.has("x_relais_usage_note"))
+  }
+
+  @Test
+  fun `attachRelaisExtras always attaches the usage note, measured or not`() {
+    val withTtft = attachRelaisExtras(JSONObject(), resultWithTtft(1.0))
+    val withoutTtft = attachRelaisExtras(JSONObject(), resultWithTtft(null))
+
+    assertEquals("prompt_tokens_estimated", withTtft.getString("x_relais_usage_note"))
+    assertEquals("prompt_tokens_estimated", withoutTtft.getString("x_relais_usage_note"))
+  }
+
+  @Test
+  fun `attachRelaisExtras returns the same object it was given, for chaining`() {
+    val obj = JSONObject().put("id", "chatcmpl-1")
+    assertTrue("must return the same instance so call sites can chain", attachRelaisExtras(obj, resultWithTtft(0.5)) === obj)
+    assertEquals("pre-existing fields must survive", "chatcmpl-1", obj.getString("id"))
+  }
+
+  @Test
+  fun `attachRelaisExtras truncates sub-millisecond precision rather than rounding up to a lie`() {
+    val obj = attachRelaisExtras(JSONObject(), resultWithTtft(0.0004))
+    assertEquals("400 microseconds reports as 0 ms, and the key is still present", 0, obj.getInt("x_relais_ttft_ms"))
+    assertTrue("a real sub-millisecond measurement is still a measurement", obj.has("x_relais_ttft_ms"))
+  }
 }

@@ -1297,7 +1297,7 @@ class RelaisHttpServer(
               .put("message", assistantMessage)
               .put("finish_reason", result.finishReason)))
           .put("usage", buildUsageObject(request.text, result.completionTokens))
-          .put("x_relais_usage_note", "prompt_tokens_estimated")
+      attachRelaisExtras(resp, result)
       RelaisMetrics.recordRequest("/v1/chat/completions", 200)
       respond(sock, 200, resp)
       // Session memory: persist the live user turn + assistant reply after the response is sent
@@ -1346,14 +1346,17 @@ class RelaisHttpServer(
             .put("finish_reason", result.finishReason)))
       // Backward-compat: usage stays on the finish chunk UNLESS the client opted into the spec form
       // (stream_options.include_usage), where usage is a SEPARATE empty-choices terminal chunk (#175).
-      if (!includeUsage) finalChunk.put("usage", usageObj).put("x_relais_usage_note", "prompt_tokens_estimated")
+      // These two branches are mutually exclusive, so the Relais extras (usage note + TTFT) land on
+      // exactly one terminal chunk per request. Never on a delta chunk: for the reasoning-then-
+      // visible case the TTFT is not final there.
+      if (!includeUsage) attachRelaisExtras(finalChunk.put("usage", usageObj), result)
       sse.send(finalChunk)
       if (includeUsage) {
         val usageChunk = JSONObject().put("id", id).put("object", "chat.completion.chunk")
           .put("created", created).put("model", model)
           .put("choices", JSONArray()) // empty choices per the OpenAI include_usage spec
           .put("usage", usageObj)
-          .put("x_relais_usage_note", "prompt_tokens_estimated")
+        attachRelaisExtras(usageChunk, result)
         sse.send(usageChunk)
       }
       sse.done()
@@ -1641,7 +1644,10 @@ class RelaisHttpServer(
               .put("message", message)
               .put("finish_reason", finishReason)))
           .put("usage", buildUsageObject(request.text, result.completionTokens))
-          .put("x_relais_usage_note", "prompt_tokens_estimated")
+      // Routed through the helper for uniformity even though this lane can never carry a TTFT:
+      // generateWithNodeTools -> RelaisEngine.generate with tools -> generateWithToolsLocked, which
+      // runs no per-token callback. The helper omits the field, which is the correct output here.
+      attachRelaisExtras(resp, result)
       RelaisMetrics.recordRequest("/v1/chat/completions", 200)
       respond(sock, 200, resp)
       return
@@ -1744,7 +1750,7 @@ class RelaisHttpServer(
           .put("model", model)
           .put("choices", JSONArray().put(choice))
           .put("usage", buildUsageObject(request.text, result.completionTokens))
-          .put("x_relais_usage_note", "prompt_tokens_estimated")
+        attachRelaisExtras(resp, result)
         RelaisMetrics.recordRequest("/v1/chat/completions", 200)
         respond(sock, 200, resp)
         return
@@ -2041,6 +2047,24 @@ internal fun buildUsageObject(promptText: String, completionTokens: Int): org.js
     .put("prompt_tokens", promptTokens)
     .put("completion_tokens", completionTokens)
     .put("total_tokens", promptTokens + completionTokens)
+}
+
+/**
+ * Attaches Relais's top-level extension fields to a completed response or terminal SSE chunk.
+ *
+ * Extras live at the TOP level of the enclosing object, never inside `usage` — see
+ * [buildUsageObject]'s KDoc for why (strict OpenAI-schema validators).
+ *
+ * `x_relais_ttft_ms` is OMITTED — not 0, not null — when [RelaisResult.timeToFirstTokenSec] is
+ * null. The blocking tool lane runs no per-token callback, so a TTFT genuinely does not exist
+ * there and a zero would be a fabricated measurement.
+ *
+ * Pure function (no Context, no socket, no Android types) — unit-testable on the JVM.
+ */
+internal fun attachRelaisExtras(obj: org.json.JSONObject, result: RelaisResult): org.json.JSONObject {
+  obj.put("x_relais_usage_note", "prompt_tokens_estimated")
+  result.timeToFirstTokenSec?.let { obj.put("x_relais_ttft_ms", (it * 1000).toInt()) }
+  return obj
 }
 
 /**

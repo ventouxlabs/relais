@@ -20,6 +20,52 @@ paths, and its acceptance gate could not measure its own effect. It is preserved
 appendix at the end of this document, with the findings that killed it, so the next person does not
 rediscover the design and then rediscover the leak. Do not implement from the appendix.
 
+## AS BUILT (2026-09-07, branch `feat/relais-ttft-metrics`) — read before the tasks below
+
+B0 and B1-A (A1, A2, A3a, A3b, A4) are **implemented**. The task text below is preserved as written,
+with in-place corrections where it was wrong. Five things diverged from the plan:
+
+1. **B0's verdict: still a dead end on 0.12.0 → B1-B is dead, B1-A shipped alone.** The dumped AAR
+   (`…/litertlm-android/0.12.0/2ad2e08…`, 683 lines) has **no** public `BenchmarkParams` or
+   `EngineSettings` and the **same 7-arg `EngineConfig`**. `getBenchmarkInfo()` and
+   `nativeConversationGetBenchmarkInfo(long)` exist but cannot be enabled. The KV-rewind grep found
+   **one hit and it is not a rewind** — `ExperimentalFlags.filterChannelContentFromKvCache: Boolean`;
+   there is no rewind/truncate/clone/checkpoint API, which confirms the deferred appendix's premise.
+   Recorded in `docs/litertlm-native-api.md` §8.1.
+2. **B1-A3a's mutation 1 is UNACHIEVABLE as written** — corrected in place at that task.
+3. **The plan missed that `quantile()` is hardwired to the latency series**, so `ttft_p50_seconds`
+   needed a generic sibling — see the note added to B1-A2.
+4. **A new file, `RelaisTtft.kt`, was needed** for a defect the plan did not anticipate — see the
+   codex-review entry below.
+5. **The prefill gap is still unmeasured** (needs hardware). Recorded as an explicit TODO with the
+   scrape command in `docs/litertlm-native-api.md` §8.2 rather than invented.
+
+### Post-implementation codex finding (P2, fixed) — TTFT counted tokens the client never saw
+
+`codex review` found that `firstTokenNs` is set at `RelaisEngine.kt:769`, **above** two
+cooperative-cancel early returns (`:773`, a cancel already decided during the reasoning phase;
+`:783`, a thermal `shouldCancel` firing on that very first visible token). On a **streaming**
+request both `return` before `onToken`, so the histogram took a sample for a request whose client
+received nothing — contradicting `timeToFirstTokenSec`'s own KDoc.
+
+The fix is **not** "gate on `onToken` having been invoked": `sb.append(delta)` at `:772` runs before
+both returns, so on a **non-streaming** request the token does come back in the response body and
+its TTFT is legitimate — and non-streaming does pass `shouldCancel` (e.g. `:1571`), so that path is
+genuinely reachable. The rule is **"could the client observe the first visible token"**, which means
+different things per path. `RelaisTtft.kt`'s `RelaisTtftTracker(streaming = onToken != null)` owns
+that decision: appending is delivery when not streaming; only an `onToken` call that returned
+without throwing is delivery when streaming.
+
+`firstTokenNs`/`lastTokenNs` are **untouched** — the throughput window still counts every decoded
+token, which is correct for tok/s and wrong for TTFT. That divergence is why there are now two
+clocks. Decisions taken deliberately, with the reasoning recorded in the tracker's KDoc:
+
+- **A broken pipe on token 1 → no TTFT.** An attempted-but-failed write is not delivery. (A pipe
+  that breaks on token 51 keeps the TTFT from token 1 — the client did observe a first token.)
+- **Thermally-truncated runs STAY in the histogram.** Truncation is a separate, later event;
+  excluding those samples would drop data from exactly the stressed periods where the TTFT
+  distribution is most diagnostically useful. Do not add an exclusion thinking it is an oversight.
+
 ## User Story
 
 - **As an** operator running agent workloads against a Relais node with a large system prompt,
@@ -511,6 +557,8 @@ class ToolCallingProbe {
 | `Android/src/app/src/main/java/cc/grepon/relais/RelaisHttpServer.kt` | **UPDATE** (1 new fn + 4 call sites, B1-A) | Extract `internal fun attachRelaisExtras` beside `buildUsageObject` (`:2038`); call it at the four **live** sites `:1300, :1349, :1356, :1747`. `:1644` is deliberately left carrying no TTFT (see Interaction Changes) |
 | `Android/src/app/src/test/java/cc/grepon/relais/RelaisUsageBlockTest.kt` | **UPDATE** (B1-A) | Tests for `attachRelaisExtras` — present-when-set, **omitted-when-null**, top-level placement, `usage` untouched |
 | `Android/src/app/src/test/java/cc/grepon/relais/RelaisTtftMetricsTest.kt` | **CREATE** (B1-A) | Histogram buckets/sum/count + reset seam |
+| `Android/src/app/src/main/java/cc/grepon/relais/RelaisTtft.kt` | **CREATE** (post-plan, codex P2) | `RelaisTtftTracker` — decides whether the client could observe the first visible token. New file rather than growth: `RelaisEngine.kt` is already over the 800-line target |
+| `Android/src/app/src/test/java/cc/grepon/relais/RelaisTtftTrackerTest.kt` | **CREATE** (post-plan, codex P2) | Pure JVM; streaming-undelivered vs non-streaming-append, first-wins, unset-baseline |
 | `docs/litertlm-native-api.md` | **UPDATE** (B1-A4, then again after B0) | **Fix line 31** (the stale "Opportunity" that contradicts §8); record B0's 0.12.0 verdict in §8; record the measured prefill-gap once B1-A ships |
 | `Android/src/app/src/androidTest/java/cc/grepon/relais/RelaisBackendBenchmarkTest.kt` | **UPDATE** (B1-B, conditional on B0) | Resident-engine `BenchmarkInfo` leg |
 | `docs/relais-grafana-dashboard.json`, `docs/RUNBOOK.md` | **UPDATE** (B1-A) | TTFT panel (next free row — see §Cross-plan coordination); one RUNBOOK paragraph on reading TTFT vs the prefill gap |
@@ -556,6 +604,12 @@ settable benchmark field on `Engine`, plus `Session`, `runPrefill`, `runDecode`,
 > on an exact transcript hash exists *only* because there is no way to roll a conversation back. A
 > hit here is worth an issue; a miss confirms the appendix's premise. **Record the result either way
 > in `docs/litertlm-native-api.md` §8** — that is the point of running it.
+
+> **RESULT (2026-09-07): outcome 1 — no benchmark hook in 0.12.0. B1-native is dead; B1-A shipped
+> alone.** The AAR was in no cache and not vendored, so the one authorized `assembleFullOpenDebug`
+> was genuinely required (the GOTCHA below was accurate). Full verdict, per-grep, with the resolved
+> AAR path: `docs/litertlm-native-api.md` §8.1. KV-rewind grep: one hit,
+> `ExperimentalFlags.filterChannelContentFromKvCache` — a content filter, **not** a rewind.
 
 **Three outcomes, three different B1s:**
 
@@ -682,7 +736,10 @@ are adding a second reader, not rescuing an unused value.
   # HELP relais_decode_start_latency_seconds Seconds from sendMessageAsync to the first visible token.
   # Subtract from relais_time_to_first_token_seconds to get prompt/history prefill time.
   ```
-- `ttft_p50_seconds` in `renderJson` beside `inference_p50_seconds`.
+- `ttft_p50_seconds` in `renderJson` beside `inference_p50_seconds`. **GAP THE PLAN MISSED:**
+  `quantile()` (`:487`) is hardwired to `latencyCount`/`bucketCounts`/`bucketBoundsSec`, so it cannot
+  compute this. A generic `bucketQuantile(q, count, counts, bounds)` was added and `quantile()` now
+  delegates to it — no behavior change, covered by the existing p50/p95 assertions.
 - **Extend `resetIncrementsForTest()` (`:471-484`)** to clear both.
 - Call both from `RelaisEngine.generate` next to `recordCompletionTokens` (`:787`), **each only when
   its own field is non-null**.
@@ -752,14 +809,24 @@ guard with `?.let` so the intent is legible.
 precisely so this is possible; memory `relais-prove-tests-red-first` records two shipped tests here
 that passed under the bug they claimed to pin.
 
-1. Delete the `attachRelaisExtras` call at `:1300` → a named test asserting the field's presence must
-   go **RED**.
+1. ~~Delete the `attachRelaisExtras` call at `:1300` → a named test asserting the field's presence
+   must go **RED**.~~ **THIS MUTATION IS UNACHIEVABLE — CORRECTED 2026-09-07.** It was run as
+   written and the suite stayed **GREEN**. The tests reach `attachRelaisExtras` directly (per
+   `RelaisUsageBlockTest.kt:28-29`: no socket, no Context) while `:1300` sits inside private
+   `handleOpenAi`, so **no device-free test can observe that call site** — the same structural limit
+   B1-A3b GOTCHA 2 states for the SSE branches. Do not try to force it, and do **not** satisfy it by
+   writing a test that assembles its own response object; that proves nothing about production.
+   **Use this instead:** delete the `result.timeToFirstTokenSec?.let { … }` line *inside the helper*
+   → the presence test goes RED with `x_relais_ttft_ms must be present when a TTFT exists`.
 2. Change the helper to emit `0` instead of omitting on `null` → the omitted-when-null test must go
-   **RED**.
+   **RED**. *(Verified: `x_relais_ttft_ms must be ABSENT, not 0 and not null, when unmeasured`.)*
 3. Move the `x_relais_ttft_ms` put *inside* the `usage` object → the top-level-placement test must go
-   **RED**.
+   **RED**. *(Verified — but assert placement BEFORE presence in the test, or this trips the presence
+   assertion first and the failure message names the wrong defect.)*
 
 If any of these stays green, the test is not pinning anything — fix the test, not the mutation.
+**What none of them can pin:** that the four live sites call the helper at all. That gap is real and
+is covered only by the curl checks in §Manual Validation.
 
 **VALIDATE** `cd Android/src && ./gradlew testFullOpenDebugUnitTest testFullPlaysafeDebugUnitTest testDegoogledOpenDebugUnitTest`
 
@@ -911,9 +978,18 @@ places — dropping it on one path means touching one of five, carefully.
 |---|---|---|
 | `RelaisUsageBlockTest.kt` (pure JVM, `attachRelaisExtras`) | field placement, presence-when-set, **omission-when-null**, `usage` untouched | that production actually calls the helper — **only the mutation check does** |
 | `RelaisTtftMetricsTest.kt` (Robolectric) | histogram bucketing, null-not-recorded, reset seam | anything about the HTTP bodies |
+| `RelaisTtftTrackerTest.kt` (pure JVM) | **which events count as delivery** — streaming-undelivered → null, non-streaming-append → value, first-wins, unset baseline → null | that `RelaisEngine`'s callback calls the tracker **at the right two points** |
 | curl, run once, pasted into the PR | branch exclusivity across the two SSE branches; end-to-end shape | nothing repeatable in CI |
 
 There is deliberately **no** JVM test claiming to cover the SSE branches. See B1-A3b GOTCHA 2.
+
+**Stated plainly, because it is a real hole and not a to-do:** `RelaisTtftTracker` is unit-tested and
+mutation-checked in both directions, but its **two call sites inside `RelaisEngine.generate`'s decode
+callback are not JVM-observable** — the callback needs a live litertlm `Engine`. A refactor that
+dropped or moved either call would **not** be caught by CI; it would silently restore the codex P2
+(a TTFT for a token the client never saw) or silently erase TTFT for the whole non-streaming path.
+The only check that catches it is the thermal-truncation curl in §Manual Validation. Do not close
+this by writing a JVM test that drives the tracker and calls it engine coverage.
 
 ### Unit Tests — `RelaisUsageBlockTest.kt` extensions (pure JVM, `attachRelaisExtras`)
 
@@ -997,6 +1073,26 @@ adb -s 57211FDCG0023C shell am instrument -w \
       by its queue wait (compare against `relais_inference_duration_seconds`)
 - [ ] **Tool-call request → `x_relais_ttft_ms` is absent from the response.** Confirm nobody has
       "helpfully" made it a `0`
+- [ ] **Thermal truncation during a STREAM → no TTFT sample.** This is the only check that covers
+      `RelaisTtftTracker`'s call sites (see §Testing Strategy). Scrape `_count` before and after a
+      streamed request that gets thermally truncated on its first visible token; the count must be
+      **unchanged**, and the finish chunk must carry no `x_relais_ttft_ms`:
+      ```bash
+      before=$(curl -ks -H "Authorization: Bearer <key>" https://<phone-ip>:8443/metrics \
+        | grep '^relais_time_to_first_token_seconds_count' | awk '{print $2}')
+      # drive the device hot enough that ThermalGovernor.shouldTruncate() fires (or temporarily
+      # force it true in a debug build), then:
+      curl -kN -H "Authorization: Bearer <key>" -H "Content-Type: application/json" \
+        -d '{"model":"gemma-4-e4b-it","stream":true,"messages":[{"role":"user","content":"write a long essay"}]}' \
+        https://<phone-ip>:8443/v1/chat/completions | grep -c x_relais_ttft_ms   # expect 0
+      after=$(curl -ks -H "Authorization: Bearer <key>" https://<phone-ip>:8443/metrics \
+        | grep '^relais_time_to_first_token_seconds_count' | awk '{print $2}')
+      echo "$before -> $after   # must be equal"
+      ```
+      **Counter-check the over-correction:** the same truncation on a **non-streaming** request MUST
+      still produce a sample (the token is in the response body) — `_count` increments and
+      `x_relais_ttft_ms` is present. If both cases report nothing, the non-streaming path has been
+      wrongly gated on `onToken`
 - [ ] **Read the prefill gap off the first real run:**
       `relais_time_to_first_token_seconds_sum / _count` minus
       `relais_decode_start_latency_seconds_sum / _count`. Compare against

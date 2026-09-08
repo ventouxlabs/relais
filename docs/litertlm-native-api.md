@@ -28,7 +28,7 @@ available," verify against the AAR before believing it. See [`CLAUDE.md`](../CLA
 | `Backend` | `Backend.CPU(numThreads?)`, `Backend.GPU()`, `Backend.NPU(nativeLibraryDir)` | NPU backend exists at the litertlm level (distinct from the AICore/Gemini-Nano NPU path in `RelaisAicore`). |
 | `Capabilities(modelPath)` | `hasSpeculativeDecodingSupport()` | Query a model file's capabilities without loading the full engine. |
 | `BenchmarkKt.benchmark(modelPath, backend, …): BenchmarkInfo` | — | One-shot benchmark. |
-| `BenchmarkInfo` | `initTimeInSecond`, `timeToFirstTokenInSecond`, `lastPrefillTokenCount`, `lastDecodeTokenCount`, `lastPrefillTokensPerSecond`, `lastDecodeTokensPerSecond` | Also reachable via `Conversation.getBenchmarkInfo()`. **Opportunity:** real prefill/decode tok/s + TTFT vs Relais's current wall-clock estimate. |
+| `BenchmarkInfo` | `initTimeInSecond`, `timeToFirstTokenInSecond`, `lastPrefillTokenCount`, `lastDecodeTokenCount`, `lastPrefillTokensPerSecond`, `lastDecodeTokensPerSecond` | Populated **only** by the `BenchmarkKt.benchmark()` one-shot, which re-loads the model. `Conversation.getBenchmarkInfo()` exists but is a **DEAD END on the resident engine — see §8** (re-verified on 0.12.0). Not an opportunity; do not plan against it. |
 
 ## 2. Messages, content, roles
 
@@ -161,12 +161,54 @@ Probe: `Android/src/app/src/androidTest/java/cc/grepon/relais/MidDecodeStopProbe
 | `Session.runPrefill`/`runDecode` | Token-level control; prompt-cache reuse; embeddings-ish pooling experiments | unverified |
 | `Conversation.cancelProcess()` | Truly halt native decode on client-disconnect / thermal / stop (not just stop streaming) | **DONE: verified on-device both lanes (§7.5, #125) + wired into `RelaisEngine.generate` (#165)** |
 | `SamplerConfig.seed` | Deterministic/reproducible sampling (testing, `seed` passthrough) | available |
-| `getBenchmarkInfo()` / `enableBenchmark` | Real prefill/decode tok/s + TTFT + exact token counts on the live path | **DEAD END (0.11.0): see below** |
+| `getBenchmarkInfo()` / `enableBenchmark` | Real prefill/decode tok/s + TTFT + exact token counts on the live path | **DEAD END — re-confirmed on 0.12.0: see below** |
 | `overwritePromptTemplate` | Support models with broken/missing templates | available |
 | `Capabilities(modelPath)` | Pre-flight model capability checks in the model picker | available |
 | `maxNumImages` (EngineConfig) | Multi-image requests | available |
 
 **Benchmark on the live path is a DEAD END in 0.11.0 (verified, `ReasoningChannelProbe` predecessor / `RelaisBackendBenchmarkTest`).** Setting `ExperimentalFlags.enableBenchmark = true` then calling `conversation.getBenchmarkInfo()` throws `INTERNAL: Benchmark is not enabled. Please make sure the BenchmarkParams is set in the EngineSettings.` — and `javap` on the AAR shows **no public `BenchmarkParams` and no `EngineSettings`** type; `EngineConfig(modelPath, backend, visionBackend, audioBackend, maxNumTokens, maxNumImages, cacheDir)` has no benchmark hook. The only populated `BenchmarkInfo` comes from the standalone `BenchmarkKt.benchmark(modelPath, backend, …)` one-shot, which re-loads the model and so **cannot run on the resident serving engine**. → Real per-request prefill/decode tok/s + TTFT + **exact `prompt_tokens`** are unreachable on the live path; Relais keeps the wall-clock decode estimate and the `x_relais_usage_note: prompt_tokens_estimated` flag. Exact token counts would need a tokenizer or the low-level `Session.runPrefill` count, not this API. (Confirms `RelaisEngine.kt` SPIKE-FINDINGS Q1; the table's prior "available" was wrong — a cautionary case for §-labels, see the `litertlm-native-api-probe-first` learned skill.)
+
+### 8.1 Re-confirmed on 0.12.0 (feature-20 task B0, static dump, 2026-09-07)
+
+The dead end above was measured on **0.11.0**; the repo now pins **0.12.0**, so it was re-derived
+from the shipped AAR — statically, no device. Dumped:
+`~/.gradle/caches/modules-2/files-2.1/com.google.ai.edge.litertlm/litertlm-android/0.12.0/2ad2e08222c273c792b7df09e4cd25437f282836/litertlm-android-0.12.0.aar`
+via `scripts/dump-litertlm-api.sh 0.12.0` (683 lines).
+
+| Grep | Result on 0.12.0 |
+|---|---|
+| `BenchmarkParams`, `EngineSettings` | **no hits** — neither type is public, so the runtime error's own instruction ("set the BenchmarkParams in the EngineSettings") remains unfollowable |
+| `EngineConfig(…)` ctor | **unchanged 7-arg** `(String, Backend, Backend, Backend, Integer, Integer, String)` — still no benchmark hook |
+| `Conversation.getBenchmarkInfo()` | present (and `nativeConversationGetBenchmarkInfo(long)`), but with no way to enable it — the 0.11.0 throw is expected to be unchanged |
+| `ExperimentalFlags` | `enableBenchmark` is still the only benchmark-adjacent flag, and §8 already records that setting it is not sufficient |
+| `reset\|rewind\|truncate\|clone\|KvCache\|checkpoint` | **one hit, and it is not a rewind**: `ExperimentalFlags.filterChannelContentFromKvCache: Boolean`. There is **no** KV-cache rewind/truncate/clone/checkpoint API on `Conversation` or `Session` |
+
+**Verdict: B1-native is dead on the shipped version.** feature-20 ships its wall-clock TTFT
+(`relais_time_to_first_token_seconds`) instead. The KV-rewind miss also confirms the premise of the
+deferred prefix-reuse appendix in that plan: with no way to roll a conversation back, affinity on an
+exact transcript hash is the only shape available.
+
+### 8.2 TODO — the measured prefill gap (needs hardware, NOT yet measured)
+
+feature-20 ships two series over the same endpoint (`relais_time_to_first_token_seconds` from
+`createConversation`, `relais_decode_start_latency_seconds` from `sendMessageAsync`) specifically so
+that their difference measures where the system-prompt/history prefill actually happens —
+`RelaisEngine.kt`'s comment above `createConversation` claims it happens there, and nothing in this
+repo has ever measured it.
+
+**That measurement requires a real device and has not been taken.** No number is recorded here
+rather than an invented one. To take it, run one request with a large system prompt against a live
+node and scrape:
+
+```bash
+curl -ks -H "Authorization: Bearer <key>" https://<phone-ip>:8443/metrics \
+  | grep -E "relais_time_to_first_token_seconds_(sum|count)|relais_decode_start_latency_seconds_(sum|count)"
+# prefill gap = (ttft_sum / ttft_count) - (decode_start_sum / decode_start_count)
+```
+
+Record the gap, the prompt size, and the device here. A ~0 gap is a **finding** — it would mean
+prefill is lazy and the `RelaisEngine.kt` comment is misleading — not a failed measurement. Compare
+against `SPIKE-FINDINGS.md`'s 111.1 tok/s prefill baseline.
 
 ## 9. How to regenerate / re-verify
 

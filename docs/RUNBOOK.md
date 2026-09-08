@@ -27,6 +27,44 @@ adb -s <serial> shell am start -n <appId>/cc.grepon.relais.RelaisControlActivity
 - Reach a node: `adb -s <serial> forward tcp:8443 tcp:8443` → `curl -k https://localhost:8443/health`.
 - LAN discovery: mDNS `_relais._tcp`; HTTPS `0.0.0.0:8443` (bearer), loopback HTTP `127.0.0.1:8080`.
 
+### Reading time-to-first-token (and why there are two series)
+
+On an on-device node prefill usually dominates the wait, so end-to-end latency alone can't tell you
+whether a slow request was slow to *start* or slow to *finish*. Two histograms share an endpoint —
+the first visible token — and differ only in where the clock starts:
+
+| Series | Clock starts at | Answers |
+|---|---|---|
+| `relais_time_to_first_token_seconds` | conversation creation | "how long before the node said anything" — the user-visible wait |
+| `relais_decode_start_latency_seconds` | `sendMessageAsync` | decode start only, with conversation setup excluded |
+
+**Their difference is the prompt/history prefill time, and that is the number to watch when tuning
+system prompts.** Take it from the means, not by subtracting quantiles (a difference of p95s is not
+the p95 of the difference):
+
+```bash
+curl -ks -H "Authorization: Bearer <key>" https://<node>:8443/metrics \
+  | grep -E 'relais_(time_to_first_token|decode_start_latency)_seconds_(sum|count)'
+# prefill ≈ ttft_sum/ttft_count − decode_start_sum/decode_start_count
+```
+
+A large gap means a long system prompt is being re-prefilled on every request — shorten it, or move
+the stable part where it can be reused. A gap near zero means prefill is lazy and the two series
+carry the same information.
+
+Three things that surprise operators:
+
+- **TTFT excludes queue wait and thermal cool-down** — both happen before the conversation exists.
+  A request that waited behind another shows a normal TTFT and a large
+  `relais_inference_duration_seconds`. Compare the two to see queueing; do not read TTFT as request
+  latency.
+- **Some requests contribute no sample at all, and that is correct.** Tool-calling and AICore run no
+  per-token callback, and a streamed request whose client disconnected or was thermally truncated
+  before the first token reached the socket delivered nothing. These are omitted rather than
+  recorded as zero, so `_count` is legitimately lower than your request count.
+- **`x_relais_ttft_ms`** on a response body is the same measurement per-request, and is absent — not
+  zero — on those same paths.
+
 ## Common issues
 | Symptom | Cause | Action |
 |---|---|---|
@@ -41,7 +79,7 @@ adb -s <serial> shell am start -n <appId>/cc.grepon.relais.RelaisControlActivity
 ## Rollback
 - **App:** sideload the prior APK for the **same channel** (same `applicationId` = in-place update).
   Different channels have different `applicationId`s and install side-by-side.
-- **Database:** Room `relais.db` is at **v4** with **additive, non-destructive** migrations and **no
+- **Database:** Room `relais.db` is at **v7** with **additive, non-destructive** migrations and **no
   down-migrations** — to roll back to an older schema you must uninstall (clears staged models too).
 
 ## Escalation
