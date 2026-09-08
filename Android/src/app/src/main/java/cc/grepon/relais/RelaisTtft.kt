@@ -38,6 +38,13 @@ package cc.grepon.relais
  * Both figures are null — never 0.0 — when nothing was delivered. A zero would be a fabricated
  * measurement, and in a histogram it is indistinguishable from a real sub-250 ms TTFT.
  *
+ * **"Could the client observe it" is the ONLY rule — do not add a truncation exclusion.** A run
+ * that delivered its first token and was then thermally truncated still has a real, correct TTFT:
+ * truncation is a separate and strictly later event. Dropping those samples would remove data from
+ * exactly the thermally-stressed periods when the TTFT distribution is most diagnostically useful,
+ * biasing the histogram toward healthy conditions. This has been considered and deliberately
+ * rejected; it is not an oversight.
+ *
  * Not thread-safe: the decode callback is sequential, and the post-await read is safe via the
  * latch's happens-before (the same discipline the surrounding token counters rely on).
  */
