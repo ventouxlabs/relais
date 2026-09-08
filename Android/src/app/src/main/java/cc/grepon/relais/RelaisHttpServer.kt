@@ -262,27 +262,39 @@ class RelaisHttpServer(
           }
         }
 
-        // Health is open; everything else needs the API key + is rate-limited per client IP.
-        if (!(method == "GET" && path.startsWith("/health"))) {
-          if (!authorized(authorization)) {
-            reply(401, RelaisError.json("unauthorized", RelaisError.AUTHENTICATION))
-            return
+        // Health is open; everything else needs the API key. Rate limiting and the body cap apply to
+        // EVERY request, `/health` included — they used to share the auth exemption's condition, so
+        // exempting `/health` from auth silently unmetered and uncapped it too (#314). The decision
+        // is [RelaisHttpGate.decide]; the side effects and the error envelopes stay here. Both
+        // effects are passed as suppliers, not booleans: `rateLimiter.allow(ip)` consumes budget, so
+        // it must stay lazy or a failed-auth request would be metered.
+        val reject =
+          RelaisHttpGate.decide(
+            method = method,
+            path = path,
+            authorized = { authorized(authorization) },
+            rateLimitOk = { rateLimiter.allow((sock.inetAddress?.hostAddress) ?: "unknown") },
+            contentLength = contentLength,
+            maxBody = MAX_BODY_BYTES,
+          )
+        if (reject != null) {
+          when (reject) {
+            RelaisHttpGate.Reject.UNAUTHORIZED ->
+              reply(401, RelaisError.json("unauthorized", RelaisError.AUTHENTICATION))
+            RelaisHttpGate.Reject.RATE_LIMITED ->
+              reply(
+                429,
+                RelaisError.json(
+                  "rate limit exceeded ($RATE_LIMIT/${RATE_WINDOW_MS / 1000}s)",
+                  RelaisError.RATE_LIMIT_EXCEEDED,
+                ),
+              )
+            RelaisHttpGate.Reject.BODY_TOO_LARGE ->
+              reply(413, RelaisError.json("request too large", RelaisError.INVALID_REQUEST))
           }
-          val ip = (sock.inetAddress?.hostAddress) ?: "unknown"
-          if (!rateLimiter.allow(ip)) {
-            reply(
-              429,
-              RelaisError.json(
-                "rate limit exceeded ($RATE_LIMIT/${RATE_WINDOW_MS / 1000}s)",
-                RelaisError.RATE_LIMIT_EXCEEDED,
-              ),
-            )
-            return
-          }
-          if (contentLength > MAX_BODY_BYTES) {
-            reply(413, RelaisError.json("request too large", RelaisError.INVALID_REQUEST))
-            return
-          }
+          // Outside the `when` on purpose: a rejected request always returns, even if a future
+          // `Reject` value were added without a branch here.
+          return
         }
 
         // Request-scoped context threaded into the extracted route handlers (#173).

@@ -19,13 +19,35 @@ Please do not open a public issue for an unpatched vulnerability.
 - **Bearer-token auth on everything except `/health`.** A 32-hex-char key is
   generated per install, stored in `EncryptedSharedPreferences` (Keystore-wrapped),
   shown in the Relais Node control screen, and compared in constant time.
-- **Per-IP rate limiting** (30 req / 60 s) with bounded, self-evicting state.
+- **Per-IP rate limiting** (30 req / 60 s) with bounded, self-evicting state. It applies to every
+  request that clears the auth check — including the auth-exempt `/health`, which until #314 was
+  silently unmetered and uncapped because all three checks shared one condition. It does **not**
+  apply to requests rejected for bad auth: the 401 is returned before the limiter is consulted, so a
+  failed-auth request costs no budget and brute force against the authenticated routes is still
+  unlimited. That is deliberate — metering failed auth against the same per-IP bucket would let an
+  unauthenticated flood exhaust a legitimate client's budget from behind the same NAT address — and
+  it is tracked as a separate follow-up, not fixed here.
 - **Body and header caps**, a per-read socket timeout, and a bounded worker pool
-  to resist slow-client and oversized-request abuse.
+  to resist slow-client and oversized-request abuse. The body cap, like the rate
+  limit, applies to `/health` too.
 - **Thermal backpressure**: under sustained heat the node returns `503` +
   `Retry-After` instead of running the device into a throttle cliff.
 - **No cloud egress for inference.** Inference is fully on-device. (Telemetry is
   being removed; see "Known limitations".)
+
+### Operators: `/health` is rate-limited as of #314
+
+`/health` needs no API key and never has. What changed is that it is now **counted
+against the same per-IP budget as every other route** — 30 requests per 60 seconds,
+per client IP — where before it was exempt from rate limiting and the body cap as a
+side effect of being exempt from auth.
+
+**If you poll `/health` from a monitoring script, uptime check, or load-balancer
+probe, keep it under 30 requests per minute per source IP or it will start
+receiving `429`.** A 20 s interval (3/min) is comfortable; a 1 s interval will trip
+the limit. Note the budget is per source IP, so several probes behind one NAT share
+it. There is no separate `/health` budget and no way to exempt it — uniformity is
+the point of the change.
 
 ## What Relais assumes
 
