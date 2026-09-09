@@ -19,13 +19,59 @@ Please do not open a public issue for an unpatched vulnerability.
 - **Bearer-token auth on everything except `/health`.** A 32-hex-char key is
   generated per install, stored in `EncryptedSharedPreferences` (Keystore-wrapped),
   shown in the Relais Node control screen, and compared in constant time.
-- **Per-IP rate limiting** (30 req / 60 s) with bounded, self-evicting state.
+  (`/ca.crt` is also exempt in the request gate, ahead of the certificate-export
+  work; until that route lands it answers `404`.)
+- **Per-IP rate limiting**, with bounded, self-evicting state, in **two separate budgets** per HTTP
+  listener:
+  - **30 req / 60 s** for the authenticated routes (inference and everything else).
+  - **120 req / 60 s** for the auth-exempt routes (`/health`, `/ca.crt`) — deliberately larger,
+    because these are cheap, unauthenticated, and what monitoring polls. A shared budget would let a
+    poller starve inference: a 10 s `/health` poll would spend a fifth of the inference budget doing
+    nothing, and the race runs backwards, since the O(1) poll refills continuously while an
+    expensive completion takes the `429`.
+
+  Both budgets apply to every request that clears the auth check — including `/health`, which until
+  #314 was silently unmetered and uncapped, because all three checks shared one condition. Which
+  budget a request is charged is decided by the *same* predicate that decides its auth exemption, so
+  the two cannot drift apart. Rate limiting does **not** apply to requests rejected for bad auth: the
+  401 is returned before any limiter is consulted, so a failed-auth request costs no budget and brute
+  force against the authenticated routes is still unlimited. That is deliberate — metering failed
+  auth against the same per-IP bucket would let an unauthenticated flood exhaust a legitimate
+  client's budget from behind the same NAT address — and it is tracked as a separate follow-up, not
+  fixed here. The two listeners each hold their own pair of budgets, so loopback traffic from the app
+  cannot exhaust a LAN client's. The Tasker intent lane is not an HTTP listener and is not
+  rate-limited.
 - **Body and header caps**, a per-read socket timeout, and a bounded worker pool
-  to resist slow-client and oversized-request abuse.
+  to resist slow-client and oversized-request abuse. The body cap, like the rate
+  limit, applies to `/health` too.
 - **Thermal backpressure**: under sustained heat the node returns `503` +
   `Retry-After` instead of running the device into a throttle cliff.
 - **No cloud egress for inference.** Inference is fully on-device. (Telemetry is
   being removed; see "Known limitations".)
+
+### Operators: `/health` is rate-limited as of #314
+
+`/health` needs no API key and never has. What changed is that it is now **rate
+limited**, where before it was exempt from rate limiting and the body cap as a side
+effect of being exempt from auth. It was unbounded; it is now bounded.
+
+**If you poll `/health` from a monitoring script, uptime check, or load-balancer
+probe, keep it under 120 requests per minute per source IP or it will start
+receiving `429`.** That is a 0.5 s interval — comfortable for any realistic probe;
+a 1 s or 10 s poll is nowhere near it. The `429` body quotes the budget you hit, so
+you can tell the two apart.
+
+`/health` and `/ca.crt` are metered on their **own** 120/min budget, not the 30/min
+one the authenticated routes use, and the two are counted separately. Polling
+`/health` therefore cannot consume the budget an inference client needs, in either
+direction. The budget is still per source IP, so several probes behind one NAT
+share the 120.
+
+In-app chat is unaffected: it probes loopback `/health` once per send, via
+`ChatTransportSelector.select()`. Those probes are charged to the auth-exempt
+budget while the chat completion is charged to the authenticated one, so the two
+never compete — which is what makes this safe regardless of how fast a turn
+fails or how quickly a user sends.
 
 ## What Relais assumes
 
