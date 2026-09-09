@@ -26,10 +26,18 @@ package cc.grepon.relais
  */
 internal object RelaisHttpGate {
 
-  /** Why the gate rejected a request, and the HTTP status `handle()` answers with. */
+  /**
+   * Why the gate rejected a request, and the HTTP status `handle()` answers with. [status] is the
+   * single source of that code — `handle()` passes it to `reply()` rather than repeating a literal,
+   * so a change here cannot leave the server answering something the tests do not see.
+   *
+   * The two rate-limit reasons share a status and differ only in which budget was exhausted, which
+   * the `429` body quotes back to the caller.
+   */
   enum class Reject(val status: Int) {
     UNAUTHORIZED(401),
     RATE_LIMITED(429),
+    EXEMPT_RATE_LIMITED(429),
     BODY_TOO_LARGE(413),
   }
 
@@ -44,13 +52,22 @@ internal object RelaisHttpGate {
    *     is a tracked follow-up; brute force against the `/v1` routes remains unlimited today.
    *  3. **Body cap.**
    *
-   * [authorized] and [rateLimitOk] are suppliers, not booleans, and that is **load-bearing**:
-   * `rateLimiter.allow(ip)` *consumes* budget as a side effect (it appends to the per-IP window), so
-   * evaluating it eagerly would meter every failed-auth request and let an unauthenticated flood eat
-   * a legitimate client's budget from behind the same NAT address — the precise outcome step 2 above
-   * exists to avoid. Laziness reproduces the original short-circuit order exactly: an exempt path
-   * never runs the key comparison, and a 401 never touches the rate limiter.
+   * Step 2 meters against one of *two* budgets, chosen by the same [authExempt] predicate that
+   * decided step 1. Deriving both from one predicate is the point: an exemption can never acquire a
+   * budget it was not meant to have, because there is no second place to edit. Auth-exempt routes
+   * are cheap, unauthenticated, and what monitoring polls, so they get the larger budget — sharing
+   * the inference budget would let a poller starve the work the node exists to do.
    *
+   * Every effect is a supplier, not a boolean, and that is **load-bearing**: `RateLimiter.allow`
+   * *consumes* budget as a side effect (it appends to the per-IP window), so evaluating eagerly
+   * would meter every failed-auth request and let an unauthenticated flood eat a legitimate client's
+   * budget from behind the same NAT address — the precise outcome step 2 above exists to avoid.
+   * Laziness reproduces the original short-circuit order exactly: an exempt path never runs the key
+   * comparison, a 401 never touches a rate limiter, and **exactly one** of the two budgets is ever
+   * charged for a given request.
+   *
+   * @param rateLimitOk the standard per-IP budget, charged for non-exempt routes.
+   * @param exemptRateLimitOk the larger auth-exempt budget, charged for exempt routes only.
    * @param contentLength the parsed `Content-Length`, and [maxBody] `MAX_BODY_BYTES` — both `Int`,
    *   matching the types at the call site rather than widening at the boundary.
    */
@@ -59,11 +76,17 @@ internal object RelaisHttpGate {
     path: String,
     authorized: () -> Boolean,
     rateLimitOk: () -> Boolean,
+    exemptRateLimitOk: () -> Boolean,
     contentLength: Int,
     maxBody: Int,
   ): Reject? {
-    if (!authExempt(method, path) && !authorized()) return Reject.UNAUTHORIZED
-    if (!rateLimitOk()) return Reject.RATE_LIMITED
+    val exempt = authExempt(method, path)
+    if (!exempt && !authorized()) return Reject.UNAUTHORIZED
+    if (exempt) {
+      if (!exemptRateLimitOk()) return Reject.EXEMPT_RATE_LIMITED
+    } else {
+      if (!rateLimitOk()) return Reject.RATE_LIMITED
+    }
     if (contentLength > maxBody) return Reject.BODY_TOO_LARGE
     return null
   }

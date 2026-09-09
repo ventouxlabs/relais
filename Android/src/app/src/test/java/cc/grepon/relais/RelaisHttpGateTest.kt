@@ -44,9 +44,38 @@ class RelaisHttpGateTest {
     path: String = "/v1/models",
     authorized: Boolean = true,
     rateLimitOk: Boolean = true,
+    exemptRateLimitOk: Boolean = true,
     contentLength: Int = 0,
   ): Int? =
-    RelaisHttpGate.decide(method, path, { authorized }, { rateLimitOk }, contentLength, cap)?.status
+    RelaisHttpGate.decide(
+        method,
+        path,
+        { authorized },
+        { rateLimitOk },
+        { exemptRateLimitOk },
+        contentLength,
+        cap,
+      )
+      ?.status
+
+  /** As [decide], but returns the reason rather than the status — the two 429s differ only there. */
+  private fun reason(
+    method: String = "GET",
+    path: String = "/v1/models",
+    authorized: Boolean = true,
+    rateLimitOk: Boolean = true,
+    exemptRateLimitOk: Boolean = true,
+    contentLength: Int = 0,
+  ): RelaisHttpGate.Reject? =
+    RelaisHttpGate.decide(
+      method,
+      path,
+      { authorized },
+      { rateLimitOk },
+      { exemptRateLimitOk },
+      contentLength,
+      cap,
+    )
 
   // -------------------------------------------------------------------------
   // Auth exemptions — which paths may be reached without a bearer token
@@ -122,26 +151,85 @@ class RelaisHttpGateTest {
   }
 
   // -------------------------------------------------------------------------
-  // Rate limiting — now unconditional (the #314 behavior change)
+  // Rate limiting — now unconditional (the #314 behavior change), against one of two budgets
   // -------------------------------------------------------------------------
 
   /**
    * BEHAVIOR CHANGE (#314): `/health` used to be exempt from rate limiting as a side effect of
-   * sharing one negated condition with the auth exemption. It is auth-exempt and metered now.
+   * sharing one negated condition with the auth exemption. It is auth-exempt and metered now — on
+   * the auth-exempt budget, not the inference one.
    */
   @Test
   fun `a rate-limited GET health is 429`() {
-    assertEquals(429, decide(method = "GET", path = "/health", authorized = false, rateLimitOk = false))
+    assertEquals(
+      429,
+      decide(method = "GET", path = "/health", authorized = false, exemptRateLimitOk = false),
+    )
   }
 
   @Test
   fun `a rate-limited GET ca_crt is 429`() {
-    assertEquals(429, decide(method = "GET", path = "/ca.crt", authorized = false, rateLimitOk = false))
+    assertEquals(
+      429,
+      decide(method = "GET", path = "/ca.crt", authorized = false, exemptRateLimitOk = false),
+    )
   }
 
   @Test
   fun `a rate-limited authenticated request is 429`() {
     assertEquals(429, decide(path = "/v1/models", rateLimitOk = false))
+  }
+
+  // -------------------------------------------------------------------------
+  // Budget selection — the two limiters must not be swappable
+  //
+  // These are the assertions that fail if the standard and auth-exempt budgets are exchanged. Each
+  // exhausts ONE budget and leaves the other full, so a swap flips the outcome.
+  // -------------------------------------------------------------------------
+
+  /** An exempt route is charged the exempt budget: exhausting the standard one must not touch it. */
+  @Test
+  fun `GET health passes when only the standard budget is exhausted`() {
+    assertNull(decide(method = "GET", path = "/health", authorized = false, rateLimitOk = false))
+  }
+
+  @Test
+  fun `GET ca_crt passes when only the standard budget is exhausted`() {
+    assertNull(decide(method = "GET", path = "/ca.crt", authorized = false, rateLimitOk = false))
+  }
+
+  /** And the converse: a normal route is charged the standard budget, never the exempt one. */
+  @Test
+  fun `a normal route passes when only the auth-exempt budget is exhausted`() {
+    assertNull(decide(path = "/v1/models", exemptRateLimitOk = false))
+  }
+
+  /** A monitoring flood on `/health` must not lock out authenticated inference. */
+  @Test
+  fun `an exhausted auth-exempt budget does not reject an authenticated request`() {
+    assertNull(decide(method = "POST", path = "/v1/chat/completions", exemptRateLimitOk = false))
+  }
+
+  /** The two 429s are distinguishable, so the body can quote the budget the caller actually hit. */
+  @Test
+  fun `the reject reason names which budget was exhausted`() {
+    assertEquals(
+      RelaisHttpGate.Reject.EXEMPT_RATE_LIMITED,
+      reason(method = "GET", path = "/health", authorized = false, exemptRateLimitOk = false),
+    )
+    assertEquals(
+      RelaisHttpGate.Reject.RATE_LIMITED,
+      reason(path = "/v1/models", rateLimitOk = false),
+    )
+  }
+
+  /** Both reasons answer 429 — the status is carried by the enum, not repeated at the call site. */
+  @Test
+  fun `both rate-limit reasons carry status 429`() {
+    assertEquals(429, RelaisHttpGate.Reject.RATE_LIMITED.status)
+    assertEquals(429, RelaisHttpGate.Reject.EXEMPT_RATE_LIMITED.status)
+    assertEquals(401, RelaisHttpGate.Reject.UNAUTHORIZED.status)
+    assertEquals(413, RelaisHttpGate.Reject.BODY_TOO_LARGE.status)
   }
 
   /**
@@ -208,15 +296,17 @@ class RelaisHttpGateTest {
    * exhaust a legitimate client's budget from behind the same NAT address.
    */
   @Test
-  fun `the rate limiter is not consulted when auth fails`() {
+  fun `no rate limiter is consulted when auth fails`() {
     val auth = Counting(false)
     val rate = Counting(true)
+    val exempt = Counting(true)
     assertEquals(
       RelaisHttpGate.Reject.UNAUTHORIZED,
-      RelaisHttpGate.decide("GET", "/v1/models", auth, rate, 0, cap),
+      RelaisHttpGate.decide("GET", "/v1/models", auth, rate, exempt, 0, cap),
     )
     assertEquals("auth must be evaluated", 1, auth.calls)
     assertEquals("a failed-auth request must stay unmetered", 0, rate.calls)
+    assertEquals("a failed-auth request must not touch the exempt budget either", 0, exempt.calls)
   }
 
   /** An auth-exempt path skips the key comparison entirely, exactly as the pre-change gate did. */
@@ -224,8 +314,32 @@ class RelaisHttpGateTest {
   fun `the key comparison is not run for an auth-exempt path`() {
     val auth = Counting(false)
     val rate = Counting(true)
-    assertNull(RelaisHttpGate.decide("GET", "/health", auth, rate, 0, cap))
+    val exempt = Counting(true)
+    assertNull(RelaisHttpGate.decide("GET", "/health", auth, rate, exempt, 0, cap))
     assertEquals("an exempt path must not run the key comparison", 0, auth.calls)
-    assertEquals("an exempt path is still metered", 1, rate.calls)
+    assertEquals("an exempt path is still metered", 1, exempt.calls)
+  }
+
+  /**
+   * Exactly one budget is charged per request, and it is the one matching the exemption. Counting
+   * the calls — not just reading the status — is what makes a swap of the two limiters detectable
+   * even when both happen to be under their ceiling.
+   */
+  @Test
+  fun `an exempt route charges the exempt budget and only that one`() {
+    val rate = Counting(true)
+    val exempt = Counting(true)
+    assertNull(RelaisHttpGate.decide("GET", "/health", Counting(false), rate, exempt, 0, cap))
+    assertEquals("the exempt budget must be charged", 1, exempt.calls)
+    assertEquals("the standard budget must be untouched", 0, rate.calls)
+  }
+
+  @Test
+  fun `a normal route charges the standard budget and only that one`() {
+    val rate = Counting(true)
+    val exempt = Counting(true)
+    assertNull(RelaisHttpGate.decide("GET", "/v1/models", Counting(true), rate, exempt, 0, cap))
+    assertEquals("the standard budget must be charged", 1, rate.calls)
+    assertEquals("the exempt budget must be untouched", 0, exempt.calls)
   }
 }

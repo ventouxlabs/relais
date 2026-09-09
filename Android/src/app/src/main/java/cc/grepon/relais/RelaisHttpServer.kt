@@ -86,6 +86,16 @@ private const val MAX_HEADER_BYTES = 16 * 1024
 private const val DEFAULT_MODEL = "gemma-4-e4b-it"
 private const val RATE_LIMIT = 30 // requests
 private const val RATE_WINDOW_MS = 60_000L // per 60s, per client IP
+// The auth-exempt routes (/health, /ca.crt) are metered on their OWN budget, deliberately larger.
+// They are cheap, they are what monitoring polls, and they are unauthenticated — so sharing the
+// inference budget would let a poller starve the work the node exists to do. feature-23's router
+// polls /health every 10s and /metrics every 30s per node; on one shared 30/60s budget that spends
+// 8 units on monitoring before routing anything, and a 2s poll would lock inference out entirely.
+// Worse, the race is backwards: the O(1) poll refills continuously while the expensive completion
+// takes the 429. Separate budgets keep /health bounded (it was unbounded before #314) without
+// designing that self-throttle into the topology.
+private const val EXEMPT_RATE_LIMIT = 120 // requests, auth-exempt routes only
+private const val EXEMPT_RATE_WINDOW_MS = 60_000L // per 60s, per client IP
 private const val MAX_TRACKED_IPS = 4096 // bound the rate-limiter map (memory-exhaustion DoS, H4)
 // Structured output (response_format): at most MAX+1 inference calls per request. Latency-bounded;
 // constrained decoding is not a hard guarantee so we validate + repair + retry. (feature-05)
@@ -123,7 +133,17 @@ private val IMAGE_GEN_LIMITS = ImageGenLimits(
 // request 503s rather than blocking for the multi-minute generate. Tunable without touching policy.
 private const val IMAGE_GEN_EXCLUSIVE_WAIT_MS = 20_000L
 
-/** Fixed-window per-IP rate limiter with stale-entry eviction (bounds the tracking map). */
+/**
+ * Fixed-window per-IP rate limiter with stale-entry eviction (bounds the tracking map).
+ *
+ * NOTE (#314): creating an entry no longer requires valid auth. Since the auth-exempt routes are now
+ * metered, an unauthenticated caller reaches [hits] — so an IPv6 source sweep can hold the exempt
+ * instance's map at [MAX_TRACKED_IPS] entries where previously it could not populate one at all.
+ * There are also two instances now, so the ceiling is 2 × [MAX_TRACKED_IPS]. The H4 eviction below
+ * was written for exactly this sweep and still bounds it; at 4096 entries of a short `ArrayDeque`
+ * the cost is microseconds on a phone. Recorded as new unauthenticated reach into stateful server
+ * memory, not as an unmitigated risk.
+ */
 private class RateLimiter(private val limit: Int, private val windowMs: Long) {
   private val hits = HashMap<String, ArrayDeque<Long>>()
 
@@ -154,6 +174,8 @@ private class RateLimiter(private val limit: Int, private val windowMs: Long) {
  *
  * Binds [bindAddr]:[port]. Routes through the resident [RelaisEngine].
  *   GET  /health                 -> {"status","ready","thermal_state"}          (no auth)
+ * Auth-exempt routes are `/health` and `/ca.crt` (the latter 404s until its handler lands). Both are
+ * still metered, on their own larger budget — see [RelaisHttpGate].
  *   GET  /metrics                 Prometheus text (or JSON via Accept)           (auth)
  *   GET  /v1/models               OpenAI-compatible model list                   (auth)
  *   POST /generate                {"text","image_b64?","audio_b64?"}            (auth)
@@ -178,6 +200,10 @@ class RelaisHttpServer(
   @Volatile private var running = false
   private val apiKey by lazy { RelaisConfig.apiKey(context) }
   private val rateLimiter = RateLimiter(RATE_LIMIT, RATE_WINDOW_MS)
+  // Separate state, not just a separate ceiling: an auth-exempt poll must not evict or consume the
+  // authenticated budget's window. Note this is a second map an unauthenticated caller can populate
+  // — see the MAX_TRACKED_IPS note on [RateLimiter].
+  private val exemptRateLimiter = RateLimiter(EXEMPT_RATE_LIMIT, EXEMPT_RATE_WINDOW_MS)
   // Heavy-endpoint admission gate. SHARED (1 permit) for normal inference; EXCLUSIVE (all permits) for
   // image gen, which must run with no concurrent decode. tryAcquireShared() is the embodiment of admit().
   private val admissionGate = RelaisAdmissionGate(QUEUE_CAPACITY)
@@ -268,32 +294,40 @@ class RelaisHttpServer(
         // is [RelaisHttpGate.decide]; the side effects and the error envelopes stay here. Both
         // effects are passed as suppliers, not booleans: `rateLimiter.allow(ip)` consumes budget, so
         // it must stay lazy or a failed-auth request would be metered.
+        val ip = (sock.inetAddress?.hostAddress) ?: "unknown"
         val reject =
           RelaisHttpGate.decide(
             method = method,
             path = path,
             authorized = { authorized(authorization) },
-            rateLimitOk = { rateLimiter.allow((sock.inetAddress?.hostAddress) ?: "unknown") },
+            rateLimitOk = { rateLimiter.allow(ip) },
+            exemptRateLimitOk = { exemptRateLimiter.allow(ip) },
             contentLength = contentLength,
             maxBody = MAX_BODY_BYTES,
           )
         if (reject != null) {
-          when (reject) {
-            RelaisHttpGate.Reject.UNAUTHORIZED ->
-              reply(401, RelaisError.json("unauthorized", RelaisError.AUTHENTICATION))
-            RelaisHttpGate.Reject.RATE_LIMITED ->
-              reply(
-                429,
+          // The `when` builds the body rather than performing the reply, which makes it an
+          // EXPRESSION — so Kotlin enforces exhaustiveness at compile time. As a statement it would
+          // only warn, and a future `Reject` with no branch would send no reply at all. The single
+          // `reply` below takes its status from `reject.status`, never a repeated literal.
+          val body =
+            when (reject) {
+              RelaisHttpGate.Reject.UNAUTHORIZED ->
+                RelaisError.json("unauthorized", RelaisError.AUTHENTICATION)
+              RelaisHttpGate.Reject.RATE_LIMITED ->
                 RelaisError.json(
                   "rate limit exceeded ($RATE_LIMIT/${RATE_WINDOW_MS / 1000}s)",
                   RelaisError.RATE_LIMIT_EXCEEDED,
-                ),
-              )
-            RelaisHttpGate.Reject.BODY_TOO_LARGE ->
-              reply(413, RelaisError.json("request too large", RelaisError.INVALID_REQUEST))
-          }
-          // Outside the `when` on purpose: a rejected request always returns, even if a future
-          // `Reject` value were added without a branch here.
+                )
+              RelaisHttpGate.Reject.EXEMPT_RATE_LIMITED ->
+                RelaisError.json(
+                  "rate limit exceeded ($EXEMPT_RATE_LIMIT/${EXEMPT_RATE_WINDOW_MS / 1000}s)",
+                  RelaisError.RATE_LIMIT_EXCEEDED,
+                )
+              RelaisHttpGate.Reject.BODY_TOO_LARGE ->
+                RelaisError.json("request too large", RelaisError.INVALID_REQUEST)
+            }
+          reply(reject.status, body)
           return
         }
 
@@ -724,7 +758,8 @@ class RelaisHttpServer(
   }
 
   private fun handleDashboard(ctx: RequestContext) {
-    // Auth-gated (bearer required — same gate as /metrics; /health is the only open route). Reads only
+    // Auth-gated (bearer required — same gate as /metrics; the open routes are /health and /ca.crt,
+    // and both are still rate-limited). Reads only
     // already-collected metrics; no state change. Scriptless + escaped; strict security headers below.
     RelaisMetrics.recordRequest(ctx.endpoint, 200)
     val metricsJson = RelaisMetrics.renderJson(context)
