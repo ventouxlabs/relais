@@ -450,4 +450,65 @@ class RelaisDashboardTest {
     assertEquals("***", maskApiKey("abc"))
     assertEquals("", maskApiKey(""))
   }
+
+  // ---------------------------------------------------------------------------
+  // Certificate panel (feature-18)
+  // ---------------------------------------------------------------------------
+
+  private fun certInfo(
+    caFingerprint: String = "sha256/CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=",
+    nodeKeyPin: String = "sha256/LEAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=",
+    sanList: List<String> = listOf("127.0.0.1", "192.168.1.42"),
+  ) = RelaisCertInfo(
+    caFingerprint = caFingerprint,
+    nodeKeyPin = nodeKeyPin,
+    sanList = sanList,
+    leafNotAfter = System.currentTimeMillis() + 80L * 86_400_000L,
+    caPem = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n",
+  )
+
+  @Test
+  fun `certificate panel renders both fingerprints under distinguishing labels`() {
+    val html = renderDashboardHtml(liveStatus().copy(cert = certInfo()))
+
+    assertTrue("panel must be present", html.contains("Certificate"))
+    assertTrue("CA fingerprint must render", html.contains("sha256/CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx="))
+    assertTrue("node key pin must render", html.contains("sha256/LEAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx="))
+    // The two values look identical in shape; only the labels tell a user which goes in
+    // --pinnedpubkey. Rendering them unlabelled would be worse than not rendering them.
+    assertTrue("must label the CA fingerprint", html.contains("ca fingerprint"))
+    assertTrue("must label the node key pin", html.contains("node key pin"))
+    assertTrue("SANs must render", html.contains("192.168.1.42"))
+  }
+
+  @Test
+  fun `certificate panel is absent entirely before the node has minted`() {
+    val html = renderDashboardHtml(liveStatus())
+
+    // A panel of blanks would read as a broken certificate rather than an absent one.
+    assertFalse("no certificate panel before the first mint", html.contains("ca fingerprint"))
+    assertFalse(html.contains("node key pin"))
+  }
+
+  @Test
+  fun `certificate values are HTML-escaped`() {
+    val html =
+      renderDashboardHtml(
+        liveStatus().copy(cert = certInfo(caFingerprint = "<script>alert(1)</script>", sanList = listOf("<img src=x>")))
+      )
+
+    assertFalse("raw script tag must never reach the page", html.contains("<script>alert(1)</script>"))
+    assertFalse("raw img tag must never reach the page", html.contains("<img src=x>"))
+    assertTrue("escaped form must be present", html.contains("&lt;script&gt;"))
+  }
+
+  @Test
+  fun `the certificate panel never renders a private key or the PEM body`() {
+    val html = renderDashboardHtml(liveStatus().copy(cert = certInfo()))
+
+    // The panel links to /ca.crt rather than inlining the certificate, and must never be a route
+    // to key material of any kind.
+    assertFalse(html.contains("PRIVATE KEY"))
+    assertFalse("the PEM belongs at /ca.crt, not inlined here", html.contains("BEGIN CERTIFICATE"))
+  }
 }

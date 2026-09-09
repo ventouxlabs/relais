@@ -13,6 +13,8 @@
 package cc.grepon.relais
 
 import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.net.NetworkInterface
 
 /**
@@ -51,4 +53,48 @@ internal object RelaisLanIp {
       }
       "0.0.0.0"
     }.getOrDefault("0.0.0.0")
+
+  /**
+   * Every non-loopback address the node is reachable at, for the leaf certificate's SAN set
+   * (feature-18 T1). Distinct from [lanIpv4], which picks **one** IPv4 for a display URL — a
+   * certificate has to cover them all or hostname verification fails on whichever interface the
+   * client actually used.
+   *
+   * Overlay interfaces (`tun*`/`wg*`/`ts*`) are deliberately **not** filtered out: including a
+   * Tailscale/WireGuard address is what lets an overlay client verify the node with no extra
+   * machinery, which is the whole of alternative (b) in the plan. The cost is that the SAN list
+   * discloses those addresses pre-auth to anyone who can complete a `ClientHello` (threat-model
+   * delta 10) — accepted deliberately, since an attacker already on the LAN learns the node's
+   * address by scanning it anyway.
+   *
+   * IPv6 link-local (`fe80::/10`) **is** excluded: it needs a scope id to be usable and is
+   * meaningless in a URL, so it would only bloat the SAN set.
+   *
+   * The `isUp` filter is load-bearing and not cosmetic. A down interface contributes a stale
+   * address, so the SAN set differs on the next start, [RelaisCertMint.needsReissue] fires, and the
+   * node churns its certificate on every restart for no reason.
+   *
+   * Sorted by `hostAddress` so the result is **totally** ordered: the re-issue check compares SAN
+   * sets, and an unstable order would thrash the same way.
+   *
+   * An empty return is meaningful, not a failure: it is the boot race (`BOOT_COMPLETED` starts the
+   * service before DHCP completes) that [RelaisNodeService] watches for. Do not paper over it with
+   * a `0.0.0.0` fallback — a wildcard is not an address anything can be reached at.
+   */
+  fun allLanAddresses(): List<InetAddress> =
+    runCatching {
+      NetworkInterface.getNetworkInterfaces()
+        .toList()
+        .filter { it.isUp && !it.isLoopback }
+        .flatMap { it.inetAddresses.toList() }
+        .filter { addr ->
+          when (addr) {
+            is Inet4Address -> !addr.isLoopbackAddress
+            is Inet6Address -> !addr.isLoopbackAddress && !addr.isLinkLocalAddress
+            else -> false
+          }
+        }
+        .distinctBy { it.hostAddress }
+        .sortedBy { it.hostAddress }
+    }.getOrDefault(emptyList())
 }

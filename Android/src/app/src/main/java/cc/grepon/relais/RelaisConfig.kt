@@ -43,6 +43,7 @@ object RelaisConfig {
   private const val KEY_IMAGE_MODEL_SHA = "image_model_sha"
   private const val KEY_TTS_VOICE_ID = "tts_voice_id"
   private const val KEY_TLS_PASS = "tls_keystore_pass"
+  private const val KEY_CA_PASS = "ca_keystore_pass"
   private const val KEY_RESTARTS = "restarts_total"
   private const val KEY_SHED_HEADROOM = "shed_headroom"
   private const val KEY_DECODE_FLOOR_TOK_S = "decode_floor_tok_s"
@@ -346,6 +347,28 @@ object RelaisConfig {
     }
     val pass = UUID.randomUUID().toString().replace("-", "")
     sp.edit().putString(KEY_TLS_PASS, pass).apply()
+    return pass
+  }
+
+  /**
+   * Random per-install password protecting the per-node **CA** keystore (feature-18), mirroring
+   * [tlsKeystorePassword] exactly.
+   *
+   * A separate password for a separate file: the CA lives in its own PKCS12 so that the
+   * `KeyManagerFactory` serving the TLS listener is never handed two key entries to choose between,
+   * and so the CA private key is never in the store the handshake reads.
+   *
+   * Deliberately **absent** from [migrateSecrets]: that list migrates secrets that once shipped in
+   * plaintext prefs. This key has only ever existed in the encrypted store, so there is nothing to
+   * migrate and adding it would only widen the legacy read.
+   */
+  fun caKeystorePassword(context: Context): String {
+    val sp = securePrefs(context)
+    sp.getString(KEY_CA_PASS, null)?.let {
+      return it
+    }
+    val pass = UUID.randomUUID().toString().replace("-", "")
+    sp.edit().putString(KEY_CA_PASS, pass).apply()
     return pass
   }
 

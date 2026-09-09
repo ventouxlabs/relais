@@ -23,9 +23,15 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import java.util.concurrent.Executors
@@ -70,6 +76,11 @@ class RelaisNodeService : Service() {
   private var httpsServer: RelaisHttpServer? = null
   private var wakeLock: PowerManager.WakeLock? = null
   private var idleTtlExecutor: ScheduledExecutorService? = null
+
+  // feature-18 T5b: the one-shot watch that re-mints + rebinds :8443 when the LAN comes up after a
+  // boot-time start. Set before the re-mint, so two interfaces appearing together can't both pass.
+  private val lanReissueDone = AtomicBoolean(false)
+  private var lanReissueCallback: ConnectivityManager.NetworkCallback? = null
 
   // Guards the single init path (delta review: onStartCommand used to be a bare START_STICKY, so a
   // retry START against an already-alive-but-failed service — gated-repo 401, bad model id, process
@@ -188,6 +199,7 @@ class RelaisNodeService : Service() {
         // over HTTPS, so the bearer key never crosses the network in cleartext.
         httpServer = RelaisHttpServer(applicationContext, port = 8080, bindAddr = "127.0.0.1").also { it.start() }
         httpsServer = RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0").also { it.start() }
+        armLanReissueIfNeeded() // feature-18: the boot race — see the method KDoc
         RelaisDiscovery.register(applicationContext) // advertise _relais._tcp for zero-config LAN discovery
         // Periodic TTL prune for the optional session memory (Feature #5). Idempotent + no-ops when
         // session memory is disabled, so scheduling it unconditionally is a true no-op by default.
@@ -207,6 +219,100 @@ class RelaisNodeService : Service() {
         startupDispatchInFlight.set(false) // release the guard — a future retry (fresh START) may dispatch again
       }
     }
+  }
+
+  /**
+   * Closes the boot race: re-mint the leaf certificate and rebind :8443 once a LAN address appears
+   * (feature-18 T5b).
+   *
+   * `RelaisBootReceiver` starts this service on `BOOT_COMPLETED`, well before DHCP completes, so
+   * the first mint sees no interfaces and produces a **loopback-only** certificate. Re-issue is
+   * otherwise computed only at node start, so an auto-started node would serve a certificate with
+   * no LAN SAN for its entire uptime and every LAN client would fail hostname verification until a
+   * human restarted it — in exactly the unattended-appliance mode the README advertises.
+   *
+   * This lives here rather than in [RelaisTls] because **only this class can act on the result.**
+   * `RelaisTls` can re-mint the keystore, but a bound `SSLServerSocket` cannot pick up a new
+   * certificate; the listener has to be stopped and reconstructed, and `httpsServer` is this
+   * service's field. `RelaisTls` mints; the service re-mints *and rebinds*.
+   *
+   * Rebinds **once**: the watch is unregistered after a rebind actually happens (or after a real
+   * failure), so a flapping Wi-Fi link cannot rebuild the listener over and over. [lanReissueDone]
+   * is set *before* the re-mint rather than after, so two interfaces coming up together cannot both
+   * pass the guard while the first is still minting.
+   *
+   * No manifest change: `ACCESS_NETWORK_STATE` is already granted.
+   */
+  private fun armLanReissueIfNeeded() {
+    // Two distinct reasons to arm, and the first one is the whole point of the feature:
+    //   - no addresses at all — the boot race itself. `needsLanReissue` is FALSE here (there is
+    //     nothing yet to re-issue *for*), so gating on it alone would refuse to arm in precisely
+    //     the scenario this exists for, and only ever arm in the narrow case where the LAN
+    //     happened to come up between the mint and this call.
+    //   - addresses present but the cert predates them — a plain start that raced a reconnect.
+    val noAddressesYet = RelaisLanIp.allLanAddresses().isEmpty()
+    if (!noAddressesYet && !RelaisTls.needsLanReissue(applicationContext)) return
+    val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+    val callback =
+      object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+          // onAvailable runs on a binder/handler thread. Everything below touches httpsServer, so
+          // it hops to the main thread first — racing an in-flight accept() on the old socket is
+          // exactly the kind of bug that only shows up on a real device under real traffic.
+          if (!lanReissueDone.compareAndSet(false, true)) return
+          Handler(Looper.getMainLooper()).post { reissueAndRebind() }
+        }
+      }
+    lanReissueCallback = callback
+    // NET_CAPABILITY_NOT_VPN is present by DEFAULT on a NetworkRequest.Builder, which would make a
+    // Tailscale/WireGuard-only network fail to match — the one topology whose addresses this
+    // feature goes out of its way to put in the certificate. Removing it is what lets an
+    // overlay-only node arm at all.
+    val request =
+      NetworkRequest.Builder().removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build()
+    runCatching { cm.registerNetworkCallback(request, callback) }
+      .onFailure { Log.w(TAG, "Could not watch for LAN availability; cert stays loopback-only", it) }
+  }
+
+  /**
+   * Re-mints for the live addresses and swaps the listener.
+   *
+   * Keeps the watch armed when the callback arrived **before** the interface had an address —
+   * `onAvailable` routinely fires ahead of address assignment, which is why
+   * `onLinkPropertiesChanged` exists at all. Disarming on that early bail would spend the one-shot
+   * on a callback that did nothing, and [lanReissueDone] would then block every real one.
+   */
+  private fun reissueAndRebind() {
+    if (RelaisLanIp.allLanAddresses().isEmpty()) {
+      // Not a failure and not a rebind: release the guard and stay armed for the next callback.
+      lanReissueDone.set(false)
+      return
+    }
+    try {
+      RelaisTls.reissueForLan(applicationContext)
+      httpsServer?.stop()
+      // Byte-for-byte the construction in dispatchStartupIfNeeded, just later. In-flight
+      // connections on the old listener are dropped — acceptable, since it was serving a
+      // loopback-only cert that no LAN client could verify anyway.
+      httpsServer =
+        RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0")
+          .also { it.start() }
+      Log.i(TAG, "Re-issued the leaf certificate for the LAN and rebound :8443")
+    } catch (e: Exception) {
+      Log.e(TAG, "LAN re-issue/rebind failed", e)
+    } finally {
+      // In a finally, not after a success: a throw partway through must still stop the watch, or a
+      // flapping link retries the same failure indefinitely. The early "no address yet" bail above
+      // returns before this block precisely so it does NOT consume the one-shot.
+      unregisterLanReissue()
+    }
+  }
+
+  private fun unregisterLanReissue() {
+    val cb = lanReissueCallback ?: return
+    lanReissueCallback = null
+    val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+    runCatching { cm.unregisterNetworkCallback(cb) }
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -231,6 +337,7 @@ class RelaisNodeService : Service() {
     ThermalGovernor.unregister()
     RelaisDiscovery.unregister()
     httpServer?.stop()
+    unregisterLanReissue()
     httpsServer?.stop()
     RelaisEngine.shutdown()
     runCatching { wakeLock?.release() }

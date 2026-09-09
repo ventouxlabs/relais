@@ -86,3 +86,20 @@
 -keep class org.tensorflow.lite.** { *; }
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 -keep class io.aatricks.llmedge.** { *; }
+
+# ---------------------------------------------------------------------------------------------
+# BouncyCastle — the per-node CA and the SAN'd leaf (feature-18).
+# ---------------------------------------------------------------------------------------------
+# There were ZERO BouncyCastle rules here before this feature, and the pre-feature cert path
+# happened to survive minification because it touched only a handful of concrete classes. The CA
+# work reaches deeper: JcaContentSignerBuilder resolves signature-algorithm implementations
+# reflectively by name out of the provider's algorithm table, so R8 sees SHA256withECDSA's
+# implementation class as unreferenced and strips it. The failure is release-only — the node comes
+# up, then throws NoSuchAlgorithmException at the first mint and cannot serve TLS at all.
+#
+# Per this repo's history with R8 (every keep rule above was earned from a real on-device failure,
+# and CI runs no R8 whatsoever), these are deliberately broad. UNVERIFIED as of writing: no release
+# APK has been built with them. Narrowing them is only defensible against a release build on
+# hardware that actually mints and completes a handshake — a debug build proves nothing here.
+-keep class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**

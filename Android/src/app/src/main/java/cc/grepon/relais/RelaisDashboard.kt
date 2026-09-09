@@ -51,6 +51,13 @@ data class DashboardStatus(
   val apiKeyMasked: String,
   /** Comma-joined enabled capability names (e.g. "tools,reasoning" or "multimodal,tools,reasoning"). */
   val capabilities: String,
+  /**
+   * The node's certificate identity (feature-18), or null before the node has ever minted — in
+   * which case the Certificate panel is omitted entirely rather than rendered with blanks.
+   *
+   * Public certificate material only; see [RelaisCertInfo].
+   */
+  val cert: RelaisCertInfo? = null,
 )
 
 /**
@@ -87,6 +94,8 @@ fun assembleDashboardStatus(
   baseUrl: String,
   apiKeyMasked: String,
   capabilities: String,
+  /** The node's certificate identity (feature-18), or null before the node has ever minted. */
+  cert: RelaisCertInfo? = null,
 ): DashboardStatus {
   val live = engineReady
   val statusLabel = when {
@@ -108,6 +117,7 @@ fun assembleDashboardStatus(
     baseUrl = baseUrl,
     apiKeyMasked = apiKeyMasked,
     capabilities = capabilities,
+    cert = cert,
   )
 }
 
@@ -174,6 +184,47 @@ fun renderDashboardHtml(status: DashboardStatus): String {
   val dotPulse = if (status.live) " dot-pulse" else ""
   val uptimeFormatted = formatUptime(status.uptimeSeconds)
   val decodeFmt = if (status.decodeTokensPerSec > 0.0) "%.2f tok/s".format(status.decodeTokensPerSec) else "—"
+
+  // Certificate panel (feature-18). TEXT ONLY, and deliberately so: the QR lives on the in-app
+  // CONFIGURE screen because this page is served under `default-src 'none'` with no `img-src`
+  // (RelaisHttpServer's CSP), and widening a hardened security header to show a picture is a bad
+  // trade. Omitted wholesale when the node has never minted — a panel of blanks would read as a
+  // broken certificate rather than an absent one.
+  val certPanel =
+    status.cert?.let { cert ->
+      val daysLeft = (cert.leafNotAfter - System.currentTimeMillis()) / 86_400_000L
+      val expiry = if (daysLeft >= 0) "in $daysLeft days" else "EXPIRED"
+      """
+<div class="panel">
+  <div class="panel-title">Certificate</div>
+  <table>
+    <tr>
+      <td class="label">ca fingerprint</td>
+      <td class="value">${escapeHtml(cert.caFingerprint)}</td>
+    </tr>
+    <tr>
+      <td class="label">node key pin</td>
+      <td class="value">${escapeHtml(cert.nodeKeyPin)}</td>
+    </tr>
+    <tr>
+      <td class="label">expires</td>
+      <td class="value muted">${escapeHtml(expiry)}</td>
+    </tr>
+    <tr>
+      <td class="label">covers</td>
+      <td class="value muted">${escapeHtml(cert.sanList.joinToString(", "))}</td>
+    </tr>
+    <tr>
+      <td class="label" colspan="2" style="color:#8A8780;font-size:11px;line-height:1.5">${escapeHtml(
+        "GET /ca.crt (no bearer key needed) to download the CA, then curl --cacert relais-ca.crt. " +
+          "Check the downloaded CA against the ca fingerprint above before trusting it. " +
+          "Use the node key pin — not the ca fingerprint — with curl --pinnedpubkey.",
+      )}</td>
+    </tr>
+  </table>
+</div>
+"""
+    } ?: ""
 
   val recentRows = buildString {
     if (status.recentRequests.isEmpty()) {
@@ -308,6 +359,7 @@ tr:last-child td { border-bottom: none; }
   </table>
 </div>
 
+$certPanel
 <div class="panel">
   <div class="panel-title">Recent Requests</div>
   <table>

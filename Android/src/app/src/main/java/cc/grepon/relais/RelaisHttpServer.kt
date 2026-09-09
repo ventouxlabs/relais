@@ -337,6 +337,9 @@ class RelaisHttpServer(
           // Same predicate as the auth exemption and the metrics label — see [RelaisHttpGate.isHealthPath].
           method == "GET" && RelaisHttpGate.isHealthPath(path) -> handleHealth(ctx)
 
+          // Same predicate as the auth exemption and the metrics label — see [RelaisHttpGate.isCaCertPath].
+          method == "GET" && RelaisHttpGate.isCaCertPath(path) -> handleCaCert(ctx)
+
           method == "GET" && path == "/" -> handleDashboard(ctx)
 
           method == "GET" && path == "/experiments" -> handleExperiments(ctx)
@@ -751,6 +754,44 @@ class RelaisHttpServer(
 
   // --- Status pages / metrics ---
 
+  /**
+   * `GET /ca.crt` — the node's **public CA certificate**, PEM, unauthenticated (feature-18 T6).
+   *
+   * Unauthenticated on purpose: the CA is what a client needs *before* it can safely talk to the
+   * node at all, so gating it behind the bearer token would be circular. Nothing secret is
+   * disclosed — this is a public certificate, never the leaf and never a private key.
+   *
+   * The real hazard is not disclosure but trust: a user who fetches this over an already-MITM'd
+   * link and skips the fingerprint check is worse off than with `curl -k`, because it *feels*
+   * verified. That is why the QR on the CONFIGURE screen is the primary path and this route is
+   * documented as a convenience. Rate limiting still applies, on the auth-exempt budget.
+   *
+   * Serves nothing rather than a half-answer when the node has never minted: [certInfoOrNull] is
+   * load-only, so this route can never be the thing that creates key material.
+   */
+  private fun handleCaCert(ctx: RequestContext) {
+    val info = RelaisTls.certInfoOrNull(context)
+    if (info == null) {
+      ctx.reply(503, RelaisError.json("certificate not ready", RelaisError.INVALID_REQUEST), emptyList())
+      return
+    }
+    // respondText does not record a metric (unlike reply), so record it explicitly.
+    RelaisMetrics.recordRequest(ctx.endpoint, 200)
+    respondText(
+      ctx.sock,
+      200,
+      info.caPem,
+      "application/x-x509-ca-cert",
+      listOf(
+        "Content-Disposition: attachment; filename=\"relais-ca.crt\"",
+        "X-Content-Type-Options: nosniff",
+        // The CA is re-minted only on a fresh install, but a stale cached copy is a
+        // failed-handshake support ticket, so never let an intermediary hold one.
+        "Cache-Control: no-store",
+      ),
+    )
+  }
+
   private fun handleHealth(ctx: RequestContext) {
     ctx.send(
       200,
@@ -781,6 +822,8 @@ class RelaisHttpServer(
       baseUrl = "https://${RelaisLanIp.localLanIp(ctx.sock)}:8443/v1",
       apiKeyMasked = maskApiKey(RelaisConfig.apiKey(context)),
       capabilities = dashCaps.toCapsString(),
+      // Load-only (feature-18): rendering a status page must never mint key material.
+      cert = RelaisTls.certInfoOrNull(context),
     )
     respondText(
       ctx.sock, 200, renderDashboardHtml(dashStatus), "text/html; charset=utf-8",
@@ -972,12 +1015,18 @@ class RelaisHttpServer(
     )
     ctx.send(
       200,
-      RelaisClientConfig.buildClientConfigJson(
-        baseUrl = baseUrl,
-        apiKey = RelaisConfig.apiKey(context),
-        modelId = RelaisConfig.modelId(context),
-        caps = caps,
-      ),
+      // Load-only: this endpoint must never be the thing that mints a CA. Both values are omitted
+      // from the payload when the node has not minted yet, rather than sent empty.
+      RelaisTls.certInfoOrNull(context).let { cert ->
+        RelaisClientConfig.buildClientConfigJson(
+          baseUrl = baseUrl,
+          apiKey = RelaisConfig.apiKey(context),
+          modelId = RelaisConfig.modelId(context),
+          caps = caps,
+          caFingerprint = cert?.caFingerprint,
+          nodeKeyPin = cert?.nodeKeyPin,
+        )
+      },
     )
   }
 
@@ -1932,6 +1981,8 @@ class RelaisHttpServer(
     when {
       // Same predicate as the auth exemption and the dispatch branch — see [RelaisHttpGate.isHealthPath].
       RelaisHttpGate.isHealthPath(path) -> "/health"
+      // Same predicate as the auth exemption and the dispatch branch — see [RelaisHttpGate.isCaCertPath].
+      RelaisHttpGate.isCaCertPath(path) -> "/ca.crt"
       path == "/" -> "/"
       path.startsWith("/experiments") -> "/experiments"
       path.startsWith("/metrics") -> "/metrics"

@@ -19,8 +19,9 @@ Please do not open a public issue for an unpatched vulnerability.
 - **Bearer-token auth on everything except `/health`.** A 32-hex-char key is
   generated per install, stored in `EncryptedSharedPreferences` (Keystore-wrapped),
   shown in the Relais Node control screen, and compared in constant time.
-  (`/ca.crt` is also exempt in the request gate, ahead of the certificate-export
-  work; until that route lands it answers `404`.)
+  (`/ca.crt` is also exempt — it serves the node's **public** CA certificate, which
+  a client needs *before* it can verify the node at all. See "Verifying the node's
+  certificate" below.)
 - **Per-IP rate limiting**, with bounded, self-evicting state, in **two separate budgets** per HTTP
   listener:
   - **30 req / 60 s** for the authenticated routes (inference and everything else).
@@ -83,17 +84,96 @@ shared hotspots, guest VLANs) you should additionally use one of:
   reachable only over it; or
 - certificate pinning (below) so a man-in-the-middle cannot impersonate the node.
 
+## Verifying the node's certificate
+
+The node mints a **per-node CA** once, and issues itself a short-lived (90-day)
+leaf certificate under it carrying every address the node holds as a
+`subjectAltName`. Verification is therefore possible, which it previously was
+not: the old certificate had a `CN=relais-node` subject and **no SAN extension at
+all**, and every modern TLS client ignores CN entirely — so `--cacert` failed
+even against a certificate you had explicitly trusted, and `-k` was the only
+thing that worked.
+
+Fetch the CA once and pass it per connection:
+
+```
+curl -k -o relais-ca.crt https://<phone-ip>:8443/ca.crt   # -k only for this bootstrap fetch
+curl --cacert relais-ca.crt https://<phone-ip>:8443/health
+```
+
+**Check what you fetched.** Compare it against the `CA FINGERPRINT` shown on the
+node before trusting it — fetching the CA over a link that is already
+man-in-the-middled and skipping this check is *worse* than `-k`, because it feels
+verified:
+
+```
+openssl x509 -in relais-ca.crt -pubkey -noout \
+  | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64
+```
+
+The node publishes **two** `sha256/...` values and they are not interchangeable:
+
+| Value | What it is | Used for |
+|---|---|---|
+| `CA FINGERPRINT` | the CA's public key | checking the `ca.crt` you downloaded |
+| `NODE KEY PIN` | the **leaf's** public key | `curl --pinnedpubkey sha256//<value>` |
+
+Pasting the CA value into `--pinnedpubkey` fails with an error that names
+neither. The leaf key is generated once and **reused** across every re-issue, so a
+`--pinnedpubkey` pin keeps working after the node's IP changes; only the
+certificate is re-minted.
+
+Prefer per-connection `--cacert` over installing the CA into a system trust
+store. A system-store install is trusted by *everything* on that client — see the
+blast-radius limitation below.
+
 ## Known limitations (tracked)
 
-- **Self-signed TLS cert, no pinning yet.** The LAN cert is self-signed
-  (`CN=relais-node`); clients currently connect with `curl -k` / verification
-  disabled. A man-in-the-middle on the same L2 who also spoofs the mDNS
-  advertisement could impersonate the node and harvest the key. **Mitigation in
-  progress**: trust-on-first-use pinning with an in-app fingerprint and an
-  optional mTLS "hardened" mode. Until then, prefer an overlay network on
-  untrusted segments, or pin the cert out-of-band (`--cacert`).
-- **mDNS discovery is unauthenticated** (link-local `_relais._tcp`); pair with
-  cert pinning before trusting discovery on a shared network.
+- **Verification is client-side opt-in, and the node cannot enforce or observe
+  it.** The node serves the identical certificate to a `--cacert` client and to a
+  `-k` client. Everything above holds only for clients that actually imported the
+  CA; removing `-k` from this repo's documentation does not remove it from
+  anyone's scripts.
+- **The node now holds a CA private key.** It is stored app-private, alongside the
+  leaf key, and signs only for the node's own names. Compromise of the phone was
+  already total for the node, so this is not new exposure *for the node* — but if
+  a user installed the CA into a client's **system trust store**, whoever holds
+  that key can impersonate any name the CA is permitted to sign for, to that
+  client. This is why the docs lead with per-connection `--cacert`.
+
+  The CA carries a critical `NameConstraints` extension limiting it to
+  private/CGNAT/loopback IP ranges and the `localhost` and `local` DNS subtrees,
+  so it cannot sign for a public name. **How much that is worth depends on the
+  client, and it is worth nothing on some of them.** OpenSSL — and therefore
+  `curl --cacert`, the path these docs recommend — applies name constraints from a
+  root. Java's PKIX validator does **not**: it reads constraints from the
+  `TrustAnchor` object rather than the anchor certificate, and explicitly refuses
+  them there (`name constraints in trust anchor not supported`), so a Java client
+  ignores the extension entirely. Treat the constraints as defence in depth on the
+  documented path, not as a guarantee across all clients.
+- **`GET /ca.crt` is unauthenticated.** It serves only the public CA certificate —
+  never the leaf, never a private key — so the disclosure is nil. The hazard is
+  the bootstrap: a user who fetches it over an already-compromised link and skips
+  the fingerprint check has trusted the attacker. Treat it as a convenience;
+  the out-of-band fingerprint is what makes it safe.
+- **The leaf's full SAN list is readable pre-auth.** Anyone who can complete a
+  `ClientHello` against `:8443` learns every address the node holds, with no
+  bearer token — including **overlay** (WireGuard/Tailscale) addresses, which are
+  deliberately included so overlay clients can verify. Nothing here is secret in a
+  strong sense; it is the node's own reachability, and an attacker already on the
+  LAN learns the same by scanning. It is still a reconnaissance change from the
+  old address-free certificate.
+- **A node running longer than 90 days serves an expired leaf.** Re-issue is
+  computed at node start (and once when the LAN first comes up after a boot-time
+  start), not on a timer. Restart to re-issue. Tracked as a follow-up.
+- **mTLS ("hardened mode") is not implemented.** The work above authenticates the
+  *server* to the client; mTLS would authenticate the *client* to the server. It
+  composes cleanly on top of the CA built here and remains deferred.
+- **mDNS discovery is unauthenticated** (link-local `_relais._tcp`). The advice to
+  pair it with certificate verification is now actionable rather than
+  aspirational — a spoofed advertisement lands on a certificate a verifying client
+  refuses — but the advertisement itself is still an unauthenticated LAN
+  broadcast that a hostile advertiser fully controls.
 - **Bundled analytics.** The upstream fork still compiles Firebase Analytics/FCM;
   removal is tracked for the OSS release so the "no cloud" property holds for the
   whole app, not just inference.

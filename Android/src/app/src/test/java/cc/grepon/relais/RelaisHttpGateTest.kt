@@ -117,10 +117,13 @@ class RelaisHttpGateTest {
   // -------------------------------------------------------------------------
   // /ca.crt — exact match, unlike /health's prefix match
   //
-  // The route itself lands in feature-18 T6; the exemption is pre-placed here so its exact-match
-  // semantics are pinned by test before any handler exists. Until T6, an unauthenticated
-  // GET /ca.crt falls through the dispatch `when` to `404 not found` (RelaisHttpServer.kt:497).
-  // These assert gate exemption, NOT route existence.
+  // The exemption was pre-placed by #314 so its exact-match semantics were pinned before any
+  // handler existed. Feature-18 T6 has since added the real route, and it dispatches through the
+  // SAME RelaisHttpGate.isCaCertPath predicate these tests exercise — so gate exemption and route
+  // existence can no longer disagree. `RelaisMetricsIncrementsTest` covers the third site, the
+  // metrics label, which is deliberately its own exact matcher.
+  //
+  // These still assert gate exemption specifically, not the handler's response.
   // -------------------------------------------------------------------------
 
   @Test

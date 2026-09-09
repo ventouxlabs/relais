@@ -21,6 +21,7 @@ package cc.grepon.relais
 import cc.grepon.relais.RelaisClientConfig.Capabilities
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -234,5 +235,58 @@ class RelaisClientConfigTest {
     // also trips a test.
     val serialized = clientConfig().toString()
     assertTrue("client config must carry the api key for paste-readiness", serialized.contains(sentinelKey))
+  }
+
+  // ---------------------------------------------------------------------------
+  // CA export surface (feature-18)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  fun `tls block names the ca route as an absolute URL derived from the base URL`() {
+    val tls = clientConfig().getJSONObject("tls")
+
+    // Derived from the base URL, not rebuilt from a LAN address: behind `adb forward` the caller
+    // reached localhost, and handing back a LAN URL would name a host it cannot reach.
+    assertEquals("https://192.168.1.42:8443/ca.crt", tls.getString("ca_url"))
+  }
+
+  @Test
+  fun `tls note names the ca route and the cacert flag, and still refuses curl -k`() {
+    val note = clientConfig().getJSONObject("tls").getString("note")
+
+    assertTrue("the note must name the route that actually exists", note.contains("/ca.crt"))
+    assertTrue("the note must lead with per-connection --cacert", note.contains("--cacert"))
+    // Pre-existing guarantee, restated here because this test owns the rewritten note.
+    assertFalse("must not recommend the insecure curl -k flag", note.lowercase().contains("curl -k"))
+  }
+
+  @Test
+  fun `both fingerprints are exposed under distinct keys when the node has minted`() {
+    val tls =
+      RelaisClientConfig.buildClientConfigJson(
+          baseUrl = "https://192.168.1.42:8443/v1",
+          apiKey = sentinelKey,
+          modelId = "litert-community/gemma-4-E4B-it",
+          caps = textOnlyCaps,
+          caFingerprint = "sha256/CA-VALUE",
+          nodeKeyPin = "sha256/LEAF-VALUE",
+        )
+        .getJSONObject("tls")
+
+    assertEquals("sha256/CA-VALUE", tls.getString("ca_fingerprint"))
+    assertEquals("sha256/LEAF-VALUE", tls.getString("node_key_pin"))
+    // Distinct keys for distinct values: --pinnedpubkey wants the leaf, --cacert verification wants
+    // the CA, and conflating them fails with an error that names neither.
+    assertNotEquals(tls.getString("ca_fingerprint"), tls.getString("node_key_pin"))
+  }
+
+  @Test
+  fun `fingerprint keys are absent, not empty, before the node has minted`() {
+    val tls = clientConfig().getJSONObject("tls")
+
+    // An empty string would let a client "check" a fingerprint against nothing and believe it
+    // passed. Absent forces the caller to handle not-yet-minted.
+    assertFalse("ca_fingerprint must be absent", tls.has("ca_fingerprint"))
+    assertFalse("node_key_pin must be absent", tls.has("node_key_pin"))
   }
 }

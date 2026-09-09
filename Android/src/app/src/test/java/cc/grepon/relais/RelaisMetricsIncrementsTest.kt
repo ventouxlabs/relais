@@ -201,4 +201,20 @@ class RelaisMetricsIncrementsTest {
     assertEquals("/health", RelaisMetrics.endpointLabel("/health"))
     assertEquals("/", RelaisMetrics.endpointLabel("/"))
   }
+
+  /**
+   * The CA export (feature-18) needs its own arm here, not just in the server's normalizer: the
+   * server produces the `/ca.crt` label, and this function re-normalizes it at `recordRequest`.
+   * Without an arm the route would silently report as `"other"` in `/metrics` — which is exactly
+   * the series an operator reads when clients start failing to fetch the CA.
+   */
+  @Test
+  fun `endpointLabel gives the CA export its own series and still folds near-misses to other`() {
+    assertEquals("/ca.crt", RelaisMetrics.endpointLabel("/ca.crt"))
+    // Exact `==`, like every arm here. Loosening it to `startsWith` would let an attacker mint an
+    // unbounded number of real metric series by varying the suffix — the cardinality guard this
+    // function exists to be.
+    assertEquals("other", RelaisMetrics.endpointLabel("/ca.crtXYZ"))
+    assertEquals("other", RelaisMetrics.endpointLabel("/ca.crt?x=1"))
+  }
 }
