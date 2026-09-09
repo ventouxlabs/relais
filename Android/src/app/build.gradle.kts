@@ -256,9 +256,30 @@ dependencies {
   implementation(libs.androidx.security.crypto)
   implementation(libs.androidx.webkit)
   implementation(libs.litertlm)
-  // Runtime self-signed TLS cert for the LAN endpoint: software RSA key + X509 builder. Needed
-  // because AndroidKeyStore keys can't sign the TLS server handshake via conscrypt on-device.
-  // jdk15to18 variant is the Android-compatible (non-multi-release) build.
+  // Runtime TLS certs for the LAN endpoint: per-node CA + SAN'd leaf (feature-18). Software RSA
+  // leaf key, because AndroidKeyStore keys can't sign the TLS server handshake via conscrypt
+  // on-device. jdk15to18 variant is the Android-compatible (non-multi-release) build.
+  //
+  // PINNED AT 1.78.1 DELIBERATELY — latest stable is 1.85. This is a tracked gap, not neglect:
+  //  - CVE-2025-8916 (PKIXCertPathReviewer allocation) affects 1.44–1.78; **1.78.1 is the patched
+  //    version**, which is presumably why this pin is 1.78.1 rather than 1.78.
+  //  - CVE-2026-5588 (MEDIUM, PKIX draft CompositeVerifier accepts empty signature sequences)
+  //    affects 1.49.0–1.83.x, fixed in 1.84.0. **1.78.1 is inside that range.**
+  //
+  // Unreachable in our call paths — verified, and stated that way rather than "not affected":
+  // Relais uses BouncyCastle purely as a certificate FACTORY, never as a verifier. The entire
+  // surface is `asn1.x500`/`asn1.x509` structures, `cert.jcajce` builders and
+  // `operator.jcajce.JcaContentSignerBuilder`; `grep -rn 'CompositeVerifier\|PKIXCertPathReviewer'`
+  // over src returns nothing, and no chain validation goes through BC at all (the PKIX validation
+  // in RelaisCertMintTest is the JDK's default provider, and is test-only). Both CVEs live in
+  // verification paths this app never enters.
+  //
+  // BUMPING TO 1.85: worth doing, but sequence it. A BouncyCastle bump is a REFLECTIVE-dependency
+  // bump, which per this repo's R8 history breaks release-only and invisibly to every green test —
+  // and it would land on keep rules that have never once been exercised on a release build. Get
+  // CertTrustProbe passing on a release APK at 1.78.1 first to establish a known-good R8 baseline,
+  // THEN bump and re-run the same probe. Bumping first conflates "the keep rules are wrong" with
+  // "the new version moved something" inside a failure CI cannot see.
   implementation("org.bouncycastle:bcpkix-jdk15to18:1.78.1")
   implementation(libs.commonmark)
   implementation(libs.richtext)

@@ -64,6 +64,13 @@ import org.junit.runner.RunWith
  *    BouncyCastle code, so a class stripped from the re-mint path stays invisible until a network
  *    change. Run this probe, change networks, then run `CertReissueProbe`.
  *
+ * **This release run is the R8 baseline for the BouncyCastle bump, and must come first.** The pin
+ * is 1.78.1 against a current 1.85, held deliberately — see the rationale at the dependency in
+ * `build.gradle.kts`. A BC bump is a reflective-dependency bump landing on keep rules that have
+ * never been exercised on a release build, so bumping before this passes would conflate "the keep
+ * rules are wrong" with "the new version moved something", inside the one failure mode CI cannot
+ * see. Order: this probe green on 1.78.1 release → bump → this probe again, re-mint path included.
+ *
  * It also covers the one interop question the CA's **EKU** raises. The CA carries a non-critical
  * `serverAuth + clientAuth` extended key usage, and verifiers that implement EKU nesting intersect
  * a leaf's EKU with its issuer's. A handshake here that fails path building — rather than hostname
