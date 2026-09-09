@@ -247,9 +247,15 @@ class RelaisNodeService : Service() {
     // Two distinct reasons to arm, and the first one is the whole point of the feature:
     //   - no addresses at all — the boot race itself. `needsLanReissue` is FALSE here (there is
     //     nothing yet to re-issue *for*), so gating on it alone would refuse to arm in precisely
-    //     the scenario this exists for, and only ever arm in the narrow case where the LAN
+    //     the scenario this exists for, and would only ever arm in the narrow case where the LAN
     //     happened to come up between the mint and this call.
-    //   - addresses present but the cert predates them — a plain start that raced a reconnect.
+    //   - addresses present but the certificate predates them — a start that raced a reconnect.
+    //
+    // Note the caller starts the listener immediately above, and `start()` mints on its own accept
+    // thread, so this runs CONCURRENTLY with the first mint and may see no keystore at all.
+    // `needsLanReissue` answers true when it cannot tell, so an unreadable-because-in-flight
+    // keystore arms rather than silently skipping; `reissueAndRebind` re-checks before it touches
+    // the listener, so arming when it turns out to be unnecessary costs one predicate call.
     val noAddressesYet = RelaisLanIp.allLanAddresses().isEmpty()
     if (!noAddressesYet && !RelaisTls.needsLanReissue(applicationContext)) return
     val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
@@ -289,6 +295,14 @@ class RelaisNodeService : Service() {
       return
     }
     try {
+      // Re-check here, not only at arming time. Arming deliberately over-answers (it cannot read a
+      // keystore that `start()` is still writing on the accept thread), and this is what makes that
+      // free: if the certificate already covers the live addresses there is nothing to do, and
+      // rebinding anyway would drop live connections and churn the cert for no reason.
+      if (!RelaisTls.needsLanReissue(applicationContext)) {
+        Log.i(TAG, "LAN is up and the certificate already covers it; no rebind needed")
+        return
+      }
       RelaisTls.reissueForLan(applicationContext)
       httpsServer?.stop()
       // Byte-for-byte the construction in dispatchStartupIfNeeded, just later. In-flight

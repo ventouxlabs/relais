@@ -113,8 +113,15 @@ internal object RelaisTls {
    */
   fun needsLanReissue(context: Context): Boolean {
     val live = RelaisLanIp.allLanAddresses()
+    // Nothing to re-issue *for* yet. The boot race is handled by the caller arming on this same
+    // emptiness, not by this predicate.
     if (live.isEmpty()) return false
-    val state = runCatching { loadOrMint(context, allowMintCa = false, allowMintLeaf = false) }.getOrNull() ?: return false
+    val state = runCatching { loadOrMint(context, allowMintCa = false, allowMintLeaf = false) }.getOrNull()
+    // Unreadable or not yet written — and "unknown" must answer TRUE, not false. `start()` mints on
+    // the accept thread, so a caller running just after it can legitimately find no keystore at
+    // all; answering false there would skip the watch on the strength of a race. Over-answering is
+    // cheap because the acting caller re-checks this before it rebinds anything.
+      ?: return true
     return RelaisCertMint.needsReissue(state.leaf, RelaisCertMint.buildSanList(live), System.currentTimeMillis())
   }
 
@@ -177,9 +184,13 @@ internal object RelaisTls {
           existingLeaf == null ||
           RelaisCertMint.needsReissue(existingLeaf, liveSans, System.currentTimeMillis()))
 
-    // A read-only caller with nothing on disk has nothing to report. Throwing here rather than
+    // A read-only caller with nothing usable on disk has nothing to report. Throwing rather than
     // fabricating a State is what makes certInfoOrNull return null instead of a half-answer.
-    check(reissue || existingLeaf != null) { "no usable leaf certificate and minting is disabled" }
+    // Spelled with `allowMintLeaf` rather than `reissue` so it states its own condition: a minting
+    // caller always proceeds (it will create what is missing), a read-only one needs a leaf to
+    // already exist. "No usable leaf" includes a pre-feature 1-element chain, which loadLeaf
+    // deliberately reports as absent.
+    check(allowMintLeaf || existingLeaf != null) { "no usable leaf certificate and minting is disabled" }
 
     val pair = leafKey ?: RelaisCertMint.generateLeafKeyPair()
     val leaf =
