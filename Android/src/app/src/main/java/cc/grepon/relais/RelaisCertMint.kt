@@ -172,16 +172,35 @@ internal object RelaisCertMint {
         addExtension(Extension.basicConstraints, true, BasicConstraints(0))
         addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.keyCertSign or KeyUsage.cRLSign))
         // Bounds what this CA can be used FOR, now that NameConstraints no longer bounds what it
-        // can be used ON. Verifiers that chain EKU (CryptoAPI and NSS among them) intersect the
-        // leaf's EKU with the issuer's, so a CA marked serverAuth-only cannot be turned into one
-        // that issues client, code-signing or e-mail certificates — the natural next move for
-        // someone who extracted the key. It matches the leaf's own EKU exactly, so it can never
-        // narrow the intersection below what the node actually needs.
+        // can be used ON. Verifiers that chain EKU intersect a leaf's EKU with its issuer's, so
+        // this CA cannot be turned into one that issues code-signing, e-mail, timestamping or
+        // OCSP-signing certificates. Deliberate, and **do not strip it as unused** — see below.
         //
-        // Non-critical on purpose: EKU-on-a-CA is a widely-honoured convention rather than a
-        // universal one, and marking it critical would invite rejection from verifiers that do not
-        // implement EKU chaining — the same fail-closed trap that removed NameConstraints.
-        addExtension(Extension.extendedKeyUsage, false, ExtendedKeyUsage(KeyPurposeId.id_kp_serverAuth))
+        // NOT the NameConstraints mistake repeated, and the difference is mechanical rather than a
+        // judgement call: those had to be *critical* per RFC 5280, so a verifier that did not
+        // implement them had to reject the chain — fail-closed on stacks we never test. A
+        // NON-critical EKU is *ignored* by a stack that does not implement nesting. Enforcing
+        // stacks get the narrowing; the rest get exactly today's behaviour; nobody gets a broken
+        // chain. The downside profile is inverted.
+        //
+        // Why it is worth having, given the CA key only leaks if the phone does: the realistic case
+        // is not an attacker. This CA is valid for TEN YEARS, is imported once, and is NOT removed
+        // when Relais is uninstalled. The bad outcome is a phone sold, traded in, repaired, or
+        // handed to a family member while the previous owner's laptop still trusts a decade-long
+        // CA whose private key went with the hardware. No compromise event, no sophistication —
+        // just a device changing hands and an import nobody remembers. The long lifetime that
+        // spares users a re-import works directly against them there.
+        //
+        // clientAuth is included although nothing issues client certificates today, because this
+        // is structurally now-or-never: SECURITY.md tracks mTLS as a follow-up that composes on
+        // top of THIS CA, and narrowing to serverAuth would break it on precisely the platforms
+        // that enforce nesting — fixable only by re-minting the CA, which invalidates every client
+        // import and is the one thing the two-keystore design exists to avoid.
+        addExtension(
+          Extension.extendedKeyUsage,
+          false,
+          ExtendedKeyUsage(arrayOf(KeyPurposeId.id_kp_serverAuth, KeyPurposeId.id_kp_clientAuth)),
+        )
         addExtension(
           Extension.subjectKeyIdentifier,
           false,

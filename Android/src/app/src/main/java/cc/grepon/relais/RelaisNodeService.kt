@@ -372,6 +372,21 @@ class RelaisNodeService : Service() {
     lanReissueDone.set(true)
     try {
       httpsServer?.stop()
+      // ── INVARIANT: after this service is destroyed, nothing may construct a RelaisHttpServer. ──
+      //
+      // This is the ONLY place outside dispatchStartupIfNeeded that builds one, and it runs from a
+      // main-looper post, which can outlive onDestroy. The listener it creates binds
+      // `0.0.0.0:8443` on `applicationContext` — which survives the service — so a construction
+      // that slips past teardown leaves a LAN-facing TLS listener that nothing can stop short of
+      // killing the process, while the notification is gone, the QS tile reads "stopped", and
+      // mDNS has been unregistered. The user sees a node that is off and cannot turn off what is
+      // actually still listening.
+      //
+      // The `destroyed` check at the top of this method is what upholds that, and it works only
+      // because onDestroy sets the flag on the same (main) thread that runs this. **If you add
+      // another path that posts here, or move this construction, re-derive that guarantee — do not
+      // assume it.**
+      //
       // Byte-for-byte the construction in dispatchStartupIfNeeded, just later. In-flight
       // connections on the old listener are dropped — acceptable, since it was serving a
       // loopback-only cert no LAN client could verify anyway.

@@ -47,6 +47,31 @@ import org.junit.runner.RunWith
  * on Wi-Fi A, move the device to Wi-Fi B, run it again, and compare the two logged blocks. The
  * `CA FINGERPRINT` and `NODE KEY PIN` must be identical across the two runs while the SAN list
  * changes. That is the acceptance criterion an imported `relais-ca.crt` depends on.
+ *
+ * ## Manual: STOP MUST ACTUALLY STOP (feature-18 T5b, security review H2)
+ *
+ * No automated test can cover this — nothing in the JVM lane constructs a `Service`, and this probe
+ * runs in-process rather than driving the real service lifecycle. **Run it from a second machine,
+ * and run it after a network change**, because a queued network callback is what resurrects the
+ * listener:
+ *
+ * ```
+ * # 1. Start the node from the app, confirm it answers:
+ * curl -k --max-time 5 https://<phone-ip>:8443/health          # expect 200
+ *
+ * # 2. Stop it from the app. Then, from the OTHER machine:
+ * curl -k --max-time 5 https://<phone-ip>:8443/health          # MUST fail to connect
+ * nmap -Pn -p 8443 <phone-ip>                                  # 8443 MUST NOT be open
+ *
+ * # 3. Repeat with a network change between start and stop (toggle Wi-Fi, or move networks),
+ * #    which is what puts a reissueAndRebind post on the main looper in the first place.
+ * ```
+ *
+ * A listener still answering after step 2 is the H2 defect: the notification is gone, the QS tile
+ * and control panel both read "stopped", and mDNS has been unregistered — so every surface says the
+ * node is off while `0.0.0.0:8443` is bound and presenting the node's certificate to the LAN. There
+ * is no in-app remedy; only a force-stop clears it, and the user has no reason to think they need
+ * one. Treat a failure here as release-blocking.
  */
 @RunWith(AndroidJUnit4::class)
 class CertReissueProbe {

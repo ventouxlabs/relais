@@ -55,6 +55,13 @@ import org.junit.runner.RunWith
  * **Run this on a release (minified) APK as well as a debug one.** R8 is on for release, CI runs
  * none of it, and `proguard-rules.pro` gained its first BouncyCastle rules with this feature — a
  * stripped provider class shows up here and nowhere else.
+ *
+ * It also covers the one interop question the CA's **EKU** raises. The CA carries a non-critical
+ * `serverAuth + clientAuth` extended key usage, and verifiers that implement EKU nesting intersect
+ * a leaf's EKU with its issuer's. A handshake here that fails path building — rather than hostname
+ * verification — would mean conscrypt reads that intersection differently than expected. Non-critical
+ * should make a nesting-unaware stack ignore it entirely, but "should" is what this probe exists to
+ * replace with a measurement.
  */
 @RunWith(AndroidJUnit4::class)
 class CertTrustProbe {

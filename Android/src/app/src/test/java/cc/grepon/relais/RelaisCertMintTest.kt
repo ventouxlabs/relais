@@ -13,6 +13,10 @@
 package cc.grepon.relais
 
 import java.net.InetAddress
+import org.junit.Assume.assumeTrue
+import kotlin.io.path.createTempDirectory
+import java.util.Base64
+import java.io.File
 import java.security.cert.CertPathValidator
 import java.security.cert.CertificateFactory
 import java.security.cert.PKIXParameters
@@ -60,22 +64,86 @@ class RelaisCertMintTest {
 
   /**
    * With `NameConstraints` gone, the CA's EKU is the remaining thing bounding what it can be used
-   * for — so it is pinned rather than left implicit.
+   * for — so it is pinned rather than left implicit, and **do not narrow it**.
    *
-   * Verifiers that chain EKU intersect the leaf's with the issuer's, so a serverAuth-only CA cannot
-   * be repurposed to issue client-auth, code-signing or e-mail certificates. Non-critical
-   * deliberately: EKU-on-a-CA is a convention, not a universal, and a critical unknown extension is
-   * the fail-closed trap that got NameConstraints removed.
+   * `clientAuth` is present although nothing issues client certificates today: mTLS is a tracked
+   * follow-up that composes on top of this CA, and adding it later would mean re-minting the CA,
+   * which invalidates every client import. Now-or-never, so it is here now.
+   *
+   * Non-critical deliberately — a nesting-unaware verifier must ignore this, not reject it. That is
+   * the mechanical difference from NameConstraints, which had to be critical and therefore
+   * fail-closed.
    */
   @Test
-  fun `the CA is limited to server auth, non-critically`() {
+  fun `the CA is bounded to server and client auth, non-critically`() {
     val ca = RelaisCertMint.mintCa()
 
-    assertEquals(listOf("1.3.6.1.5.5.7.3.1"), ca.certificate.extendedKeyUsage) // id-kp-serverAuth
+    assertEquals(
+      listOf("1.3.6.1.5.5.7.3.1", "1.3.6.1.5.5.7.3.2"), // serverAuth, clientAuth
+      ca.certificate.extendedKeyUsage,
+    )
+    // The purposes deliberately excluded: codeSigning, emailProtection, timeStamping, OCSPSigning.
     assertFalse(
-      "a critical EKU on the CA would invite rejection by verifiers that do not chain EKU",
+      "the CA must not be usable for code signing",
+      ca.certificate.extendedKeyUsage.contains("1.3.6.1.5.5.7.3.3"),
+    )
+    assertFalse(
+      "a critical EKU would invite rejection from verifiers that do not implement EKU nesting",
       ca.certificate.criticalExtensionOIDs.contains(Extension.extendedKeyUsage.id),
     )
+  }
+
+  /**
+   * The EKU is **enforced**, not merely present — the check NameConstraints could never pass.
+   *
+   * `openssl verify -purpose sslserver` applies chain purpose checks, so this proves the CA's EKU
+   * actually admits the leaf rather than just sitting in the certificate. Unlike the constraints,
+   * this property is verifiable, which is a large part of why the EKU is worth having and the
+   * constraints were not.
+   *
+   * `assumeTrue`-gated on openssl, so it skips where openssl is absent rather than failing.
+   */
+  @Test
+  fun `openssl accepts the chain for the sslserver purpose`() {
+    assumeTrue("openssl not on PATH; skipping the EKU purpose check", hasOpenssl())
+
+    val ca = RelaisCertMint.mintCa()
+    val leaf =
+      RelaisCertMint.mintLeaf(
+        ca.keyPair.private,
+        ca.certificate,
+        RelaisCertMint.generateLeafKeyPair().public,
+        RelaisCertMint.buildSanList(listOf(InetAddress.getByName("192.168.1.40"))),
+      )
+    val dir = createTempDirectory("relais-eku").toFile()
+    writePem(dir, "ca.pem", ca.certificate)
+    writePem(dir, "leaf.pem", leaf)
+
+    val (ok, out) = opensslVerify(dir, "-purpose", "sslserver", "-CAfile", "ca.pem", "leaf.pem")
+    assertTrue("the chain must satisfy the sslserver purpose, got: $out", ok)
+  }
+
+  private fun writePem(dir: File, name: String, cert: X509Certificate) {
+    File(dir, name)
+      .writeText(
+        "-----BEGIN CERTIFICATE-----\n" +
+          Base64.getEncoder().encodeToString(cert.encoded).chunked(64).joinToString("\n") +
+          "\n-----END CERTIFICATE-----\n"
+      )
+  }
+
+  private fun hasOpenssl(): Boolean =
+    runCatching { ProcessBuilder("openssl", "version").start().waitFor() == 0 }.getOrDefault(false)
+
+  /** Runs `openssl verify <args>` in [dir]; returns (verified, combined output). */
+  private fun opensslVerify(dir: File, vararg args: String): Pair<Boolean, String> {
+    val proc =
+      ProcessBuilder(listOf("openssl", "verify") + args)
+        .directory(dir)
+        .redirectErrorStream(true)
+        .start()
+    val out = proc.inputStream.bufferedReader().readText()
+    return (proc.waitFor() == 0) to out
   }
 
   @Test

@@ -1027,6 +1027,15 @@ adb shell 'logcat -d -s RelaisTls:* | tail -20'   # expect a re-mint + rebind af
 curl --cacert relais-ca.crt https://<phone-ip>:8443/health   # must verify, not just answer
 #    Re-run with Wi-Fi disabled at boot and enabled 60s later — same expectation.
 
+# 9b. STOP MUST ACTUALLY STOP (security review H2) — RELEASE-BLOCKING, no test covers it.
+#     Run from a SECOND machine. Start the node, then stop it from the app:
+curl -k --max-time 5 https://<phone-ip>:8443/health   # after STOP: must FAIL to connect
+nmap -Pn -p 8443 <phone-ip>                           # after STOP: 8443 must NOT be open
+#     Repeat with a network change between start and stop — a queued NetworkCallback post is what
+#     resurrects the listener. A listener still answering here means every user-visible surface
+#     (notification, QS tile, control panel, mDNS) says "off" while :8443 serves the LAN, with no
+#     in-app way to stop it.
+
 # 10. RELEASE BUILD (M5) — R8 is on (build.gradle.kts:146) and CI runs none of it.
 #     Install the release APK on rango, start the node cold (forces a fresh mint), then repeat step 3.
 #     A NoClassDefFoundError / NoSuchAlgorithmException from BouncyCastle here means proguard-rules.pro
