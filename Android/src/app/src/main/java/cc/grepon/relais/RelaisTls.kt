@@ -59,6 +59,16 @@ internal object RelaisTls {
   private const val CA_KEYSTORE_FILE = "relais_ca.p12"
 
   /**
+   * Set when an unreadable CA keystore forced a replacement CA to be minted, so the surfaces that
+   * show certificate state can say so.
+   *
+   * Process-lifetime only, deliberately: it exists to explain "why did every client suddenly stop
+   * verifying" during the session in which it happened, not to persist a warning forever. Recovery
+   * is a re-import, and once the user has done that the message would be actively misleading.
+   */
+  @Volatile private var caWasReplaced = false
+
+  /**
    * Plain (tls=false) or TLS server socket.
    *
    * A **software** RSA leaf key is used deliberately: AndroidKeyStore keys (RSA and EC) cannot sign
@@ -73,7 +83,7 @@ internal object RelaisTls {
   fun buildServerSocket(context: Context, tls: Boolean): ServerSocket {
     if (!tls) return ServerSocket()
     val pass = RelaisConfig.tlsKeystorePassword(context).toCharArray()
-    val ks = loadOrMint(context).keystore
+    val ks = loadOrMint(context, allowMintCa = true, allowMintLeaf = true).keystore
     val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply { init(ks, pass) }
     val ctx = SSLContext.getInstance("TLS").apply { init(kmf.keyManagers, null, null) }
     return ctx.serverSocketFactory.createServerSocket()
@@ -84,8 +94,15 @@ internal object RelaisTls {
    *
    * Never call this from the UI: it generates key material, so opening a settings screen would
    * silently create a CA for a node the user has never started. The UI calls [certInfoOrNull].
+   *
+   * Its only callers are the on-device probes (`CertTrustProbe`, `CertReissueProbe`), which need
+   * load-or-mint because they run against a node that may never have started. **If you are wiring a
+   * new UI or HTTP surface, you want [certInfoOrNull].** `loadOrMint`'s two permissions are
+   * required parameters with no defaults precisely so that reaching for the minting path has to be
+   * a deliberate act rather than the shape you get by typing nothing.
    */
-  fun certInfo(context: Context): RelaisCertInfo = loadOrMint(context).info
+  fun certInfo(context: Context): RelaisCertInfo =
+    loadOrMint(context, allowMintCa = true, allowMintLeaf = true).info
 
   /**
    * Load-**only**. Returns null when the node has never been started, so no keystore exists yet.
@@ -173,8 +190,8 @@ internal object RelaisTls {
    */
   private fun loadOrMint(
     context: Context,
-    allowMintCa: Boolean = true,
-    allowMintLeaf: Boolean = true,
+    allowMintCa: Boolean,
+    allowMintLeaf: Boolean,
     forceLeafReissue: Boolean = false,
   ): State {
     val caPass = RelaisConfig.caKeystorePassword(context).toCharArray()
@@ -252,7 +269,13 @@ internal object RelaisTls {
           key to cert
         }
       loaded.getOrNull()?.let { return it }
-      Log.w(TAG, "CA keystore unreadable; minting a fresh CA", loaded.exceptionOrNull())
+      // The single most consequential event this class can produce: a new CA invalidates EVERY
+      // client's imported `relais-ca.crt` at once, and every one of them starts failing
+      // verification with no indication of why. It must not be a `Log.w` nobody reads — the flag
+      // is surfaced on `GET /` (and, once feature-18 PR B lands the CONFIGURE section, in the UI),
+      // so a user who suddenly cannot connect has somewhere to find the reason.
+      Log.e(TAG, "CA keystore unreadable; minting a REPLACEMENT CA — every client must re-import", loaded.exceptionOrNull())
+      caWasReplaced = true
     }
     check(allowMint) { "no CA keystore and minting is disabled" }
     val minted = RelaisCertMint.mintCa()
@@ -280,14 +303,21 @@ internal object RelaisTls {
    * cannot be read, a fresh key is generated.
    */
   private fun loadLeafKeyPair(file: File, pass: CharArray): KeyPair? {
+    // Absent is the ONLY case that may return null. Everything else throws.
+    //
+    // This used to be `runCatching { ... }.getOrNull()`, which turned *every* failure — a truncated
+    // read, a password mismatch, a transient IO error — into "generate a fresh key", which was then
+    // minted and written over the old one. That silently changes the NODE KEY PIN, and the leaf key
+    // pair surviving every re-mint is a **contract**: feature-23 pins that SPKI, and a user who put
+    // `curl --pinnedpubkey` in a script gets an opaque failure with no log line and nothing in the
+    // UI to explain it. Failing loudly here is strictly better than rotating quietly: a listener
+    // that will not start is visible and recoverable, a rotated pin is neither.
     if (!file.exists()) return null
-    return runCatching {
-      val ks = KeyStore.getInstance("PKCS12")
-      file.inputStream().use { ks.load(it, pass) }
-      val key = ks.getKey(TLS_KEY_ALIAS, pass) as PrivateKey
-      val cert = ks.getCertificate(TLS_KEY_ALIAS) as X509Certificate
-      KeyPair(cert.publicKey, key)
-    }.getOrNull()
+    val ks = KeyStore.getInstance("PKCS12")
+    file.inputStream().use { ks.load(it, pass) }
+    val key = ks.getKey(TLS_KEY_ALIAS, pass) as PrivateKey
+    val cert = ks.getCertificate(TLS_KEY_ALIAS) as X509Certificate
+    return KeyPair(cert.publicKey, key)
   }
 
   private fun loadLeaf(file: File, pass: CharArray): X509Certificate? =
@@ -311,6 +341,7 @@ internal object RelaisTls {
       sanList = sans.map { RelaisCertPem.renderSan(it) },
       leafNotAfter = leaf.notAfter.time,
       caPem = RelaisCertPem.toPem(caCert),
+      caWasReplaced = caWasReplaced,
     )
 
   /** Base64 line width for PEM, fixed by RFC 7468. */

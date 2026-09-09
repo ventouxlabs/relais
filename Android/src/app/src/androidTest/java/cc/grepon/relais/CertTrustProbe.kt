@@ -54,7 +54,15 @@ import org.junit.runner.RunWith
  *
  * **Run this on a release (minified) APK as well as a debug one.** R8 is on for release, CI runs
  * none of it, and `proguard-rules.pro` gained its first BouncyCastle rules with this feature — a
- * stripped provider class shows up here and nowhere else.
+ * stripped class shows up here and nowhere else.
+ *
+ * While on the release build, record two more things:
+ *  - **The APK size delta** against the tracked 74.10 MiB. The BouncyCastle keep is deliberately
+ *    broad; that number is the data needed to decide whether narrowing it is ever worth a second
+ *    device cycle, and without it the question can only be argued.
+ *  - **The RE-MINT path, not just the first mint.** `mintCa` and `mintLeaf` reach different
+ *    BouncyCastle code, so a class stripped from the re-mint path stays invisible until a network
+ *    change. Run this probe, change networks, then run `CertReissueProbe`.
  *
  * It also covers the one interop question the CA's **EKU** raises. The CA carries a non-critical
  * `serverAuth + clientAuth` extended key usage, and verifiers that implement EKU nesting intersect

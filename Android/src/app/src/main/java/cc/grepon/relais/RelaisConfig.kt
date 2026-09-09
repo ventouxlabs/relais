@@ -339,7 +339,15 @@ object RelaisConfig {
   /**
    * Random per-install password protecting the runtime-generated TLS keystore. Generated and
    * persisted (encrypted) on first access, mirroring [apiKey]. Not a shared/committed secret.
+   *
+   * **`@Synchronized` is load-bearing, not decoration.** This is read-then-generate-then-write with
+   * no atomicity of its own, and it now has genuinely concurrent callers: the accept thread minting
+   * in `buildServerSocket` and the LAN re-issue thread. Two callers both reading null would each
+   * generate a different UUID, last write wins — and the keystore written under the loser's
+   * password becomes **permanently unreadable**, which routes straight into regenerating the leaf
+   * key and silently changing the NODE KEY PIN every pinned client depends on.
    */
+  @Synchronized
   fun tlsKeystorePassword(context: Context): String {
     val sp = securePrefs(context)
     sp.getString(KEY_TLS_PASS, null)?.let {
@@ -361,7 +369,11 @@ object RelaisConfig {
    * Deliberately **absent** from [migrateSecrets]: that list migrates secrets that once shipped in
    * plaintext prefs. This key has only ever existed in the encrypted store, so there is nothing to
    * migrate and adding it would only widen the legacy read.
+   *
+   * `@Synchronized` for the same reason as [tlsKeystorePassword], and the consequence here is worse:
+   * an unreadable CA keystore rotates the **CA**, invalidating every client's import.
    */
+  @Synchronized
   fun caKeystorePassword(context: Context): String {
     val sp = securePrefs(context)
     sp.getString(KEY_CA_PASS, null)?.let {

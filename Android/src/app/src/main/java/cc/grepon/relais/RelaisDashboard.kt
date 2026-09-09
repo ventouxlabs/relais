@@ -194,10 +194,23 @@ fun renderDashboardHtml(status: DashboardStatus): String {
     status.cert?.let { cert ->
       val daysLeft = (cert.leafNotAfter - System.currentTimeMillis()) / 86_400_000L
       val expiry = if (daysLeft >= 0) "in $daysLeft days" else "EXPIRED"
+      // The one certificate event a user cannot diagnose from the client side: their imported CA
+      // stopped working and nothing told them why. Rendered as a row rather than a log line.
+      val replacedRow =
+        if (!cert.caWasReplaced) "" else {
+          """
+    <tr>
+      <td class="label">ca replaced</td>
+      <td class="value">${escapeHtml(
+            "the previous CA could not be read, so a new one was minted — every client must " +
+              "re-import relais-ca.crt"
+          )}</td>
+    </tr>"""
+        }
       """
 <div class="panel">
   <div class="panel-title">Certificate</div>
-  <table>
+  <table>$replacedRow
     <tr>
       <td class="label">ca fingerprint</td>
       <td class="value">${escapeHtml(cert.caFingerprint)}</td>

@@ -30,11 +30,10 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Binder
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -97,17 +96,34 @@ class RelaisNodeService : Service() {
    * LAN-facing TLS listener on `0.0.0.0:8443` owned by a destroyed service, with nothing left able
    * to stop it short of process death.
    *
-   * Both `onDestroy` and the posted work run on the main thread, so that ordering is what makes
-   * this airtight rather than merely narrow: any post that has not started by the time `onDestroy`
-   * sets this flag is guaranteed to observe it.
+   * Volatile, and set before [lanReissueExecutor] is shut down: a task already running observes it
+   * and returns, and one not yet started never runs. Since the work no longer sits on a drainable
+   * looper queue, this flag is the whole of the shutdown guarantee.
    */
   @Volatile private var destroyed = false
 
   /**
-   * One handler for the service's lifetime, so [onDestroy] can drain the queue. A fresh `Handler`
-   * per callback — the previous shape — leaves nothing to call `removeCallbacksAndMessages` on.
+   * Where the LAN re-issue and rebind actually run (M3).
+   *
+   * A single-thread executor rather than the main looper, for three reasons that turn out to be one
+   * change:
+   *  - **Off the main thread.** The work is ~six PKCS12 parses with PBE decryption, an EC
+   *    signature, a `store()` with PBE encrypt, and the IO — tens of milliseconds, so dropped
+   *    frames and a StrictMode violation rather than an ANR. But `securePrefs` also touches
+   *    EncryptedSharedPreferences/AndroidKeyStore, whose cost is unbounded and which lands at
+   *    `BOOT_COMPLETED`, when margins are thinnest.
+   *  - **It keeps the serialisation that let the CAS go.** A single-thread executor serialises
+   *    exactly as a looper does, so [reissueAndRebind]'s plain read-then-set is still sound.
+   *  - **It gives the rebind path the same lock as the mint path**, which closes the
+   *    truncated-keystore-read window: a re-issue can no longer overlap the accept thread's write,
+   *    and a truncated read is what would silently rotate the leaf key and break every pinned
+   *    client.
+   *
+   * The trade is losing `removeCallbacksAndMessages`, so shutdown rests entirely on [destroyed] —
+   * checked as the first statement of the scheduled work, and set before this is shut down.
    */
-  private val mainHandler = Handler(Looper.getMainLooper())
+  private val lanReissueExecutor: ExecutorService =
+    Executors.newSingleThreadExecutor { Thread(it, "relais-lan-reissue") }
 
   // Guards the single init path (delta review: onStartCommand used to be a bare START_STICKY, so a
   // retry START against an already-alive-but-failed service — gated-repo 401, bad model id, process
@@ -306,12 +322,14 @@ class RelaisNodeService : Service() {
           schedule()
 
         /**
-         * Callbacks arrive on a binder/handler thread; everything downstream touches `httpsServer`,
-         * so hop to the main thread first. That hop also serialises the work, which is what lets
-         * [reissueAndRebind] read and set [lanReissueDone] without a CAS.
+         * Callbacks arrive on a binder/handler thread. Hand off to [lanReissueExecutor], which both
+         * serialises the work — so [reissueAndRebind] needs no CAS — and keeps the crypto and
+         * keystore IO off the main thread. `execute` throws `RejectedExecutionException` once the
+         * executor is shut down, which is the normal state after `onDestroy`, so the hand-off is
+         * wrapped rather than allowed to crash a framework callback.
          */
         private fun schedule() {
-          mainHandler.post { reissueAndRebind() }
+          runCatching { lanReissueExecutor.execute { reissueAndRebind() } }
         }
       }
     lanReissueCallback = callback
@@ -342,8 +360,8 @@ class RelaisNodeService : Service() {
     // FIRST statement, deliberately: a post queued before onDestroy still runs after it, and the
     // work below would otherwise start a listener that outlives the service.
     if (destroyed) return
-    // Everything here runs on the main thread (see the callback's `schedule`), which serialises it
-    // and is why a plain read-then-set suffices where a CAS used to be.
+    // Everything here runs on [lanReissueExecutor]'s single thread (see the callback's `schedule`),
+    // which serialises it and is why a plain read-then-set suffices where a CAS used to be.
     if (lanReissueDone.get()) return
 
     // Nothing to re-mint FOR yet. `onAvailable` routinely precedes DHCP, so this is the common
@@ -431,7 +449,9 @@ class RelaisNodeService : Service() {
     // FIRST, before anything can be torn down: everything already queued on the main looper reads
     // this and bails, and everything scheduled after it never runs.
     destroyed = true
-    mainHandler.removeCallbacksAndMessages(null)
+    // Order matters: the flag is set BEFORE the executor stops, so a task already running observes
+    // it and returns rather than constructing a listener that would outlive this service.
+    lanReissueExecutor.shutdownNow()
     idleTtlExecutor?.shutdownNow()
     ThermalGovernor.unregister()
     RelaisDiscovery.unregister()

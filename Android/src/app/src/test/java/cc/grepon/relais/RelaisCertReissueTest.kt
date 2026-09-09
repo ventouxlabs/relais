@@ -175,6 +175,43 @@ class RelaisCertReissueTest {
     )
   }
 
+  /**
+   * The pin-survival contract stated as the property a *caller* must not break (M2).
+   *
+   * `RelaisTls.loadLeafKeyPair` used to swallow every failure and generate a fresh key, so a
+   * truncated read or a password mismatch silently rotated the NODE KEY PIN. It now throws rather
+   * than rotating, and this pins the reason that matters: a regenerated key is a *different* pin,
+   * so a client's `--pinnedpubkey` stops matching with no error the user can act on.
+   *
+   * Not reachable through `RelaisTls` from the JVM lane (it needs a `Context`), so this asserts the
+   * property over the minter directly — which is where the value actually is, since it is the thing
+   * feature-23 depends on.
+   */
+  @Test
+  fun `a regenerated leaf key changes the node key pin, which is why rotation must never be silent`() {
+    val ca = RelaisCertMint.mintCa()
+    val sans = RelaisCertMint.buildSanList(addrs("192.168.1.40"))
+
+    val original = RelaisCertMint.generateLeafKeyPair()
+    val regenerated = RelaisCertMint.generateLeafKeyPair()
+
+    val pinBefore = RelaisCertFingerprint.spkiSha256Base64(original.public)
+    val pinAfter = RelaisCertFingerprint.spkiSha256Base64(regenerated.public)
+
+    // Both mint perfectly valid certificates under the same CA — which is exactly the problem: the
+    // node looks healthy, the chain verifies, and only the pinned client breaks.
+    RelaisCertMint.mintLeaf(ca.keyPair.private, ca.certificate, original.public, sans)
+      .verify(ca.keyPair.public)
+    RelaisCertMint.mintLeaf(ca.keyPair.private, ca.certificate, regenerated.public, sans)
+      .verify(ca.keyPair.public)
+
+    assertNotEquals(
+      "a regenerated key is a different pin — silently doing this breaks every --pinnedpubkey client",
+      pinBefore,
+      pinAfter,
+    )
+  }
+
   private fun addrs(vararg s: String): List<InetAddress> = s.map { InetAddress.getByName(it) }
 
   private fun mint(sans: List<org.bouncycastle.asn1.x509.GeneralName>): X509Certificate {

@@ -34,6 +34,10 @@ package cc.grepon.relais
  * @property leafNotAfter the leaf's expiry as epoch millis, for the "in N days" row.
  * @property caPem the CA certificate in PEM, served verbatim by `GET /ca.crt` and written by the
  *   share sheet. The CA only — never the leaf, and never a key.
+ * @property caWasReplaced true when an unreadable CA keystore forced a replacement CA this session.
+ *   Every previously imported `relais-ca.crt` is now worthless, and clients will fail verification
+ *   with nothing to explain why — so the surfaces that display certificate state say so rather than
+ *   leaving the only record in logcat.
  */
 // Public, unlike most Relais types, because the public `DashboardStatus` carries one. That is safe
 // precisely because of the invariant above: every field is public certificate material.
@@ -43,4 +47,5 @@ data class RelaisCertInfo(
   val sanList: List<String>,
   val leafNotAfter: Long,
   val caPem: String,
+  val caWasReplaced: Boolean = false,
 )

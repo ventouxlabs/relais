@@ -127,6 +127,43 @@ Prefer per-connection `--cacert` over installing the CA into a system trust
 store. A system-store install is trusted by *everything* on that client — see the
 blast-radius limitation below.
 
+`/ca.crt` is served as `application/x-x509-ca-cert` with
+`Content-Disposition: attachment`. That MIME type is the one desktop and mobile
+platforms associate with "a CA to install", which pulls in the direction this
+document argues against; the `attachment` disposition is what keeps a browser
+saving the file rather than offering to trust it system-wide. Save it and pass it
+per connection.
+
+## Removing the CA when you are done with it
+
+**Do this before selling, trading in, or handing on the phone**, and on any client
+you no longer want trusting the node. This is the other half of the trust story
+and the mitigation for the ten-year lifetime described below — the CA is **not**
+removed when Relais is uninstalled.
+
+- **Per-connection use (`--cacert`)** — delete the `relais-ca.crt` file. That is
+  the whole removal; nothing else on the client ever trusted it. This is the main
+  reason to prefer that path.
+- **Linux system store** — remove the file from `/usr/local/share/ca-certificates/`
+  and run `sudo update-ca-certificates --fresh`.
+- **macOS** — Keychain Access → System (or login) → find `Relais Node CA <hex>` →
+  delete. Or: `sudo security delete-certificate -c "Relais Node CA <hex>"`.
+- **Windows** — `certmgr.msc` → Trusted Root Certification Authorities →
+  Certificates → find `Relais Node CA <hex>` → delete.
+- **iOS/iPadOS** — Settings → General → VPN & Device Management → remove the
+  profile; also uncheck it under Certificate Trust Settings if you enabled full
+  trust.
+- **Android** — Settings → Security → Encryption & credentials → Trusted
+  credentials → User → find it → remove. (Recall that apps ignore user-installed
+  CAs from Android 7 onward, so this store only ever affected browsers and apps
+  that opted in.)
+- **On the node itself** — clearing Relais's app data discards the CA and leaf
+  keystores. The node mints a fresh CA on next start, and every client must
+  re-import; the old CA becomes useless to anyone holding a copy.
+
+The CA's subject is `Relais Node CA <8 hex characters>`, which is how you identify
+the right one in a store containing several.
+
 ## Known limitations (tracked)
 
 - **Verification is client-side opt-in, and the node cannot enforce or observe
@@ -176,6 +213,22 @@ blast-radius limitation below.
   strong sense; it is the node's own reachability, and an attacker already on the
   LAN learns the same by scanning. It is still a reconnaissance change from the
   old address-free certificate.
+
+  The same applies to **identity across networks**: the CA's public key and its
+  `Relais Node CA <8 hex>` subject are fixed for the life of an install and
+  presented before any authentication, so the same phone is recognisable as the
+  same phone on every LAN it joins. That is inherent to a per-node CA rather than
+  something to engineer around, but it is worth knowing if you move the node
+  between networks you would rather not correlate.
+
+- **The CA outlives Relais.** It is valid for ten years, is imported once, and is
+  **not** removed when the app is uninstalled or the phone is wiped from the
+  client's point of view. A phone that is sold, repaired, or handed on takes its
+  CA private key with it while the previous owner's clients keep trusting it. See
+  "Removing the CA when you are done with it" above — that section exists for this
+  bullet. The certificate's extended key usage limits it to server and client
+  authentication (not code signing, e-mail, or timestamping), which bounds but
+  does not eliminate the exposure.
 - **A node running longer than 90 days serves an expired leaf.** Re-issue is
   computed at node start (and once when the LAN first comes up after a boot-time
   start), not on a timer. Restart to re-issue. Tracked as a follow-up.
