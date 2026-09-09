@@ -79,9 +79,35 @@ class RelaisNodeService : Service() {
   private var idleTtlExecutor: ScheduledExecutorService? = null
 
   // feature-18 T5b: the one-shot watch that re-mints + rebinds :8443 when the LAN comes up after a
-  // boot-time start. Set before the re-mint, so two interfaces appearing together can't both pass.
+  // boot-time start. Consumed at the commit point in reissueAndRebind, not on entry.
   private val lanReissueDone = AtomicBoolean(false)
-  private var lanReissueCallback: ConnectivityManager.NetworkCallback? = null
+
+  // Volatile: assigned on the "relais-init" thread, read on main by onDestroy. A stale null there
+  // makes unregisterLanReissue return early, leaving the NetworkCallback registered forever — and
+  // because it is an anonymous inner class it pins this destroyed Service, so a link-properties
+  // change hours later can start a listener for a node the user stopped this morning.
+  @Volatile private var lanReissueCallback: ConnectivityManager.NetworkCallback? = null
+
+  /**
+   * Set as the FIRST statement of [onDestroy], read as the FIRST statement of [reissueAndRebind].
+   *
+   * `unregisterLanReissue` stops *future* callbacks but cannot recall a `reissueAndRebind` already
+   * sitting in the main looper's queue. That queued post would run after `onDestroy` and construct
+   * a `RelaisHttpServer` on `applicationContext` — which outlives the service — leaving a
+   * LAN-facing TLS listener on `0.0.0.0:8443` owned by a destroyed service, with nothing left able
+   * to stop it short of process death.
+   *
+   * Both `onDestroy` and the posted work run on the main thread, so that ordering is what makes
+   * this airtight rather than merely narrow: any post that has not started by the time `onDestroy`
+   * sets this flag is guaranteed to observe it.
+   */
+  @Volatile private var destroyed = false
+
+  /**
+   * One handler for the service's lifetime, so [onDestroy] can drain the queue. A fresh `Handler`
+   * per callback — the previous shape — leaves nothing to call `removeCallbacksAndMessages` on.
+   */
+  private val mainHandler = Handler(Looper.getMainLooper())
 
   // Guards the single init path (delta review: onStartCommand used to be a bare START_STICKY, so a
   // retry START against an already-alive-but-failed service — gated-repo 401, bad model id, process
@@ -257,6 +283,11 @@ class RelaisNodeService : Service() {
     // `needsLanReissue` answers true when it cannot tell, so an unreadable-because-in-flight
     // keystore arms rather than silently skipping; `reissueAndRebind` re-checks before it touches
     // the listener, so arming when it turns out to be unnecessary costs one predicate call.
+    // A retry START after a failed init re-enters this method (startupDispatchInFlight is released
+    // in a finally), and the assignment below would then overwrite a live registration — leaking
+    // every callback but the last, each pinning this Service. Unregister first; it is a no-op when
+    // nothing is registered.
+    unregisterLanReissue()
     val noAddressesYet = RelaisLanIp.allLanAddresses().isEmpty()
     if (!noAddressesYet && !RelaisTls.needsLanReissue(applicationContext)) return
     val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
@@ -280,7 +311,7 @@ class RelaisNodeService : Service() {
          * [reissueAndRebind] read and set [lanReissueDone] without a CAS.
          */
         private fun schedule() {
-          Handler(Looper.getMainLooper()).post { reissueAndRebind() }
+          mainHandler.post { reissueAndRebind() }
         }
       }
     lanReissueCallback = callback
@@ -297,52 +328,62 @@ class RelaisNodeService : Service() {
   /**
    * Re-mints for the live addresses and swaps the listener.
    *
-   * **Driven by observed addresses, not by which callback fired.** A callback that arrives before
-   * the interface has an address returns without consuming the guard or unregistering, so the watch
-   * survives to see the link-properties change that carries the actual address. Only once there is
-   * something to re-mint for does this commit — and from that point every path is terminal and
-   * unregisters, so a flapping link cannot rebuild the listener repeatedly.
+   * **Driven by observed addresses and by whether the work actually succeeded, not by which
+   * callback fired.** Three states are kept distinct, and conflating any two of them has already
+   * produced a bug in this method:
+   *  - *not yet* — no addresses, or the re-issue could not run. Return, stay armed, leave the
+   *    one-shot unspent; the next link-properties change retries.
+   *  - *nothing to do* — the certificate already covers the LAN. Terminal: spend the one-shot and
+   *    unregister.
+   *  - *committed* — a new certificate exists. Spend the one-shot, rebind exactly once, and
+   *    unregister however that goes.
    */
   private fun reissueAndRebind() {
-    // Runs only on the main thread (see the callback's `schedule`), so this read-then-set needs no
-    // CAS. The guard is consumed only where the work actually commits, below — an earlier version
-    // set it in the callback and released it here, which meant a callback that arrived before DHCP
-    // burned the one shot.
+    // FIRST statement, deliberately: a post queued before onDestroy still runs after it, and the
+    // work below would otherwise start a listener that outlives the service.
+    if (destroyed) return
+    // Everything here runs on the main thread (see the callback's `schedule`), which serialises it
+    // and is why a plain read-then-set suffices where a CAS used to be.
     if (lanReissueDone.get()) return
-    if (RelaisLanIp.allLanAddresses().isEmpty()) {
-      // Nothing to re-mint FOR yet, so this is not the callback we are waiting for. Return without
-      // touching the guard or the registration: the address will arrive as a link-properties
-      // change, and that is the one that matters.
+
+    // Nothing to re-mint FOR yet. `onAvailable` routinely precedes DHCP, so this is the common
+    // case rather than an error — stay armed for the link-properties change carrying the address.
+    if (RelaisLanIp.allLanAddresses().isEmpty()) return
+
+    // Re-check rather than trust arming: arming deliberately over-answers, because it cannot read
+    // a keystore the accept thread is still writing.
+    if (!RelaisTls.needsLanReissue(applicationContext)) {
+      Log.i(TAG, "LAN is up and the certificate already covers it; no rebind needed")
+      lanReissueDone.set(true)
+      unregisterLanReissue()
       return
     }
+
+    // A failed re-issue leaves the certificate on disk unchanged, so rebinding would drop live
+    // connections to serve exactly what was being served before. It is also RECOVERABLE and must
+    // not spend the one-shot: on a fresh install this runs with CA minting disabled while the
+    // accept thread is still generating the CA, and the next callback will succeed.
+    if (!RelaisTls.reissueForLan(applicationContext)) {
+      Log.w(TAG, "LAN re-issue produced no new certificate yet; staying armed")
+      return
+    }
+
+    // Committed. From here exactly one rebind happens and the watch ends, however it goes.
+    lanReissueDone.set(true)
     try {
-      // The commit point: there are addresses, so this callback is the one we were waiting for.
-      // Every path below is terminal and the `finally` unregisters, so consuming the guard here
-      // cannot strand a later real callback the way consuming it in the callback did.
-      lanReissueDone.set(true)
-      // Re-check here, not only at arming time. Arming deliberately over-answers (it cannot read a
-      // keystore that `start()` is still writing on the accept thread), and this is what makes that
-      // free: if the certificate already covers the live addresses there is nothing to do, and
-      // rebinding anyway would drop live connections and churn the cert for no reason.
-      if (!RelaisTls.needsLanReissue(applicationContext)) {
-        Log.i(TAG, "LAN is up and the certificate already covers it; no rebind needed")
-        return
-      }
-      RelaisTls.reissueForLan(applicationContext)
       httpsServer?.stop()
       // Byte-for-byte the construction in dispatchStartupIfNeeded, just later. In-flight
       // connections on the old listener are dropped — acceptable, since it was serving a
-      // loopback-only cert that no LAN client could verify anyway.
+      // loopback-only cert no LAN client could verify anyway.
       httpsServer =
         RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0")
           .also { it.start() }
       Log.i(TAG, "Re-issued the leaf certificate for the LAN and rebound :8443")
     } catch (e: Exception) {
-      Log.e(TAG, "LAN re-issue/rebind failed", e)
+      Log.e(TAG, "LAN rebind failed after a successful re-issue", e)
     } finally {
-      // In a finally, not after a success: a throw partway through must still stop the watch, or a
-      // flapping link retries the same failure indefinitely. The early "no address yet" bail above
-      // returns before this block precisely so it does NOT consume the one-shot.
+      // In a finally: a throw partway through must still end the watch, or a flapping link retries
+      // the same failure forever.
       unregisterLanReissue()
     }
   }
@@ -372,6 +413,10 @@ class RelaisNodeService : Service() {
   }
 
   override fun onDestroy() {
+    // FIRST, before anything can be torn down: everything already queued on the main looper reads
+    // this and bails, and everything scheduled after it never runs.
+    destroyed = true
+    mainHandler.removeCallbacksAndMessages(null)
     idleTtlExecutor?.shutdownNow()
     ThermalGovernor.unregister()
     RelaisDiscovery.unregister()

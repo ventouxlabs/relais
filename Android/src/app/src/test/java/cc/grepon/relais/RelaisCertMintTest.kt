@@ -58,6 +58,26 @@ class RelaisCertMintTest {
     assertFalse("the CA key must not be usable for a TLS handshake", usage[0])
   }
 
+  /**
+   * With `NameConstraints` gone, the CA's EKU is the remaining thing bounding what it can be used
+   * for — so it is pinned rather than left implicit.
+   *
+   * Verifiers that chain EKU intersect the leaf's with the issuer's, so a serverAuth-only CA cannot
+   * be repurposed to issue client-auth, code-signing or e-mail certificates. Non-critical
+   * deliberately: EKU-on-a-CA is a convention, not a universal, and a critical unknown extension is
+   * the fail-closed trap that got NameConstraints removed.
+   */
+  @Test
+  fun `the CA is limited to server auth, non-critically`() {
+    val ca = RelaisCertMint.mintCa()
+
+    assertEquals(listOf("1.3.6.1.5.5.7.3.1"), ca.certificate.extendedKeyUsage) // id-kp-serverAuth
+    assertFalse(
+      "a critical EKU on the CA would invite rejection by verifiers that do not chain EKU",
+      ca.certificate.criticalExtensionOIDs.contains(Extension.extendedKeyUsage.id),
+    )
+  }
+
   @Test
   fun `the CA key is EC and the leaf key is RSA`() {
     val ca = RelaisCertMint.mintCa()

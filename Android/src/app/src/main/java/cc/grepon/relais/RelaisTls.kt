@@ -132,11 +132,20 @@ internal object RelaisTls {
    * This only changes what a **newly constructed** listener will serve. A bound `SSLServerSocket`
    * cannot pick up a new certificate, so the caller must stop and reconstruct the listener —
    * [RelaisNodeService] owns `httpsServer` and does exactly that.
+   *
+   * **Returns whether anything was actually re-issued, and the caller must honour it.** This used
+   * to swallow the failure and return `Unit`, so a caller tore down and rebuilt a listener having
+   * changed nothing — pure downside. The realistic failure is not exotic: on a fresh install this
+   * runs with `allowMintCa = false` while the accept thread is still generating the CA, so the
+   * load throws, and the guard upstream cannot prevent it because `needsLanReissue` deliberately
+   * answers "true" when it cannot read the keystore, which is exactly that state.
    */
-  fun reissueForLan(context: Context) {
-    runCatching { loadOrMint(context, allowMintCa = false, allowMintLeaf = true, forceLeafReissue = true) }
+  fun reissueForLan(context: Context): Boolean =
+    runCatching {
+        loadOrMint(context, allowMintCa = false, allowMintLeaf = true, forceLeafReissue = true)
+      }
       .onFailure { Log.w(TAG, "LAN re-issue failed; keeping the existing certificate", it) }
-  }
+      .isSuccess
 
   /** The loaded keystore plus everything the callers above need, so a load happens once per call. */
   private class State(

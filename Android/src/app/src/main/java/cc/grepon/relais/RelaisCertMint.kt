@@ -171,6 +171,17 @@ internal object RelaisCertMint {
       JcaX509v3CertificateBuilder(name, serial(), notBefore, notAfter, name, keyPair.public).apply {
         addExtension(Extension.basicConstraints, true, BasicConstraints(0))
         addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.keyCertSign or KeyUsage.cRLSign))
+        // Bounds what this CA can be used FOR, now that NameConstraints no longer bounds what it
+        // can be used ON. Verifiers that chain EKU (CryptoAPI and NSS among them) intersect the
+        // leaf's EKU with the issuer's, so a CA marked serverAuth-only cannot be turned into one
+        // that issues client, code-signing or e-mail certificates — the natural next move for
+        // someone who extracted the key. It matches the leaf's own EKU exactly, so it can never
+        // narrow the intersection below what the node actually needs.
+        //
+        // Non-critical on purpose: EKU-on-a-CA is a widely-honoured convention rather than a
+        // universal one, and marking it critical would invite rejection from verifiers that do not
+        // implement EKU chaining — the same fail-closed trap that removed NameConstraints.
+        addExtension(Extension.extendedKeyUsage, false, ExtendedKeyUsage(KeyPurposeId.id_kp_serverAuth))
         addExtension(
           Extension.subjectKeyIdentifier,
           false,
