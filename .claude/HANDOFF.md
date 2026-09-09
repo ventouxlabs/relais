@@ -105,7 +105,7 @@ and `resetIncrementsForTest` — #19 rebases. Each plan's `Cross-plan` section n
 **Five decisions RESOLVED (JD, 2026-09-07) — plans updated, ready to build against:**
 - ✅ #18 Q2 — exempt-route rate-limit budget: **the existing 30/60s (`RATE_LIMIT`/`RATE_WINDOW_MS`),
   unchanged.** No new constant. Unmetered-failed-auth (Decision 10) accepted as-is, no follow-up scheduled.
-- ✅ #18 Q5 — NameConstraints: **keep them**, scoped to the node's own SAN set.
+- ✅ #18 Q5 — NameConstraints: ~~keep them~~ **REVERSED 2026-09-08: drop them entirely.** Unenforceable by any JVM/Android verifier, and they break `curl --cacert` on a node holding a public IP. See the plan's Q5 entry for the full reasoning; `RelaisCertMintTest` pins the absence.
 - ✅ #18 Q8 — RFC1918/overlay SANs: **no opt-out, keep all LAN addresses.** Documented as a pre-auth
   disclosure in Δ10 and SECURITY.md; not worth a config surface.
 - ✅ #22 stepper ladder: **non-linear 1/5/15/30/60**, keeps the 1-minute floor. `RelaisIdleTtl.kt` is

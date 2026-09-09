@@ -138,27 +138,32 @@ blast-radius limitation below.
   leaf key, and signs only for the node's own names. Compromise of the phone was
   already total for the node, so this is not new exposure *for the node* — but if
   a user installed the CA into a client's **system trust store**, whoever holds
-  that key can impersonate any name the CA is permitted to sign for, to that
-  client. This is why the docs lead with per-connection `--cacert`.
+  that key can impersonate any name the CA signs for, to that client. This is why
+  the docs lead with per-connection `--cacert`, which scopes the trust to one
+  connection instead of everything that client does.
 
-  The CA carries a critical `NameConstraints` extension limiting it to
-  private/CGNAT/loopback IP ranges and the `localhost` and `local` DNS subtrees.
-  Two limits on how much that is worth, both of which matter:
+  **`NameConstraints` was built, measured, and deliberately removed** — it is not
+  an oversight, and re-adding it would be a regression. A CA constrained to
+  private/CGNAT/loopback ranges plus the `localhost` and `local` DNS subtrees
+  looked like free defence in depth. It was not:
 
-  **It blocks public names, not your own network.** The CA cannot sign for
-  `google.com` or a public IP. It can still sign for *any* RFC1918, CGNAT or
-  loopback address — i.e. everything on your LAN. Against an attacker already on
-  your network the constraints buy nothing; what they bound is a stolen key's
-  reach to private networks rather than the whole internet.
+  - **Inert on half the clients.** Neither the JDK's PKIX validator nor
+    BouncyCastle's applies a *trust anchor's* own name constraints — the JDK
+    refuses them outright, BC accepts a prohibited leaf silently. Every
+    Java/Android/JSSE client got nothing.
+  - **Actively harmful on the path we document.** The node puts every address it
+    holds in the certificate, including globally routable ones on a cellular
+    hotspot or an ISP that hands out public addresses. Those SANs fall outside the
+    permitted ranges, so `curl --cacert` — the flow recommended above — rejects
+    the whole chain. The main observable effect was breaking the recommended
+    client.
+  - **Fail-closed for verifiers we never test.** RFC 5280 requires the extension
+    be critical, and a verifier that processes but does not understand a critical
+    extension must reject the certificate.
+  - **Unverifiable in CI**, as a direct consequence of the first point.
 
-  **Whether they are enforced at all depends on the client.** OpenSSL applies a
-  root's name constraints, so they are real for `curl --cacert`, the path these
-  docs recommend — verified, not assumed: a leaf for `8.8.8.8` is rejected with
-  `permitted subtree violation`. Java-based clients enforce **nothing** here:
-  neither the JDK's PKIX validator nor BouncyCastle's applies a trust anchor's own
-  constraints (the JDK refuses them outright, BC accepts such a leaf silently).
-  They ignore the extension rather than rejecting it, so it costs no
-  compatibility — but do not count on it outside the documented path.
+  It never constrained issuance for LAN addresses in any case, which is precisely
+  where an attacker on your network already is.
 - **`GET /ca.crt` is unauthenticated.** It serves only the public CA certificate —
   never the leaf, never a private key — so the disclosure is nil. The hazard is
   the bootstrap: a user who fetches it over an already-compromised link and skips

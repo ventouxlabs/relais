@@ -29,10 +29,8 @@ import org.bouncycastle.asn1.x509.ExtendedKeyUsage
 import org.bouncycastle.asn1.x509.Extension
 import org.bouncycastle.asn1.x509.GeneralName
 import org.bouncycastle.asn1.x509.GeneralNames
-import org.bouncycastle.asn1.x509.GeneralSubtree
 import org.bouncycastle.asn1.x509.KeyPurposeId
 import org.bouncycastle.asn1.x509.KeyUsage
-import org.bouncycastle.asn1.x509.NameConstraints
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
 import org.bouncycastle.cert.jcajce.JcaX509ExtensionUtils
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
@@ -126,42 +124,36 @@ internal object RelaisCertMint {
   }
 
   /**
-   * Mints the self-signed per-node CA: EC P-256, 10 years, `keyCertSign`-only, path length 0 (it
-   * may issue leaves and nothing else), and name-constrained.
+   * Mints the self-signed per-node CA: EC P-256, 10 years, `keyCertSign`-only, path length 0 — it
+   * may issue leaves and nothing else.
    *
    * The common name embeds the first 8 hex characters of the SPKI digest so two nodes are
    * distinguishable in a system trust store, which is the only place a user ever sees a CA subject.
    *
-   * **On the NameConstraints scope.** The constraints permit the *categories* of address a node can
-   * ever hold — RFC1918, CGNAT, loopback, IPv4 link-local, IPv6 ULA and global unicast, plus the
-   * `localhost` and `local` DNS subtrees — and deliberately **not** the addresses this node happens
-   * to hold right now. Constraining to the observed set would be tighter, and would break the
-   * feature's central promise: the CA is minted once and never re-minted, while the leaf's
-   * addresses change with DHCP, so a CA permitting only `192.168.1.0/24` would reject its own
-   * node's leaf after a move to a `10.0.0.0/8` network. That failure appears only on hardware,
-   * only after a network change. `RelaisCertMintTest` pins the surviving case explicitly.
+   * **There is deliberately no `NameConstraints` extension. This was decided, not overlooked —
+   * do not add one back.** It was built, measured, and removed (JD, 2026-09-08), for four reasons:
    *
-   * **Be precise about what this buys, because the name of the extension promises more than it
-   * delivers here.** It blocks issuance for *public* names: a CA a user installed system-wide
-   * cannot sign for `google.com` or a public IP, because the permitted `dNSName` subtrees are only
-   * `localhost` and `local`. It does **not** constrain issuance *within* the private ranges at all
-   * — whoever holds this key can still sign for any RFC1918, CGNAT or loopback address, which is
-   * every address on the user's own network. Against an attacker already on that LAN it buys
-   * nothing; its value is bounding a stolen key's reach to the user's own networks instead of the
-   * whole internet.
+   *  1. **Inert where it would matter most.** Java's PKIX validator cannot enforce a trust anchor's
+   *     own name constraints — it reads them from the `TrustAnchor` object, never from the anchor
+   *     certificate, and refuses them if supplied. BouncyCastle's validator accepts the parameter
+   *     and ignores it (measured: it validated a leaf for `8.8.8.8` under a CA that prohibited it).
+   *     Every Java/Android/JSSE client therefore got zero benefit.
+   *  2. **Actively harmful on the documented path.** [RelaisLanIp.allLanAddresses] admits globally
+   *     routable IPv4, so on a cellular hotspot or an ISP handing out public addresses the leaf
+   *     carries a SAN the constraints prohibit, and `curl --cacert` — the flow SECURITY.md
+   *     recommends — rejects the whole chain. A control whose main observable effect is breaking
+   *     the client we tell people to use is a net negative.
+   *  3. **Critical means fail-closed for verifiers we never test.** RFC 5280 requires the extension
+   *     be critical, and a verifier that processes but does not understand a critical extension
+   *     must reject the certificate.
+   *  4. **Untestable in CI**, per (1) — an earlier version of the tests passed
+   *     `TrustAnchor(ca, null)`, which applies no constraints at all, so three tests were green
+   *     while asserting nothing.
    *
-   * **How much that is worth depends entirely on the verifier, and it is measured, not assumed.**
-   * OpenSSL — and so `curl --cacert`, the documented path — applies a root's name constraints.
-   * Java's PKIX validator does **not**: it takes constraints from the `TrustAnchor` object rather
-   * than the anchor certificate, and outright refuses them there
-   * (`name constraints in trust anchor not supported`). `RelaisCertMintTest` pins that refusal, so
-   * nobody re-derives it and nobody writes a test that appears to prove enforcement and does not.
-   * Defence in depth on the documented path; inert on a Java client.
-   *
-   * Marked critical per RFC 5280, which says conforming CAs MUST. That is the RFC-correct choice
-   * and it costs nothing on the verifiers above (a trust anchor's own extensions are generally not
-   * processed), but a verifier that *did* process it and did not understand it would reject the
-   * chain outright — which is one of the things `CertTrustProbe` exists to catch on conscrypt.
+   * The benefit was partial even where it worked: it never constrained issuance for LAN addresses,
+   * which is exactly where an attacker on the LAN already sits. What bounds a stolen CA key now is
+   * the same thing that bounds a stolen leaf key — the phone's own security, plus the fact that
+   * `--cacert` scopes trust to one connection instead of a system store.
    */
   fun mintCa(): Minted {
     val keyPair =
@@ -179,7 +171,6 @@ internal object RelaisCertMint {
       JcaX509v3CertificateBuilder(name, serial(), notBefore, notAfter, name, keyPair.public).apply {
         addExtension(Extension.basicConstraints, true, BasicConstraints(0))
         addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.keyCertSign or KeyUsage.cRLSign))
-        addExtension(Extension.nameConstraints, true, nameConstraints())
         addExtension(
           Extension.subjectKeyIdentifier,
           false,
@@ -277,40 +268,6 @@ internal object RelaisCertMint {
     val wanted =
       if (liveSans.isEmpty()) null else GeneralNames(liveSans.toTypedArray()).encoded
     return !(currentSans contentEquals wanted)
-  }
-
-  /**
-   * The permitted subtrees described on [mintCa]. An `iPAddress` subtree is **address plus mask**
-   * (8 octets for IPv4, 32 for IPv6), not the bare 4/16 octets a SAN entry uses — BouncyCastle
-   * derives that from the CIDR string form, and a bare `"192.168.0.0"` here would encode a
-   * constraint that silently matches nothing. `RelaisCertMintTest` asserts the encoded lengths so
-   * that stays true.
-   */
-  private fun nameConstraints(): NameConstraints {
-    val permitted =
-      listOf(
-        // RFC1918 private ranges — the ordinary home/office LAN.
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-        // RFC6598 CGNAT: where Tailscale and similar overlays put their addresses.
-        "100.64.0.0/10",
-        // Loopback, so `adb forward` + https://localhost:8443 still verifies.
-        "127.0.0.0/8",
-        // IPv4 link-local (APIPA / some tethering fallbacks).
-        "169.254.0.0/16",
-        // IPv6 loopback, unique-local, and global unicast (a phone with native IPv6 holds one).
-        "::1/128",
-        "fc00::/7",
-        "2000::/3",
-      )
-        .map { GeneralSubtree(GeneralName(GeneralName.iPAddress, it)) } +
-        // The only two DNS subtrees the node ever answers to. This is the constraint that stops a
-        // system-store-installed CA from being usable against the rest of the internet.
-        listOf("localhost", "local").map {
-          GeneralSubtree(GeneralName(GeneralName.dNSName, it))
-        }
-    return NameConstraints(permitted.toTypedArray(), null)
   }
 
   /** A positive, unpredictable 64-bit serial. Sequential serials leak how many certs a node has minted. */
