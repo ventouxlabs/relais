@@ -195,7 +195,9 @@ class RelaisHttpServer(
   private val tls: Boolean = false,
   private val bindAddr: String = "127.0.0.1", // safe default; callers opt into 0.0.0.0 for TLS (C1)
 ) {
-  private var serverSocket: ServerSocket? = null
+  // Volatile: written on the accept thread, read by stop() on whatever thread called it. Without
+  // it a stop() racing startup can read a stale null and close nothing.
+  @Volatile private var serverSocket: ServerSocket? = null
   private val pool = Executors.newFixedThreadPool(MAX_CONNECTIONS)
   @Volatile private var running = false
   private val apiKey by lazy { RelaisConfig.apiKey(context) }
@@ -213,16 +215,33 @@ class RelaisHttpServer(
     running = true
     Thread(
         {
+          // Held locally as well as in the field so the `finally` can always close it. The bind
+          // happens on this thread, after `RelaisTls.buildServerSocket` has possibly minted a
+          // certificate — hundreds of milliseconds during which `stop()` can run, see a still-null
+          // `serverSocket`, and close nothing. Without the `finally` that socket would stay bound
+          // and hold the port against a replacement listener: feature-18's LAN rebind would then
+          // leave the node with NO HTTPS listener at all, which is worse than the stale certificate
+          // it exists to replace. Closing on every exit path — normal, early, or exceptional —
+          // removes the race rather than narrowing it.
+          var socket: ServerSocket? = null
           try {
-            val socket = RelaisTls.buildServerSocket(context, tls).apply { reuseAddress = true; bind(InetSocketAddress(bindAddr, port)) }
-            serverSocket = socket
+            val bound =
+              RelaisTls.buildServerSocket(context, tls).apply {
+                reuseAddress = true
+                bind(InetSocketAddress(bindAddr, port))
+              }
+            socket = bound
+            serverSocket = bound
+            if (!running) return@Thread // stop() arrived while we were minting; `finally` closes it
             Log.i(TAG, "Listening on ${if (tls) "https" else "http"} $bindAddr:$port")
             while (running) {
-              val client = socket.accept()
+              val client = bound.accept()
               pool.execute { handle(client) }
             }
           } catch (e: Exception) {
             if (running) Log.e(TAG, "Server loop error", e)
+          } finally {
+            runCatching { socket?.close() }
           }
         },
         "relais-http",

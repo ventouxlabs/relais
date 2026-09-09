@@ -177,7 +177,17 @@ internal object RelaisTls {
     val leafKey = loadLeafKeyPair(tlsFile, tlsPass)
     val liveSans = RelaisCertMint.buildSanList(RelaisLanIp.allLanAddresses())
 
-    val existingLeaf = if (leafKey == null) null else loadLeaf(tlsFile, tlsPass)
+    // A leaf counts as reusable only if the CURRENT CA actually signed it. If `relais_ca.p12` was
+    // deleted or corrupted, loadOrMintCa quietly mints a replacement — and the leaf on disk is then
+    // signed by a CA that no longer exists. The SAN set and the expiry are both unchanged in that
+    // case, so the re-issue predicate would happily keep it, and the node would serve a leaf
+    // chained to a CA that cannot have signed it: a chain no client can validate, produced by a
+    // path whose whole job is recovering cleanly.
+    val existingLeaf =
+      if (leafKey == null) null
+      else loadLeaf(tlsFile, tlsPass)?.takeIf { leaf ->
+        runCatching { leaf.verify(caCert.publicKey) }.isSuccess
+      }
     val reissue =
       allowMintLeaf &&
         (forceLeafReissue ||

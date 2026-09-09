@@ -141,6 +141,40 @@ class RelaisCertReissueTest {
     after.verify(ca.keyPair.public)
   }
 
+  /**
+   * A leaf is only reusable if the **current** CA signed it (codex P2).
+   *
+   * `RelaisTls` recovers from a deleted or corrupt `relais_ca.p12` by minting a replacement CA. The
+   * leaf on disk survives that, with its SAN set and expiry untouched — so [needsReissue] alone
+   * says "keep it", and the node would serve a leaf chained to a CA that cannot have signed it.
+   * Nothing about the certificate looks wrong; it simply fails to validate at every client.
+   *
+   * The predicate cannot detect this on its own (it is not given the CA, deliberately — it answers
+   * one question), so `RelaisTls` filters the loaded leaf through a signature check first. This
+   * pins the property that filter exists for: a leaf and a foreign CA must not verify.
+   */
+  @Test
+  fun `a leaf does not verify against a CA that did not sign it`() {
+    val original = RelaisCertMint.mintCa()
+    val replacement = RelaisCertMint.mintCa()
+    val leafKey = RelaisCertMint.generateLeafKeyPair()
+    val sans = RelaisCertMint.buildSanList(addrs("192.168.1.40"))
+    val leaf =
+      RelaisCertMint.mintLeaf(original.keyPair.private, original.certificate, leafKey.public, sans)
+
+    // The predicate on its own is blind to the swap: same SANs, same expiry, so it says "keep".
+    assertFalse(
+      "needsReissue cannot see a CA swap — which is exactly why RelaisTls checks the signature",
+      RelaisCertMint.needsReissue(leaf, sans, now),
+    )
+    // The signature check is what catches it.
+    leaf.verify(original.keyPair.public) // throws if this ever stops holding
+    assertFalse(
+      "a leaf must not verify against a replacement CA",
+      runCatching { leaf.verify(replacement.keyPair.public) }.isSuccess,
+    )
+  }
+
   private fun addrs(vararg s: String): List<InetAddress> = s.map { InetAddress.getByName(it) }
 
   private fun mint(sans: List<org.bouncycastle.asn1.x509.GeneralName>): X509Certificate {

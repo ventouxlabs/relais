@@ -24,6 +24,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -261,11 +262,24 @@ class RelaisNodeService : Service() {
     val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
     val callback =
       object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) {
-          // onAvailable runs on a binder/handler thread. Everything below touches httpsServer, so
-          // it hops to the main thread first — racing an in-flight accept() on the old socket is
-          // exactly the kind of bug that only shows up on a real device under real traffic.
-          if (!lanReissueDone.compareAndSet(false, true)) return
+        // BOTH callbacks, and that is the fix for the third incarnation of this bug. `onAvailable`
+        // fires when a network becomes usable, which is routinely BEFORE DHCP has assigned an
+        // address — and it does not fire again when the address later arrives. Listening only for
+        // it meant the one callback we got was spent on a moment with nothing to re-mint for, and
+        // the node then served its loopback-only certificate for its entire uptime. Address
+        // assignment surfaces as a link-properties change, so that is the event that actually
+        // carries the information this feature needs.
+        override fun onAvailable(network: Network) = schedule()
+
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) =
+          schedule()
+
+        /**
+         * Callbacks arrive on a binder/handler thread; everything downstream touches `httpsServer`,
+         * so hop to the main thread first. That hop also serialises the work, which is what lets
+         * [reissueAndRebind] read and set [lanReissueDone] without a CAS.
+         */
+        private fun schedule() {
           Handler(Looper.getMainLooper()).post { reissueAndRebind() }
         }
       }
@@ -283,18 +297,29 @@ class RelaisNodeService : Service() {
   /**
    * Re-mints for the live addresses and swaps the listener.
    *
-   * Keeps the watch armed when the callback arrived **before** the interface had an address —
-   * `onAvailable` routinely fires ahead of address assignment, which is why
-   * `onLinkPropertiesChanged` exists at all. Disarming on that early bail would spend the one-shot
-   * on a callback that did nothing, and [lanReissueDone] would then block every real one.
+   * **Driven by observed addresses, not by which callback fired.** A callback that arrives before
+   * the interface has an address returns without consuming the guard or unregistering, so the watch
+   * survives to see the link-properties change that carries the actual address. Only once there is
+   * something to re-mint for does this commit — and from that point every path is terminal and
+   * unregisters, so a flapping link cannot rebuild the listener repeatedly.
    */
   private fun reissueAndRebind() {
+    // Runs only on the main thread (see the callback's `schedule`), so this read-then-set needs no
+    // CAS. The guard is consumed only where the work actually commits, below — an earlier version
+    // set it in the callback and released it here, which meant a callback that arrived before DHCP
+    // burned the one shot.
+    if (lanReissueDone.get()) return
     if (RelaisLanIp.allLanAddresses().isEmpty()) {
-      // Not a failure and not a rebind: release the guard and stay armed for the next callback.
-      lanReissueDone.set(false)
+      // Nothing to re-mint FOR yet, so this is not the callback we are waiting for. Return without
+      // touching the guard or the registration: the address will arrive as a link-properties
+      // change, and that is the one that matters.
       return
     }
     try {
+      // The commit point: there are addresses, so this callback is the one we were waiting for.
+      // Every path below is terminal and the `finally` unregisters, so consuming the guard here
+      // cannot strand a later real callback the way consuming it in the callback did.
+      lanReissueDone.set(true)
       // Re-check here, not only at arming time. Arming deliberately over-answers (it cannot read a
       // keystore that `start()` is still writing on the accept thread), and this is what makes that
       // free: if the certificate already covers the live addresses there is nothing to do, and
