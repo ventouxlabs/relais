@@ -142,15 +142,23 @@ blast-radius limitation below.
   client. This is why the docs lead with per-connection `--cacert`.
 
   The CA carries a critical `NameConstraints` extension limiting it to
-  private/CGNAT/loopback IP ranges and the `localhost` and `local` DNS subtrees,
-  so it cannot sign for a public name. **How much that is worth depends on the
-  client, and it is worth nothing on some of them.** OpenSSL — and therefore
-  `curl --cacert`, the path these docs recommend — applies name constraints from a
-  root. Java's PKIX validator does **not**: it reads constraints from the
-  `TrustAnchor` object rather than the anchor certificate, and explicitly refuses
-  them there (`name constraints in trust anchor not supported`), so a Java client
-  ignores the extension entirely. Treat the constraints as defence in depth on the
-  documented path, not as a guarantee across all clients.
+  private/CGNAT/loopback IP ranges and the `localhost` and `local` DNS subtrees.
+  Two limits on how much that is worth, both of which matter:
+
+  **It blocks public names, not your own network.** The CA cannot sign for
+  `google.com` or a public IP. It can still sign for *any* RFC1918, CGNAT or
+  loopback address — i.e. everything on your LAN. Against an attacker already on
+  your network the constraints buy nothing; what they bound is a stolen key's
+  reach to private networks rather than the whole internet.
+
+  **Whether they are enforced at all depends on the client.** OpenSSL applies a
+  root's name constraints, so they are real for `curl --cacert`, the path these
+  docs recommend — verified, not assumed: a leaf for `8.8.8.8` is rejected with
+  `permitted subtree violation`. Java-based clients enforce **nothing** here:
+  neither the JDK's PKIX validator nor BouncyCastle's applies a trust anchor's own
+  constraints (the JDK refuses them outright, BC accepts such a leaf silently).
+  They ignore the extension rather than rejecting it, so it costs no
+  compatibility — but do not count on it outside the documented path.
 - **`GET /ca.crt` is unauthenticated.** It serves only the public CA certificate —
   never the leaf, never a private key — so the disclosure is nil. The hazard is
   the bootstrap: a user who fetches it over an already-compromised link and skips

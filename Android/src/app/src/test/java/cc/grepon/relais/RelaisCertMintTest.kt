@@ -13,6 +13,10 @@
 package cc.grepon.relais
 
 import java.net.InetAddress
+import org.junit.Assume.assumeTrue
+import kotlin.io.path.createTempDirectory
+import java.util.Base64
+import java.io.File
 import java.security.cert.CertPathValidator
 import java.security.cert.CertificateFactory
 import java.security.cert.PKIXParameters
@@ -189,17 +193,15 @@ class RelaisCertMintTest {
    * `TrustAnchor(cert, null)` form silently applies none — the validator reads constraints from the
    * `TrustAnchor` object, never from the anchor certificate's own extension.
    *
-   * So there is **no way to prove end-to-end constraint enforcement in this lane**, and a test that
-   * appeared to do so would be asserting nothing. What is verifiable here is the extension's
-   * content, which the two subtree tests above cover.
+   * **BouncyCastle's PKIX is no better, and this was measured rather than assumed:** with the BC
+   * provider a leaf for `8.8.8.8` / `evil.example.com` validates cleanly under this CA, with the
+   * constraints supplied to the `TrustAnchor` and without. So no JVM path enforces them.
    *
    * This is a limitation of the *verifier*, not of the certificate. It also means the constraints
-   * cost nothing in compatibility: a Java client ignores them rather than rejecting. OpenSSL (and
-   * therefore `curl --cacert`, the documented path) does apply root name constraints, so the
-   * protection is real where the docs point users — but it is **unverified by CI** and must be
-   * checked on hardware:
-   *
-   *   openssl verify -CAfile relais-ca.crt leaf.pem
+   * cost nothing in compatibility: a Java client ignores them rather than rejecting. OpenSSL does
+   * apply them, which is what makes them real on `curl --cacert` — the path the docs recommend —
+   * and that half **is** covered, by
+   * [`openssl rejects a leaf for a public name and accepts one from another private range`].
    */
   @Test
   fun `the JVM cannot enforce a trust anchor's own name constraints`() {
@@ -231,6 +233,146 @@ class RelaisCertMintTest {
         (e.message ?: "").contains("name constraints", ignoreCase = true),
       )
     }
+  }
+
+  /**
+   * The permitted set, pinned exactly — the hermetic half of the guard against the constraints
+   * silently degrading to "permit everything".
+   *
+   * End-to-end enforcement cannot be asserted in this lane (see the JVM test above), so without
+   * this a change that widened the subtrees to `0.0.0.0/0`, or dropped the extension entirely,
+   * would leave every other test in this file green. Pinning the literal set means widening the
+   * CA's authority is always a deliberate, visible edit.
+   */
+  @Test
+  fun `the permitted subtree set is exactly the private and loopback ranges, with no catch-all`() {
+    val ca = RelaisCertMint.mintCa()
+    val permitted = permittedSubtrees(ca.certificate)
+
+    val ips =
+      permitted.filter { it.tagNo == GeneralName.iPAddress }.map { cidr(it) }.toSet()
+    assertEquals(
+      setOf(
+        "10.0.0.0/255.0.0.0",
+        "172.16.0.0/255.240.0.0",
+        "192.168.0.0/255.255.0.0",
+        "100.64.0.0/255.192.0.0",
+        "127.0.0.0/255.0.0.0",
+        "169.254.0.0/255.255.0.0",
+        "0:0:0:0:0:0:0:1/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        "fc00:0:0:0:0:0:0:0/fe00:0:0:0:0:0:0:0",
+        "2000:0:0:0:0:0:0:0/e000:0:0:0:0:0:0:0",
+      ),
+      ips,
+    )
+    // The specific degradations worth naming: an all-zero mask permits the whole address space.
+    assertFalse("no IPv4 catch-all", ips.any { it.endsWith("/0.0.0.0") })
+    assertFalse("no IPv6 catch-all", ips.any { it.endsWith("/0:0:0:0:0:0:0:0") })
+  }
+
+  /**
+   * **The real inverse test the JVM lane cannot provide**: a leaf for a public IP and a public DNS
+   * name must be REJECTED, and the cross-network leaf must still be ACCEPTED.
+   *
+   * Shelling out to `openssl` is a deliberate exception to this repo's hermetic-JVM-test rule, and
+   * it is the only way to get this coverage at all: neither Sun's PKIX nor BouncyCastle's applies a
+   * *trust anchor's* own name constraints (measured — BC validates the leaf below without
+   * complaint, Sun refuses the parameter outright). OpenSSL does, which is what makes the
+   * constraints real on `curl --cacert`, the path the docs recommend.
+   *
+   * `assumeTrue`-gated on openssl being present, so it skips rather than fails where it is not.
+   */
+  @Test
+  fun `openssl rejects a leaf for a public name and accepts one from another private range`() {
+    assumeTrue("openssl not on PATH; skipping the only end-to-end name-constraint check", hasOpenssl())
+
+    val ca = RelaisCertMint.mintCa()
+    val leafKey = RelaisCertMint.generateLeafKeyPair()
+    val dir = createTempDirectory("relais-nc").toFile()
+
+    fun write(name: String, cert: X509Certificate) =
+      File(dir, name).apply {
+        writeText(
+          "-----BEGIN CERTIFICATE-----\n" +
+            Base64.getEncoder().encodeToString(cert.encoded).chunked(64).joinToString("\n") +
+            "\n-----END CERTIFICATE-----\n"
+        )
+      }
+
+    write("ca.pem", ca.certificate)
+    write(
+      "home.pem",
+      RelaisCertMint.mintLeaf(
+        ca.keyPair.private, ca.certificate, leafKey.public,
+        RelaisCertMint.buildSanList(listOf(InetAddress.getByName("192.168.1.40"))),
+      ),
+    )
+    // Acceptance criterion 3: the phone moved to a different network, same CA, no re-import.
+    write(
+      "moved.pem",
+      RelaisCertMint.mintLeaf(
+        ca.keyPair.private, ca.certificate, leafKey.public,
+        RelaisCertMint.buildSanList(listOf(InetAddress.getByName("10.44.7.9"))),
+      ),
+    )
+    // What a stolen CA key must never be able to produce. Split into two single-name leaves so the
+    // IP subtrees and the DNS subtrees are pinned INDEPENDENTLY: a combined leaf is rejected as
+    // soon as either half matches, so widening only the IP ranges to a catch-all would leave a
+    // combined assertion green. (Confirmed by mutation — that is exactly what happened.)
+    write(
+      "evil-ip.pem",
+      RelaisCertMint.mintLeaf(
+        ca.keyPair.private, ca.certificate, leafKey.public,
+        listOf(GeneralName(GeneralName.iPAddress, "8.8.8.8")),
+      ),
+    )
+    write(
+      "evil-dns.pem",
+      RelaisCertMint.mintLeaf(
+        ca.keyPair.private, ca.certificate, leafKey.public,
+        listOf(GeneralName(GeneralName.dNSName, "evil.example.com")),
+      ),
+    )
+
+    assertTrue("a leaf for the node's own LAN must verify", opensslVerify(dir, "home.pem").first)
+    assertTrue(
+      "a leaf minted on another private range must still verify — this is what a CA scoped to the " +
+        "addresses observed at mint time would break, only on hardware, only after a network change",
+      opensslVerify(dir, "moved.pem").first,
+    )
+
+    for (evil in listOf("evil-ip.pem", "evil-dns.pem")) {
+      val (ok, out) = opensslVerify(dir, evil)
+      assertFalse("the CA must not be able to vouch for $evil: $out", ok)
+      assertTrue(
+        "expected a name-constraints rejection specifically for $evil, got: $out",
+        out.contains("permitted subtree violation", ignoreCase = true) ||
+          out.contains("excluded subtree violation", ignoreCase = true),
+      )
+    }
+  }
+
+  private fun hasOpenssl(): Boolean =
+    runCatching { ProcessBuilder("openssl", "version").start().waitFor() == 0 }.getOrDefault(false)
+
+  /** Runs `openssl verify -CAfile ca.pem <leaf>`; returns (verified, combined output). */
+  private fun opensslVerify(dir: File, leaf: String): Pair<Boolean, String> {
+    val proc =
+      ProcessBuilder("openssl", "verify", "-CAfile", "ca.pem", leaf)
+        .directory(dir)
+        .redirectErrorStream(true)
+        .start()
+    val out = proc.inputStream.bufferedReader().readText()
+    return (proc.waitFor() == 0) to out
+  }
+
+  /** A name-constraint `iPAddress` subtree rendered as `address/mask`, its two halves split. */
+  private fun cidr(gn: GeneralName): String {
+    val octets = ASN1OctetString.getInstance(gn.name).octets
+    val half = octets.size / 2
+    val addr = InetAddress.getByAddress(octets.copyOfRange(0, half)).hostAddress
+    val mask = InetAddress.getByAddress(octets.copyOfRange(half, octets.size)).hostAddress
+    return "$addr/$mask"
   }
 
   private fun mintPair(addrs: List<String>): Pair<RelaisCertMint.Minted, X509Certificate> {

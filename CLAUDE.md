@@ -72,9 +72,10 @@ under `src/full`/`src/degoogled`/`src/playsafe`.
   CI. Keep new probes runnable via a single `adb shell am instrument -e class …` line documented in
   the probe's own file header, matching `ToolCallingProbe.kt`/`RelaisBackendBenchmarkTest.kt`.
 - Files in this codebase run long by Android convention — `RelaisHttpServer.kt` is the largest at
-  **2202 lines** (measured 2026-08-29). **Re-measure with `wc -l` rather than quoting this number:**
-  it has now been stale twice, once here at "~1700" and once in the codemaps at "~1900", both times
-  because a figure was copied forward instead of checked. The repo's own target is well under 800 —
+  **2326 lines** (measured 2026-09-08). **Re-measure with `wc -l` rather than quoting this number:**
+  it has now been stale three times — here at "~1700", in the codemaps at "~1900", and here again at
+  "2202" (found 2026-09-08 during feature-18, by which point the file had grown another 124 lines).
+  Every time, a figure was copied forward instead of checked. The repo's own target is well under 800 —
   prefer extracting a new file (as `RelaisHttpIo.kt` was extracted from `RelaisHttpServer.kt`) over
   growing an existing large file further.
 - Room schema changes are **additive-only with an explicit migration** — there is no destructive

@@ -141,8 +141,14 @@ internal object RelaisCertMint {
    * node's leaf after a move to a `10.0.0.0/8` network. That failure appears only on hardware,
    * only after a network change. `RelaisCertMintTest` pins the surviving case explicitly.
    *
-   * What the constraints buy: a CA a user installed system-wide cannot sign for `google.com`,
-   * because the permitted `dNSName` subtrees are only `localhost` and `local`.
+   * **Be precise about what this buys, because the name of the extension promises more than it
+   * delivers here.** It blocks issuance for *public* names: a CA a user installed system-wide
+   * cannot sign for `google.com` or a public IP, because the permitted `dNSName` subtrees are only
+   * `localhost` and `local`. It does **not** constrain issuance *within* the private ranges at all
+   * — whoever holds this key can still sign for any RFC1918, CGNAT or loopback address, which is
+   * every address on the user's own network. Against an attacker already on that LAN it buys
+   * nothing; its value is bounding a stolen key's reach to the user's own networks instead of the
+   * whole internet.
    *
    * **How much that is worth depends entirely on the verifier, and it is measured, not assumed.**
    * OpenSSL — and so `curl --cacert`, the documented path — applies a root's name constraints.
