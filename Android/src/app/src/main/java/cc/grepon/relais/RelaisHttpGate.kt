@@ -92,17 +92,38 @@ internal object RelaisHttpGate {
   }
 
   /**
-   * The paths reachable without a bearer token. Note the deliberate asymmetry:
+   * Does [path] address the health endpoint?
    *
-   * - `/health` uses `startsWith`, matching both the pre-existing gate and the dispatch `when`, so a
-   *   query string still reaches it.
-   * - `/ca.crt` is an **exact** match. A `startsWith("/ca.crt")` would hand the exemption to
-   *   `/ca.crtXYZ` and anything else merely beginning with it.
+   * **This is the single definition, and that is load-bearing.** Three sites must agree on it:
+   *  1. the auth exemption and budget selection in [decide],
+   *  2. the dispatch `when` in `RelaisHttpServer.handle()`, which routes to `handleHealth`,
+   *  3. `RelaisHttpServer.endpointLabel`, which names the metrics series.
    *
-   * The `/ca.crt` route itself lands in feature-18 T6; the exemption is pre-placed so its
-   * exact-match semantics are pinned by `RelaisHttpGateTest` before any handler exists. Until then
-   * an unauthenticated `GET /ca.crt` falls through the dispatch `when` to `404 not found`.
+   * Drift between 1 and 2 would let a request take the auth exemption *and* the larger exempt budget
+   * while routing into a protected handler — `/health/../v1/models` is the shape to think about.
+   * Drift between either and 3 mislabels the metrics for the one route whose rate-limiting behavior
+   * changed in #314, which is exactly the series an operator reads when they start seeing `429`s.
+   * All three call this function, so an edit here moves all three at once. **Do not reintroduce a
+   * local copy** — feature-18 T6 (which adds the `/ca.crt` route) and feature-09 (which moves
+   * `handleDashboard`) both touch these sites.
+   *
+   * `startsWith`, not `==`, so a query string still matches — the pre-existing contract.
    */
+  fun isHealthPath(path: String): Boolean = path.startsWith("/health")
+
+  /**
+   * Does [path] address the CA-certificate export?
+   *
+   * **Exact** match, deliberately asymmetric with [isHealthPath]: a `startsWith("/ca.crt")` would
+   * hand the auth exemption to `/ca.crtXYZ` and anything else merely beginning with it.
+   *
+   * The route lands in feature-18 T6; until then this has one caller ([authExempt]) and an
+   * unauthenticated `GET /ca.crt` falls through the dispatch `when` to `404 not found`. T6 must add
+   * its dispatch branch and its metrics label through *this* predicate, not a fresh literal.
+   */
+  fun isCaCertPath(path: String): Boolean = path == "/ca.crt"
+
+  /** The paths reachable without a bearer token, and the ones charged the auth-exempt budget. */
   private fun authExempt(method: String, path: String): Boolean =
-    method == "GET" && (path.startsWith("/health") || path == "/ca.crt")
+    method == "GET" && (isHealthPath(path) || isCaCertPath(path))
 }

@@ -19,7 +19,9 @@
 package cc.grepon.relais
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -148,6 +150,35 @@ class RelaisHttpGateTest {
   @Test
   fun `POST ca_crt is not auth-exempt`() {
     assertEquals(401, decide(method = "POST", path = "/ca.crt", authorized = false))
+  }
+
+  // -------------------------------------------------------------------------
+  // The shared path predicates
+  //
+  // `isHealthPath` has three callers: this gate, the dispatch `when` that routes to handleHealth,
+  // and the metrics label. Only the gate is reachable from a JVM test — the other two live inside
+  // (or are private to) `RelaisHttpServer.handle()`. So these tests pin the DEFINITION, and the
+  // extraction is what makes the other two callers agree with it by construction. That structural
+  // fact, not a test, is what prevents drift; asserting on the dispatch site from here is not
+  // something this suite can honestly do.
+  // -------------------------------------------------------------------------
+
+  @Test
+  fun `isHealthPath matches by prefix so a query string still routes to health`() {
+    assertTrue(RelaisHttpGate.isHealthPath("/health"))
+    assertTrue(RelaisHttpGate.isHealthPath("/health?verbose=1"))
+    assertTrue(RelaisHttpGate.isHealthPath("/healthz"))
+    assertFalse(RelaisHttpGate.isHealthPath("/"))
+    assertFalse(RelaisHttpGate.isHealthPath("/v1/models"))
+    assertFalse(RelaisHttpGate.isHealthPath("//health"))
+  }
+
+  @Test
+  fun `isCaCertPath matches exactly`() {
+    assertTrue(RelaisHttpGate.isCaCertPath("/ca.crt"))
+    assertFalse(RelaisHttpGate.isCaCertPath("/ca.crtXYZ"))
+    assertFalse(RelaisHttpGate.isCaCertPath("/ca.crt?x=1"))
+    assertFalse(RelaisHttpGate.isCaCertPath("/ca.cr"))
   }
 
   // -------------------------------------------------------------------------

@@ -334,7 +334,8 @@ class RelaisHttpServer(
         // Request-scoped context threaded into the extracted route handlers (#173).
         val ctx = RequestContext(sock, reader, contentLength, path, endpoint, accept, sessionEnabled, sessionHeader, ::reply)
         when {
-          method == "GET" && path.startsWith("/health") -> handleHealth(ctx)
+          // Same predicate as the auth exemption and the metrics label — see [RelaisHttpGate.isHealthPath].
+          method == "GET" && RelaisHttpGate.isHealthPath(path) -> handleHealth(ctx)
 
           method == "GET" && path == "/" -> handleDashboard(ctx)
 
@@ -1929,7 +1930,8 @@ class RelaisHttpServer(
 
   private fun endpointLabel(path: String): String =
     when {
-      path.startsWith("/health") -> "/health"
+      // Same predicate as the auth exemption and the dispatch branch — see [RelaisHttpGate.isHealthPath].
+      RelaisHttpGate.isHealthPath(path) -> "/health"
       path == "/" -> "/"
       path.startsWith("/experiments") -> "/experiments"
       path.startsWith("/metrics") -> "/metrics"

@@ -282,6 +282,14 @@ object RelaisMetrics {
    * no user-controlled metric-label cardinality). Anything outside the known endpoints becomes
    * "other". Mirrors the HTTP server's own normalizer; duplicated here so the metrics boundary is
    * self-defending even if a caller forgets to pre-normalize.
+   *
+   * NOTE: this matches paths with `==` where the server's normalizer and [RelaisHttpGate] use
+   * `startsWith`, and that difference is **deliberate — do not "unify" it away.** Those two answer
+   * "which route is this?" about a raw request path that may carry a query string; this one is a
+   * last-line cardinality guard over a value that should already be a normalized label, so exactness
+   * is the guarantee. Loosening it to `startsWith` would let `/healthXXXX` (or a traversal like
+   * `/v1/chat/completions/../../secret`) earn a real label instead of collapsing to "other" — the
+   * behavior `RelaisMetricsIncrementsTest` pins.
    */
   fun endpointLabel(raw: String): String =
     when {
