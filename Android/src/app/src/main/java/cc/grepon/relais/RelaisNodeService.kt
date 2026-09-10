@@ -237,7 +237,10 @@ class RelaisNodeService : Service() {
    * what actually makes concurrent calls (onCreate racing onStartCommand, repeated START taps) safe.
    */
   private fun dispatchStartupIfNeeded() {
-    val listenersUp = httpServer != null && httpsServer != null
+    // `isListening`, NOT `!= null`. A stopped server is still non-null, so a null check answered
+    // "did someone assign a field?" rather than "is a listener up?" — and read a dead listener as
+    // healthy, which is how a failed rebind became permanent. Ask the artefact.
+    val listenersUp = httpServer?.isListening == true && httpsServer?.isListening == true
     if (!shouldDispatchStartup(RelaisEngine.isReady, startupDispatchInFlight.get(), listenersUp)) return
     if (!startupDispatchInFlight.compareAndSet(false, true)) return // lost the race; another dispatch is already running
 
@@ -273,7 +276,10 @@ class RelaisNodeService : Service() {
         // Security C1: plaintext HTTP is loopback-only (in-device app/dev); the LAN is served only
         // over HTTPS, so the bearer key never crosses the network in cleartext.
         httpServer = RelaisHttpServer(applicationContext, port = 8080, bindAddr = "127.0.0.1").also { it.start() }
-        httpsServer = RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0").also { it.start() }
+        // Same helper the rebind uses, so both inherit one failure contract rather than each
+        // growing its own. A false here throws into the catch below, which tears the partial
+        // startup down so a later START can retry.
+        check(startHttpsListener()) { "HTTPS listener failed to bind :8443" }
         armLanReissueIfNeeded() // feature-18: the boot race — see the method KDoc
         RelaisDiscovery.register(applicationContext) // advertise _relais._tcp for zero-config LAN discovery
         // Periodic TTL prune for the optional session memory (Feature #5). Idempotent + no-ops when
@@ -309,6 +315,45 @@ class RelaisNodeService : Service() {
         startupDispatchInFlight.set(false) // release the guard — a future retry (fresh START) may dispatch again
       }
     }
+  }
+
+  /**
+   * The **only** place an HTTPS listener is constructed, and the single owner of what happens when
+   * one fails to come up.
+   *
+   * Startup and the LAN rebind both do stop-then-start-then-publish, and both had the identical
+   * hole: `it.start()` throwing meant the assignment never ran, so the field kept pointing at a
+   * *stopped* server that every liveness check read as healthy — node permanently without its LAN
+   * listener, reporting live. It was fixed on the startup path first, and the rebind path had it
+   * unchanged. **Three times on this branch a fix went where the bug was found rather than where
+   * the mistake is made**, so the recovery rule lives here once and a third caller inherits it.
+   *
+   * The rule: clear the reference *before* constructing, so a throw can never leave a stale one;
+   * report success as a value the caller must handle; and leave state honest — no listener, nothing
+   * claiming otherwise — so a retry is possible.
+   *
+   * @return true when a listener is bound and accepting.
+   */
+  private fun startHttpsListener(): Boolean {
+    // Cleared first, not in the failure branch: between here and a successful assignment there must
+    // be no window in which the field names something that is not listening.
+    httpsServer = null
+    return runCatching {
+        httpsServer =
+          RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0")
+            .also { it.start() }
+      }
+      .onFailure {
+        Log.e(TAG, "HTTPS listener failed to bind :8443", it)
+        httpsServer = null
+      }
+      .isSuccess
+  }
+
+  /** Stops the current HTTPS listener and starts a fresh one. Same failure contract as [startHttpsListener]. */
+  private fun replaceHttpsListener(): Boolean {
+    httpsServer?.stop()
+    return startHttpsListener()
   }
 
   /**
@@ -438,8 +483,9 @@ class RelaisNodeService : Service() {
       return
     }
 
-    // Committed. From here exactly one rebind happens and the watch ends, however it goes.
-    lanReissueDone.set(true)
+    // NOT marked done yet. The one-shot is spent only once a replacement is actually listening —
+    // spending it here and having the rebind fail is what left the node permanently without its
+    // LAN listener, since nothing would retry.
     try {
       // ── INVARIANT: once teardown has begun, nothing may construct a RelaisHttpServer. ──
       //
@@ -467,21 +513,27 @@ class RelaisNodeService : Service() {
           Log.i(TAG, "Teardown began during the re-issue; not rebinding :8443")
           return
         }
-        httpsServer?.stop()
-        // Byte-for-byte the construction in dispatchStartupIfNeeded, just later. In-flight
-        // connections on the old listener are dropped — acceptable, since it was serving a
-        // loopback-only cert no LAN client could verify anyway.
-        httpsServer =
-          RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0")
-            .also { it.start() }
+        // In-flight connections on the old listener are dropped — acceptable, since it was serving
+        // a loopback-only cert no LAN client could verify anyway.
+        if (!replaceHttpsListener()) {
+          // The certificate was re-issued but nothing is listening — e.g. another process took
+          // 8443 between the stop and the bind. Leave the one-shot UNSPENT and stay registered so
+          // a later callback retries; `startHttpsListener` has already cleared the stale reference,
+          // so `listenersUp` reads false and a START can retry too.
+          Log.w(TAG, "Re-issued the certificate but the rebind failed; staying armed for a retry")
+          scheduleReissueRetry()
+          return
+        }
       }
+      // Only now: a replacement is bound and accepting, so the watch has done its job.
+      lanReissueDone.set(true)
       Log.i(TAG, "Re-issued the leaf certificate for the LAN and rebound :8443")
-    } catch (e: Exception) {
-      Log.e(TAG, "LAN rebind failed after a successful re-issue", e)
-    } finally {
-      // In a finally: a throw partway through must still end the watch, or a flapping link retries
-      // the same failure forever.
       unregisterLanReissue()
+    } catch (e: Exception) {
+      // Anything unexpected: leave the one-shot unspent and the watch armed rather than ending a
+      // mechanism whose whole purpose is to recover.
+      Log.e(TAG, "LAN rebind failed after a successful re-issue", e)
+      scheduleReissueRetry()
     }
   }
 

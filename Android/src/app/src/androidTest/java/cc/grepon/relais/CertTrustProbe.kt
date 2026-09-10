@@ -29,6 +29,7 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -180,7 +181,14 @@ class CertTrustProbe {
   @Test
   fun stopThenImmediatelyStartOnTheSamePortSucceeds() {
     val first = requireNotNull(server) { "setUp should have started a server" }
+    assertTrue("a started server must report listening", first.isListening)
+
     first.stop()
+
+    // The distinction both listener-recovery bugs turned on: a stopped server is still a non-null
+    // reference, so `server != null` answered "did someone assign a field?" rather than "is a
+    // listener up?" — and read a dead listener as healthy. `isListening` reads the socket.
+    assertFalse("a stopped server must NOT report listening", first.isListening)
 
     // If the port were still held, this throws — which is the failure worth catching, since the
     // production path would instead have swallowed it on a background thread.

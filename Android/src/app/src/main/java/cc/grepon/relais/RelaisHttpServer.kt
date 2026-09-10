@@ -209,6 +209,18 @@ class RelaisHttpServer(
    * callers already sequence — the listener is never started or stopped concurrently with itself.
    */
   @Volatile private var acceptThread: Thread? = null
+
+  /**
+   * Is this server **actually listening** right now?
+   *
+   * Callers used to answer that question with `server != null`, and a stopped server is still
+   * non-null — so a failed rebind left a reference to a dead listener that every liveness check
+   * read as healthy. This reads the artefact (a bound, open socket) rather than the intent
+   * (someone assigned a field), which is the distinction the `liveSans` and SAN-row bugs turned on
+   * as well.
+   */
+  val isListening: Boolean
+    get() = running && serverSocket?.isClosed == false
   private val pool = Executors.newFixedThreadPool(MAX_CONNECTIONS)
   @Volatile private var running = false
   private val apiKey by lazy { RelaisConfig.apiKey(context) }
