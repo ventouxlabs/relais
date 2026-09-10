@@ -262,6 +262,38 @@ class RelaisCertMintTest {
     )
   }
 
+  /**
+   * The SAN list a display surface shows must come from the **certificate being served**, never
+   * from the addresses the node currently holds.
+   *
+   * Those agree only right after a re-mint. On a running node whose address changed mid-session the
+   * leaf is unchanged — and this feature does not re-issue for that until restart — so sourcing the
+   * list from live addresses made the status page claim coverage of an address the certificate does
+   * not carry. It would have concealed the one gap a user hitting it most needs to see.
+   */
+  @Test
+  fun `the SAN list read back off a certificate is the certificate's own, not the live addresses`() {
+    val ca = RelaisCertMint.mintCa()
+    // Minted for the old address, as a leaf on a node that has since moved network would be.
+    val leaf =
+      RelaisCertMint.mintLeaf(
+        ca.keyPair.private,
+        ca.certificate,
+        RelaisCertMint.generateLeafKeyPair().public,
+        RelaisCertMint.buildSanList(listOf(InetAddress.getByName("192.168.1.40"))),
+      )
+
+    val reported = RelaisTls.RelaisCertPem.sansOf(leaf)
+
+    assertTrue("must report what the cert carries", reported.contains("192.168.1.40"))
+    assertTrue("loopback is always in the cert", reported.contains("127.0.0.1"))
+    // The address the node moved TO is absent from the certificate, so it must be absent here.
+    assertFalse(
+      "must NOT report an address the served certificate does not cover",
+      reported.contains("10.44.7.9"),
+    )
+  }
+
   private fun mintPair(addrs: List<String>): Pair<RelaisCertMint.Minted, X509Certificate> {
     val ca = RelaisCertMint.mintCa()
     val leaf =

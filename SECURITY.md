@@ -120,8 +120,20 @@ The node publishes **two** `sha256/...` values and they are not interchangeable:
 
 Pasting the CA value into `--pinnedpubkey` fails with an error that names
 neither. The leaf key is generated once and **reused** across every re-issue, so a
-`--pinnedpubkey` pin keeps working after the node's IP changes; only the
-certificate is re-minted.
+`--pinnedpubkey` pin survives a re-issue; only the certificate is re-minted.
+
+**When re-issue actually happens, which is narrower than it sounds:** at node
+start, plus once when the LAN first appears after a boot-time start. It is **not**
+triggered by an address change while the node is running — a phone that moves
+network mid-session keeps serving a certificate that no longer covers its address,
+and clients will fail hostname verification until the node is restarted. Restart
+after moving networks.
+
+**Fetching the CA over the connection you are trying to secure is circular.** An
+attacker positioned to intercept can serve you their own CA *and* their own
+fingerprint on the status page. Fetch it over a link you already trust, or pull it
+off the device directly (`adb`), and compare. Out-of-band verification — a QR on
+the node's own screen — is a tracked follow-up and is not in this release.
 
 Prefer per-connection `--cacert` over installing the CA into a system trust
 store. A system-store install is trusted by *everything* on that client — see the

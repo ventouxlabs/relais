@@ -260,6 +260,34 @@ class RelaisClientConfigTest {
     assertFalse("must not recommend the insecure curl -k flag", note.lowercase().contains("curl -k"))
   }
 
+  /**
+   * The note must not promise capabilities this release does not ship, and must not repeat the
+   * IP-change overclaim that hardware disproved.
+   *
+   * Both failures were live in shipped client-facing copy. The QR and the on-device CERTIFICATE
+   * section are a deferred follow-up, so telling a user to "scan the QR" pointed at nothing; and
+   * "keeps verifying when the node's IP changes" is false for a *running* node, which is exactly
+   * when a user would rely on it. Re-issue happens at node start plus one boot-time shot.
+   *
+   * Restore the QR wording only alongside the QR.
+   */
+  @Test
+  fun `tls note promises nothing this release does not ship`() {
+    val note = clientConfig().getJSONObject("tls").getString("note").lowercase()
+
+    assertFalse("the QR ships in a later release; do not point users at it", note.contains("qr"))
+    assertFalse(
+      "re-issue is at node start, not on a live address change",
+      note.contains("keeps verifying when the node's ip changes"),
+    )
+    // The honest replacements, so this can't be satisfied by simply deleting the claims.
+    assertTrue("must say a running node does not pick up an address change", note.contains("restart"))
+    assertTrue(
+      "must warn that fetching the CA over the untrusted link is circular",
+      note.contains("circular"),
+    )
+  }
+
   @Test
   fun `both fingerprints are exposed under distinct keys when the node has minted`() {
     val tls =

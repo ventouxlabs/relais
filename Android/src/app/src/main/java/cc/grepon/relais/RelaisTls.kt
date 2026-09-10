@@ -34,8 +34,14 @@ import org.bouncycastle.asn1.x509.GeneralName
  * inconvenient but impossible: a modern TLS client ignores CN entirely, so `--cacert` failed even
  * when the certificate was trusted, and every quickstart in the repo ended in `curl -k`. Now the
  * node mints a per-node CA once and a short-lived leaf under it that carries every live address as
- * a SAN. A client that imports the CA once keeps verifying across DHCP churn, because only the leaf
- * is re-minted.
+ * a SAN. A client imports the CA once and does not have to re-import when the leaf is re-issued,
+ * because only the leaf changes.
+ *
+ * **Re-issue happens at node start, plus once when the LAN first appears after a boot-time start —
+ * not on a live address change.** A node that moves network mid-session keeps serving a certificate
+ * that no longer covers its address until it restarts. Do not describe this as surviving DHCP
+ * churn: that claim was made, shipped into client-facing copy, and had to be retracted after
+ * hardware showed the stale-leaf case.
  *
  * **Two keystore files, deliberately.** `relais_ca.p12` holds the CA; `relais_tls.p12` holds the
  * leaf key and the `[leaf, ca]` chain. Only the latter is ever handed to a [KeyManagerFactory] —
@@ -44,8 +50,9 @@ import org.bouncycastle.asn1.x509.GeneralName
  *
  * **The leaf key pair is generated exactly once and reused across every re-mint.** Only the
  * certificate changes. This is a contract, not an optimization: it is what keeps
- * `curl --pinnedpubkey` valid after the phone's address changes, and feature-23 pins that same
- * leaf SPKI. `RelaisCertReissueTest` asserts it.
+ * `curl --pinnedpubkey` valid *across a re-issue*, and feature-23 pins that same leaf SPKI.
+ * `RelaisCertReissueTest` asserts it. (Note the scope, per the paragraph above: a re-issue is not
+ * the same thing as an address change, which only takes effect at the next start.)
  *
  * Migration from the pre-feature single-certificate keystore is safe precisely because **nobody was
  * trusting the old certificate** — every documented client passed `-k`. There is no established
@@ -182,12 +189,28 @@ internal object RelaisTls {
    * both read this on every request, so a node whose address had changed would have re-minted its
    * certificate on every page load. Read-only means read-only, for both.
    *
+   * **`@Synchronized` makes the whole load → mint → store sequence one transaction, and that is
+   * the point rather than a precaution.** This has two genuinely concurrent callers that share no
+   * other lock: the accept thread inside `buildServerSocket`, and the LAN re-issue thread. When
+   * DHCP lands during the initial HTTPS startup, both could observe an absent TLS keystore and
+   * each mint a *different* leaf key pair — one of which then gets served while the other is
+   * what the store, and therefore the reported NODE KEY PIN, contains. Or neither, and a half
+   * written PKCS12.
+   *
+   * `RelaisNodeService`'s `teardownLock` does **not** help here: it serialises the rebind against
+   * teardown, an adjacent window, and nothing at all against the accept thread. Two different
+   * pairings, two different locks — this is the one that protects the keystore.
+   *
+   * The invariant at stake is the same one [loadLeafKeyPair] refuses to break quietly: the leaf key
+   * is generated once and reused forever, because feature-23 pins its SPKI.
+   *
    * @param allowMintCa may create the CA. False for every read path.
    * @param allowMintLeaf may create or re-mint the leaf **and write the keystore**. False for every
    *   read path; true for the node start path and for the boot-race re-issue.
    * @param forceLeafReissue re-mint even if [RelaisCertMint.needsReissue] says otherwise, because
    *   the caller has already decided (the boot race). Requires [allowMintLeaf].
    */
+  @Synchronized
   private fun loadOrMint(
     context: Context,
     allowMintCa: Boolean,
@@ -246,7 +269,7 @@ internal object RelaisTls {
     ks.setKeyEntry(TLS_KEY_ALIAS, pair.private, tlsPass, arrayOf<java.security.cert.Certificate>(leaf, caCert))
     if (reissue) tlsFile.outputStream().use { ks.store(it, tlsPass) }
 
-    return State(ks, leaf, buildInfo(caCert, leaf, liveSans))
+    return State(ks, leaf, buildInfo(caCert, leaf))
   }
 
   /**
@@ -330,15 +353,25 @@ internal object RelaisTls {
       if (chain == null || chain.size < 2) null else chain[0] as X509Certificate
     }.getOrNull()
 
-  private fun buildInfo(
-    caCert: X509Certificate,
-    leaf: X509Certificate,
-    sans: List<GeneralName>,
-  ): RelaisCertInfo =
+  /**
+   * The snapshot every display surface reads — built **entirely from the certificate that is
+   * actually being served**, never from what the node currently wishes it had.
+   *
+   * The SAN list used to be the freshly enumerated `liveSans`, which is right only when the leaf
+   * was just re-minted from them. For a read-only caller on an already-running node whose address
+   * changed mid-session, the leaf on disk is unchanged while `liveSans` is not — so the panel
+   * claimed coverage of an address the served certificate does not carry, and hostname
+   * verification would fail against exactly the address the node was advertising as covered.
+   *
+   * That is the mid-session DHCP scenario this feature does NOT handle (re-issue happens at node
+   * start, plus the one boot-time shot), and reporting it from `liveSans` would have hidden the
+   * gap from the person looking straight at it.
+   */
+  private fun buildInfo(caCert: X509Certificate, leaf: X509Certificate): RelaisCertInfo =
     RelaisCertInfo(
       caFingerprint = RelaisCertFingerprint.spkiSha256Base64(caCert.publicKey),
       nodeKeyPin = RelaisCertFingerprint.spkiSha256Base64(leaf.publicKey),
-      sanList = sans.map { RelaisCertPem.renderSan(it) },
+      sanList = RelaisCertPem.sansOf(leaf),
       leafNotAfter = leaf.notAfter.time,
       caPem = RelaisCertPem.toPem(caCert),
       caWasReplaced = caWasReplaced,
@@ -363,6 +396,26 @@ internal object RelaisTls {
       val body = b64.chunked(PEM_LINE).joinToString("\n")
       return "-----BEGIN CERTIFICATE-----\n$body\n-----END CERTIFICATE-----\n"
     }
+
+    /**
+     * The SAN literals **the given certificate actually carries**, read back off its own extension.
+     *
+     * Deliberately sourced from the certificate rather than from the address list that was used to
+     * mint it: those two agree only immediately after a re-mint, and the case where they disagree
+     * is precisely the one a user needs to see (a mid-session address change the node has not
+     * re-issued for). Java normalises IPv6 on the way out — `::1` reads back as
+     * `0:0:0:0:0:0:0:1` — which is honest about what a verifier will match on.
+     *
+     * Empty on a malformed or absent extension rather than throwing: this feeds display surfaces,
+     * and a status page that fails to render tells the user less than one showing no SANs.
+     */
+    fun sansOf(cert: X509Certificate): List<String> =
+      runCatching {
+        cert.subjectAlternativeNames.orEmpty().mapNotNull { entry ->
+          (entry.getOrNull(1) as? String)?.takeIf { it.isNotBlank() }
+        }
+      }
+        .getOrDefault(emptyList())
 
     /** A SAN entry as the literal a user would recognise, for the UI and the served status page. */
     fun renderSan(gn: GeneralName): String =

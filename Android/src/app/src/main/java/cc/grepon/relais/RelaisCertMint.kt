@@ -41,8 +41,12 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
  *
  * **Why a CA at all, when a self-signed leaf is simpler.** A client that pins a bare leaf has to
  * re-import it every time DHCP moves the phone. The CA is minted once and never changes; the leaf
- * churns underneath it whenever the address set does, so one import keeps verifying forever. That
- * is the entire reason for the extra moving part.
+ * churns underneath it whenever the node re-issues, so the import is not invalidated by a re-issue.
+ * That is the entire reason for the extra moving part.
+ *
+ * Note the scope: re-issue is computed at node start and once when the LAN first appears after a
+ * boot-time start, **not** on a live address change. "One import and it always verifies" overstates
+ * it — see [RelaisTls].
  *
  * **This object has no `android.` imports and must keep none.** `RelaisTlsHandshakeTest` runs a
  * real TLS handshake against a cert minted here in the device-free JVM lane, which is only possible
