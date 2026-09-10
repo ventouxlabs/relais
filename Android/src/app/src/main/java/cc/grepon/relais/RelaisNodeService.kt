@@ -66,8 +66,23 @@ private const val LAN_REISSUE_MAX_ATTEMPTS = 24
  * [RelaisNodeService] itself — this predicate is a readable pre-check, not the sole source of
  * atomicity (this file can't observe a CAS race in a plain JVM test).
  */
-internal fun shouldDispatchStartup(ready: Boolean, dispatchInFlight: Boolean): Boolean =
-  !ready && !dispatchInFlight
+/**
+ * [listenersUp] is why `ready` alone is not enough. A TLS bind failure on `:8443` after loopback
+ * `:8080` has already started leaves the engine resident and `isReady` true — so gating only on
+ * `ready` meant no later START would retry, and the node reported **LIVE** with no HTTPS listener,
+ * permanently, even once the port conflict cleared.
+ *
+ * That was introduced by making bind failure *propagate* rather than be swallowed. The lesson is
+ * worth stating where the fix lives: **making a failure visible is not the same as making it
+ * recoverable.** The old code hid the error and left no listener; the new code surfaced it and left
+ * a node that claimed to be up. Both leave the user unable to connect; the second is more confident
+ * about it.
+ */
+internal fun shouldDispatchStartup(
+  ready: Boolean,
+  dispatchInFlight: Boolean,
+  listenersUp: Boolean,
+): Boolean = (!ready || !listenersUp) && !dispatchInFlight
 
 /**
  * Headless foreground service that hosts the resident multimodal engine (Gate 1) and the LAN
@@ -222,7 +237,8 @@ class RelaisNodeService : Service() {
    * what actually makes concurrent calls (onCreate racing onStartCommand, repeated START taps) safe.
    */
   private fun dispatchStartupIfNeeded() {
-    if (!shouldDispatchStartup(RelaisEngine.isReady, startupDispatchInFlight.get())) return
+    val listenersUp = httpServer != null && httpsServer != null
+    if (!shouldDispatchStartup(RelaisEngine.isReady, startupDispatchInFlight.get(), listenersUp)) return
     if (!startupDispatchInFlight.compareAndSet(false, true)) return // lost the race; another dispatch is already running
 
     // Provision the model (download if missing) then initialize the resident engine off the main
@@ -271,6 +287,21 @@ class RelaisNodeService : Service() {
       } catch (e: Exception) {
         Log.e(TAG, "Node init failed", e)
         RelaisEngine.lastInitFailed = true // surfaced as NodeState.ERROR (e.g. QS tile)
+        // Tear the listeners down rather than leaving whichever one started. A TLS bind failure on
+        // :8443 lands here with loopback :8080 already up and the engine resident, and a half-open
+        // node is the worst of the three states: it answers on loopback, reports LIVE, and serves
+        // no LAN. Clearing both is also what makes `listenersUp` false, which is what lets a later
+        // START actually retry — without it the failure was visible and permanent.
+        //
+        // The engine deliberately stays resident: it initialised fine, reloading it costs seconds
+        // of model load, and the init body is `ensure`-shaped so a retry no-ops through it and
+        // rebuilds only what is missing.
+        runCatching { httpServer?.stop() }
+        runCatching { httpsServer?.stop() }
+        httpServer = null
+        httpsServer = null
+        unregisterLanReissue()
+        runCatching { RelaisDiscovery.unregister() } // stop advertising a node that is not serving
         updateNotification("Init failed: ${e.message}")
       } finally {
         RelaisEngine.startupInProgress = false

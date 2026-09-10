@@ -237,9 +237,11 @@ the right one in a store containing several.
   where an attacker on your network already is.
 - **`GET /ca.crt` is unauthenticated.** It serves only the public CA certificate —
   never the leaf, never a private key — so the disclosure is nil. The hazard is
-  the bootstrap: a user who fetches it over an already-compromised link and skips
-  the fingerprint check has trusted the attacker. Treat it as a convenience;
-  the out-of-band fingerprint is what makes it safe.
+  the bootstrap: a user who fetches it over an already-compromised link has
+  trusted the attacker, and **this release gives them no way to detect that** —
+  the fingerprints the node publishes travel over the same connection. Fetch it
+  over a link you already trust; out-of-band verification lands with the QR in a
+  follow-up.
 - **The leaf's full SAN list is readable pre-auth.** Anyone who can complete a
   `ClientHello` against `:8443` learns every address the node holds, with no
   bearer token — including **overlay** (WireGuard/Tailscale) addresses, which are

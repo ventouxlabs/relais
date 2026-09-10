@@ -230,7 +230,10 @@ fun renderDashboardHtml(status: DashboardStatus): String {
     <tr>
       <td class="label" colspan="2" style="color:#8A8780;font-size:11px;line-height:1.5">${escapeHtml(
         "GET /ca.crt (no bearer key needed) to download the CA, then curl --cacert relais-ca.crt. " +
-          "Check the downloaded CA against the ca fingerprint above before trusting it. " +
+          "The ca fingerprint above does NOT verify that download: this page and /ca.crt arrive " +
+          "over the same connection, so anyone able to substitute the certificate can substitute " +
+          "this fingerprint too. Fetch the CA over a network you already trust; out-of-band " +
+          "verification lands in a later release. " +
           "Use the node key pin — not the ca fingerprint — with curl --pinnedpubkey.",
       )}</td>
     </tr>

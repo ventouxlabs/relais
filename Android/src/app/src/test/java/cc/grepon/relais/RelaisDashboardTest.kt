@@ -481,6 +481,38 @@ class RelaisDashboardTest {
     assertTrue("SANs must render", html.contains("192.168.1.42"))
   }
 
+  /**
+   * The served page must not tell a user to verify the CA against a fingerprint it serves itself.
+   *
+   * This is the **third** surface the claim appeared on — it was removed from `TLS_NOTE` and
+   * `SECURITY.md` a round earlier and survived here, which is why the retraction is now pinned by
+   * test on every surface rather than fixed where it was spotted. And this was the worst place to
+   * leave it: an attacker who can substitute the certificate can substitute this page, so their CA
+   * *will* match the fingerprint shown. The instruction manufactures confidence exactly when it is
+   * unwarranted and can talk a user into permanently trusting an attacker's CA.
+   *
+   * `--pinnedpubkey` guidance is fine and stays — that is a real, usable check.
+   */
+  @Test
+  fun `the certificate panel does not claim its own fingerprint verifies the download`() {
+    val html = renderDashboardHtml(liveStatus().copy(cert = certInfo())).lowercase()
+
+    assertFalse(
+      "must not tell users to check the CA against a fingerprint served over the same connection",
+      html.contains("check the downloaded ca against"),
+    )
+    assertFalse("must not imply the served fingerprint confers trust", html.contains("before trusting it"))
+    // The honest replacement, so this cannot be satisfied by deleting the sentence and saying
+    // nothing — silence would leave the fingerprint on the page looking like a check.
+    assertTrue(
+      "must say the served fingerprint does not verify the download",
+      html.contains("does not verify"),
+    )
+    assertTrue("must point at a trusted network instead", html.contains("network you already trust"))
+    // The genuinely useful guidance survives.
+    assertTrue("--pinnedpubkey guidance must remain", html.contains("pinnedpubkey"))
+  }
+
   @Test
   fun `certificate panel is absent entirely before the node has minted`() {
     val html = renderDashboardHtml(liveStatus())
