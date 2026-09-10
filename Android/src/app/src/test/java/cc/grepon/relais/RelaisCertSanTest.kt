@@ -98,30 +98,43 @@ class RelaisCertSanTest {
     assertEquals(32, sans.size)
     // The four fixed entries are prepended before the cap, so surplus real addresses are the only
     // thing ever dropped.
-    assertEquals(fixedEntries, sans.take(4).map { render(it) })
-  }
-
-  @Test
-  fun `an IPv6 address is carried as iPAddress`() {
-    val sans = RelaisCertMint.buildSanList(listOf(InetAddress.getByName("2001:db8::1")))
-    val entry = sans.single { render(it) == ip("2001:db8::1") }
-
-    assertEquals(GeneralName.iPAddress, entry.tagNo)
+    // take(fixedEntries.size), not a literal: the fixed set shrank from four to three when `::1`
+    // was removed, and a hardcoded count silently starts asserting about a dynamic address.
+    assertEquals(fixedEntries, sans.take(fixedEntries.size).map { render(it) })
   }
 
   /**
-   * The four entries [RelaisCertMint.buildSanList] always prepends, in [render]'s spelling.
+   * IPv6 is **excluded**, because the node's listeners are IPv4-only (`0.0.0.0:8443`,
+   * `127.0.0.1:8080`). Certifying an address nothing serves is what this prevents — a status page
+   * would report it as covered, truthfully about the certificate and wrongly about the node.
    *
-   * `::1` is written through [ip] rather than as a literal because [render] decodes the certificate
-   * octets back through [InetAddress], which canonicalises IPv6 to its fully expanded form
-   * (`0:0:0:0:0:0:0:1`). Comparing against the shorthand would fail for a cert that is perfectly
-   * correct — the same normalisation trap that makes [RelaisCertMint.needsReissue] compare DER
-   * rather than strings.
+   * Restoring these is a tracked follow-up that must land together with a dual-stack bind; either
+   * half alone reproduces the mismatch from the other side. Do not re-add IPv6 here on its own.
    */
-  private val fixedEntries = listOf("127.0.0.1", ip("::1"), "localhost", "relais-node.local")
+  @Test
+  fun `an IPv6 address is not certified, because nothing serves it`() {
+    val sans = RelaisCertMint.buildSanList(listOf(InetAddress.getByName("2001:db8::1")))
 
-  /** An IP literal in the canonical spelling [render] produces. */
-  private fun ip(literal: String): String = InetAddress.getByName(literal).hostAddress ?: ""
+    assertEquals(fixedEntries, sans.map { render(it) })
+    assertTrue("no IPv6 literal may appear", sans.none { render(it).contains(":") })
+  }
+
+  @Test
+  fun `IPv6 loopback is not certified either, for the same reason`() {
+    // ::1 was in the fixed set until it was noticed it has the identical defect: the loopback
+    // listener binds 127.0.0.1, so ::1 is certified and unreachable just like a LAN IPv6 address.
+    val sans = RelaisCertMint.buildSanList(emptyList())
+
+    assertTrue("::1 must not be certified", sans.none { render(it).contains(":") })
+  }
+
+  /**
+   * The three entries [RelaisCertMint.buildSanList] always prepends, in [render]'s spelling.
+   *
+   * Was four until `::1` was removed — the loopback listener binds `127.0.0.1`, so the IPv6
+   * loopback was certified and unreachable exactly like a LAN IPv6 address.
+   */
+  private val fixedEntries = listOf("127.0.0.1", "localhost", "relais-node.local")
 
   /** Renders a [GeneralName] back to its literal, decoding `iPAddress` octets via [InetAddress]. */
   private fun render(gn: GeneralName): String =

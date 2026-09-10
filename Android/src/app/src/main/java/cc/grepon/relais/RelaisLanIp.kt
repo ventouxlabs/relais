@@ -67,8 +67,17 @@ internal object RelaisLanIp {
    * delta 10) — accepted deliberately, since an attacker already on the LAN learns the node's
    * address by scanning it anyway.
    *
-   * IPv6 link-local (`fe80::/10`) **is** excluded: it needs a scope id to be usable and is
-   * meaningless in a URL, so it would only bloat the SAN set.
+   * **IPv6 is excluded entirely, and that is a deliberate scope limit rather than an oversight.**
+   * Both listeners bind IPv4 only (`0.0.0.0:8443` and `127.0.0.1:8080`), so an IPv6 address here
+   * would end up certified and unreachable — the certificate would describe an endpoint no client
+   * can connect to, and the status page would report it as covered while nothing served it.
+   *
+   * The consequence, which the docs state rather than hide: **an IPv6-only client cannot reach the
+   * node.** That is true of this release regardless of the certificate; excluding these addresses
+   * makes the certificate honest about it rather than removing a capability.
+   *
+   * Binding dual-stack and restoring IPv6 SANs is a tracked follow-up, and the two must land
+   * together — either alone reproduces the same mismatch from the other side.
    *
    * The `isUp` filter is load-bearing and not cosmetic. A down interface contributes a stale
    * address, so the SAN set differs on the next start, [RelaisCertMint.needsReissue] fires, and the
@@ -87,13 +96,9 @@ internal object RelaisLanIp {
         .toList()
         .filter { it.isUp && !it.isLoopback }
         .flatMap { it.inetAddresses.toList() }
-        .filter { addr ->
-          when (addr) {
-            is Inet4Address -> !addr.isLoopbackAddress
-            is Inet6Address -> !addr.isLoopbackAddress && !addr.isLinkLocalAddress
-            else -> false
-          }
-        }
+        // IPv4 only: see the KDoc. An Inet6Address here would be certified and unreachable.
+        .filterIsInstance<Inet4Address>()
+        .filter { !it.isLoopbackAddress }
         .distinctBy { it.hostAddress }
         .sortedBy { it.hostAddress }
     }.getOrDefault(emptyList())

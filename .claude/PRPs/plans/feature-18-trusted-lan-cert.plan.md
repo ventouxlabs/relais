@@ -1027,6 +1027,15 @@ adb shell 'logcat -d -s RelaisTls:* | tail -20'   # expect a re-mint + rebind af
 curl --cacert relais-ca.crt https://<phone-ip>:8443/health   # must verify, not just answer
 #    Re-run with Wi-Fi disabled at boot and enabled 60s later — same expectation.
 
+# 9a. EVERY SAN MUST HAVE SOMETHING LISTENING ON IT — the only check of cert-vs-listener.
+openssl s_client -connect <phone-ip>:8443 </dev/null 2>/dev/null \
+  | openssl x509 -noout -text | grep -A2 "Subject Alternative Name"
+#     then for EVERY address listed:
+curl --cacert relais-ca.crt --max-time 5 https://<that-address>:8443/health   # must answer
+#     The GET / SAN row reports what the CERT carries and can be correct while nothing serves the
+#     address — that is how IPv6 was certified against an IPv4-only listener, invisibly to an
+#     IPv4-only hardware run.
+
 # 9b. STOP MUST ACTUALLY STOP (security review H2) — RELEASE-BLOCKING, no test covers it.
 #     Run from a SECOND machine. Start the node, then stop it from the app:
 curl -k --max-time 5 https://<phone-ip>:8443/health   # after STOP: must FAIL to connect

@@ -13,6 +13,7 @@
 package cc.grepon.relais
 
 import java.math.BigInteger
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -92,10 +93,19 @@ internal object RelaisCertMint {
   /**
    * The SAN entries for a leaf covering [addrs], in a deterministic order.
    *
-   * Four entries are always present and always first: `127.0.0.1` and `::1` as `iPAddress`,
-   * `localhost` and `relais-node.local` as `dNSName`. The loopback trio is what keeps the
-   * `adb forward tcp:8443` path in the runbook verifiable; without it a developer's own machine is
-   * the one place the feature does not work.
+   * Three entries are always present and always first: `127.0.0.1` as `iPAddress`, `localhost` and
+   * `relais-node.local` as `dNSName`. Loopback is what keeps the `adb forward tcp:8443` path in the
+   * runbook verifiable; without it a developer's own machine is the one place the feature does not
+   * work.
+   *
+   * **No IPv6, deliberately — the node's listeners are IPv4-only** (`0.0.0.0:8443` and
+   * `127.0.0.1:8080`), so an IPv6 address in here would certify something no client can reach. That
+   * includes `::1`, which was in this list until it was noticed that it has exactly the same defect
+   * as the LAN addresses: a status page reporting it as covered would be telling the truth about the
+   * certificate and the wrong thing about the node.
+   *
+   * Binding dual-stack and restoring these together is a tracked follow-up. They must land as one
+   * change — either half alone reproduces the same inconsistency from the other side.
    *
    * Being first is what makes them safe from [MAX_SANS]: only surplus *real* addresses are ever
    * dropped from a wildly multi-homed device, never loopback.
@@ -109,13 +119,17 @@ internal object RelaisCertMint {
     val fixed =
       listOf(
         GeneralName(GeneralName.iPAddress, "127.0.0.1"),
-        GeneralName(GeneralName.iPAddress, "::1"),
         GeneralName(GeneralName.dNSName, "localhost"),
         GeneralName(GeneralName.dNSName, "relais-node.local"),
       )
-    val fixedLiterals = setOf("127.0.0.1", "::1")
+    val fixedLiterals = setOf("127.0.0.1")
     val dynamic =
       addrs
+        // IPv4 only, filtered HERE and not only at the source. `RelaisLanIp.allLanAddresses`
+        // already excludes IPv6, but this is the function that decides what a certificate claims,
+        // so a future caller handing it an IPv6 address must not be able to re-create a certified
+        // address nothing serves. Same reasoning as `SanSet`: constrain where the mistake is made.
+        .filterIsInstance<Inet4Address>()
         .mapNotNull { it.hostAddress }
         // A scope suffix ("fe80::1%wlan0") is not a certificate name. allLanAddresses already drops
         // link-local, so this is belt-and-braces against a future caller passing a raw address.

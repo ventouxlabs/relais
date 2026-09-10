@@ -48,6 +48,24 @@ import org.junit.runner.RunWith
  * `CA FINGERPRINT` and `NODE KEY PIN` must be identical across the two runs while the SAN list
  * changes. That is the acceptance criterion an imported `relais-ca.crt` depends on.
  *
+ * ## Manual: EVERY SAN MUST HAVE SOMETHING LISTENING ON IT
+ *
+ * For each address in the served leaf, confirm the node actually answers there. Cheap once you have
+ * the device in hand, and it is the check that catches a whole class from the outside:
+ *
+ * ```
+ * openssl s_client -connect <phone-ip>:8443 </dev/null 2>/dev/null \
+ *   | openssl x509 -noout -text | grep -A2 "Subject Alternative Name"
+ * # then, for EVERY address listed:
+ * curl --cacert relais-ca.crt --max-time 5 https://<that-address>:8443/health   # must answer
+ * ```
+ *
+ * **Nothing else catches this.** The SAN row on `GET /` reports what the certificate carries, which
+ * can be perfectly accurate while nothing serves the address — that is exactly how IPv6 addresses
+ * were certified for a listener bound only to `0.0.0.0`, and a hardware run that exercised IPv4
+ * would have shown a correct-looking SAN row throughout. The certificate is checked against itself
+ * everywhere; this is the only step that checks it against the **listener**.
+ *
  * ## Manual: STOP MUST ACTUALLY STOP (feature-18 T5b, security review H2)
  *
  * No automated test can cover this — nothing in the JVM lane constructs a `Service`, and this probe

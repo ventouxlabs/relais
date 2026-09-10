@@ -196,6 +196,29 @@ alone) → #09 delta → #22 gap-closure → #17 → #18 rest → #19/#21 → #2
    updated 2026-09-07 with the 0.12.0-fixed / 0.11.0-and-0.13.1-broken reconciliation.
 6. [#313](https://github.com/ventouxlabs/relais/issues/313) — mDNS TXT `model=` goes stale after every #180 hot-swap.
 
+### Follow-up owed by feature-18 PR A — NOT YET FILED as a GitHub issue
+
+**"Bind dual-stack AND restore IPv6 SANs" — one issue, one change, not two.**
+
+PR A stopped putting IPv6 addresses in the leaf certificate (including `::1`), because both
+listeners are IPv4-only (`0.0.0.0:8443`, `127.0.0.1:8080`) and certifying an address nothing serves
+is a false promise — a status page reports it as covered, truthfully about the certificate and
+wrongly about the node. Decided by the team lead 2026-09-09, within JD's Q8 call rather than against
+it: Q8 was about *disclosure* (don't hide addresses from a pre-auth scanner), this is about not
+certifying the unreachable. Nothing is hidden for privacy.
+
+**Consequence to state plainly wherever this is discussed: an IPv6-only client cannot reach the
+node.** That is true of this release regardless of the certificate — the listener is IPv4-only — so
+this is a documentation gap being closed, not a capability removed.
+
+The two halves must land **together**. Binding dual-stack without restoring the SANs leaves a
+reachable address the certificate does not cover; restoring the SANs without binding reproduces
+exactly the defect PR A just fixed. Either alone recreates the mismatch from the other side.
+
+Care needed when it is done: dual-stack behaviour varies across Android versions and with
+`java.net.preferIPv4Stack`, and the listener lifecycle is the mechanism that needed five separate
+corrections during PR A — so it wants its own PR and its own device session, not a fold-in.
+
 ### Process notes from this session
 
 - `main` is protected (5 required checks); a direct push was rejected → always branch + PR. After a
