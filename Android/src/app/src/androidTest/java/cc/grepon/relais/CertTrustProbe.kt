@@ -89,8 +89,14 @@ class CertTrustProbe {
   @Before
   fun setUp() {
     assumeTrue("On-device probe; pass -e RELAIS_PROBE 1 to run", args.getString("RELAIS_PROBE") == "1")
+    // No sleep after start(), and that absence is deliberate — it is the assertion.
+    //
+    // `start()` binds synchronously and returns only once the socket is listening (or throws), so a
+    // connect on the very next line must succeed. When binding happened on the spawned thread this
+    // needed a sleep, and the resulting "returns before it is listening" window was the root of
+    // four separate listener races. If a connect below ever fails to reach the port, suspect that
+    // asynchrony has come back rather than adding a sleep to paper over it.
     server = RelaisHttpServer(context, port = port, tls = true, bindAddr = "127.0.0.1").also { it.start() }
-    Thread.sleep(300) // let the accept loop bind before the first connect
   }
 
   @After
@@ -157,6 +163,43 @@ class CertTrustProbe {
       assertTrue("expected a PEM body", body.contains("-----BEGIN CERTIFICATE-----"))
       // The one thing that must never be true of this route.
       assertTrue("a private key must never be served", !body.contains("PRIVATE KEY"))
+    }
+  }
+
+  /**
+   * `stop()` then immediately `start()` on the same port must succeed — the on-device proof that
+   * the LAN rebind cannot lose a bind race against the listener it just replaced.
+   *
+   * This is the check for the fourth and last race in that mechanism: `stop()` used to return while
+   * the old accept thread still held the port, so the replacement's bind could lose, exit silently,
+   * and leave the node with **no** HTTPS listener while believing it had rebound. `stop()` now joins
+   * the accept thread, so the port is provably free before the next `start()` needs it.
+   *
+   * No sleep between the two calls, deliberately: a sleep would hide exactly the defect this is for.
+   */
+  @Test
+  fun stopThenImmediatelyStartOnTheSamePortSucceeds() {
+    val first = requireNotNull(server) { "setUp should have started a server" }
+    first.stop()
+
+    // If the port were still held, this throws — which is the failure worth catching, since the
+    // production path would instead have swallowed it on a background thread.
+    val replacement =
+      RelaisHttpServer(context, port = port, tls = true, bindAddr = "127.0.0.1").also { it.start() }
+    server = replacement
+
+    val info = RelaisTls.certInfo(context)
+    val trust = KeyStore.getInstance("PKCS12").apply { load(null, null) }
+    trust.setCertificateEntry("relais-ca", parseCa(info.caPem))
+    val tmf =
+      TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(trust) }
+    val ctx = SSLContext.getInstance("TLS").apply { init(null, tmf.trustManagers, null) }
+
+    (ctx.socketFactory.createSocket("127.0.0.1", port) as SSLSocket).use {
+      it.sslParameters = it.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+      it.soTimeout = 15_000
+      it.startHandshake()
+      Log.i(TAG, "rebind on the same port succeeded: ${it.session.cipherSuite}")
     }
   }
 

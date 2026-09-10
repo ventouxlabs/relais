@@ -68,6 +68,11 @@ import org.json.JSONObject
 private const val TAG = "RelaisHttpServer"
 private const val SOCKET_TIMEOUT_MS = 15_000 // read timeout: bounds slow/idle clients (slowloris)
 private const val MAX_CONNECTIONS = 16 // cap worker threads (single-engine node serializes anyway)
+
+// How long stop() waits for the accept thread to exit before giving up. Normally microseconds —
+// closing the socket makes the blocked accept() throw immediately — so this only bounds a wedged
+// thread, which must not hang service teardown.
+private const val STOP_JOIN_TIMEOUT_MS = 2_000L
 // Shared body cap. `internal` so the byte-oriented [HttpRequestReader.readBodyBytes] enforces the
 // same ceiling as the server's front-door 413 check (single source of truth across the module).
 internal const val MAX_BODY_BYTES = 32 * 1024 * 1024 // 32 MB cap (base64 image/audio)
@@ -198,6 +203,12 @@ class RelaisHttpServer(
   // Volatile: written on the accept thread, read by stop() on whatever thread called it. Without
   // it a stop() racing startup can read a stale null and close nothing.
   @Volatile private var serverSocket: ServerSocket? = null
+
+  /**
+   * The accept loop, held so [stop] can join it. Only ever touched by [start] and [stop], which the
+   * callers already sequence — the listener is never started or stopped concurrently with itself.
+   */
+  @Volatile private var acceptThread: Thread? = null
   private val pool = Executors.newFixedThreadPool(MAX_CONNECTIONS)
   @Volatile private var running = false
   private val apiKey by lazy { RelaisConfig.apiKey(context) }
@@ -210,30 +221,45 @@ class RelaisHttpServer(
   // image gen, which must run with no concurrent decode. tryAcquireShared() is the embodiment of admit().
   private val admissionGate = RelaisAdmissionGate(QUEUE_CAPACITY)
 
+  /**
+   * Binds **synchronously**, then runs only the accept loop in the background. Throws if the bind
+   * fails.
+   *
+   * **This shape is the fix for a whole class of bug, not a style choice.** Binding used to happen
+   * on the spawned thread, so `start()` returned before the socket existed — and every listener
+   * race this feature produced was a symptom of that one fact: `stop()` finding a still-null socket
+   * and closing nothing; two listeners under construction at once; a replacement losing the bind
+   * race and exiting silently while the node believed it had rebound. Four separate guards were
+   * added to make those overlaps safe. Removing the asynchrony removes the overlaps instead.
+   *
+   * The invariant this buys, stateable without naming any lock: **`start()` returns only when its
+   * socket is bound (or throws), and `stop()` returns only when its socket is closed and its accept
+   * thread has exited — so a caller that stops before starting cannot overlap two listeners.** It is
+   * ordinary sequential composition rather than mutual exclusion.
+   *
+   * Binding on the caller is safe because neither caller is the main thread: node startup runs on
+   * `relais-init`, and the LAN rebind on `lanReissueExecutor`. It does mean startup now waits for
+   * the certificate mint, which is correct — the node is not up until the listener is.
+   *
+   * A bind failure now propagates instead of being swallowed by a background thread, which is what
+   * makes a lost race observable to the caller that must decide whether to retry.
+   */
   fun start() {
     if (running) return
+    val bound =
+      RelaisTls.buildServerSocket(context, tls).apply {
+        reuseAddress = true
+        bind(InetSocketAddress(bindAddr, port))
+      }
+    serverSocket = bound
+    // After the bind, before the thread: a failed bind must not leave `running` true, and the
+    // accept loop must not observe false on its first iteration.
     running = true
-    Thread(
+    Log.i(TAG, "Listening on ${if (tls) "https" else "http"} $bindAddr:$port")
+    acceptThread =
+      Thread(
         {
-          // Held locally as well as in the field so the `finally` can always close it. The bind
-          // happens on this thread, after `RelaisTls.buildServerSocket` has possibly minted a
-          // certificate — hundreds of milliseconds during which `stop()` can run, see a still-null
-          // `serverSocket`, and close nothing. Without the `finally` that socket would stay bound
-          // and hold the port against a replacement listener: feature-18's LAN rebind would then
-          // leave the node with NO HTTPS listener at all, which is worse than the stale certificate
-          // it exists to replace. Closing on every exit path — normal, early, or exceptional —
-          // removes the race rather than narrowing it.
-          var socket: ServerSocket? = null
           try {
-            val bound =
-              RelaisTls.buildServerSocket(context, tls).apply {
-                reuseAddress = true
-                bind(InetSocketAddress(bindAddr, port))
-              }
-            socket = bound
-            serverSocket = bound
-            if (!running) return@Thread // stop() arrived while we were minting; `finally` closes it
-            Log.i(TAG, "Listening on ${if (tls) "https" else "http"} $bindAddr:$port")
             while (running) {
               val client = bound.accept()
               pool.execute { handle(client) }
@@ -241,12 +267,13 @@ class RelaisHttpServer(
           } catch (e: Exception) {
             if (running) Log.e(TAG, "Server loop error", e)
           } finally {
-            runCatching { socket?.close() }
+            // The socket is this thread's to release, on every exit path.
+            runCatching { bound.close() }
           }
         },
         "relais-http",
       )
-      .start()
+        .also { it.start() }
   }
 
   // TLS keystore/cert minting moved to [RelaisTls] (#173); LAN-IP discovery to [RelaisLanIp].
@@ -2085,9 +2112,23 @@ class RelaisHttpServer(
     out.flush()
   }
 
+  /**
+   * Closes the socket and **waits for the accept thread to exit** before returning.
+   *
+   * The join is the half of the invariant that makes a rebind safe: without it `stop()` could
+   * return while the old thread still held the port, and the replacement's bind would race it —
+   * with the loser exiting silently. Now `stop(); start()` is simply sequential, and the port is
+   * free by the time the second call needs it.
+   *
+   * Bounded rather than indefinite: a wedged accept thread must not hang service teardown. The wait
+   * is normally microseconds, because closing the socket makes the blocked `accept()` throw at once.
+   */
   fun stop() {
     running = false
     runCatching { serverSocket?.close() }
+    runCatching { acceptThread?.join(STOP_JOIN_TIMEOUT_MS) }
+    acceptThread = null
+    serverSocket = null
     pool.shutdownNow()
     Log.i(TAG, "Stopped")
   }
