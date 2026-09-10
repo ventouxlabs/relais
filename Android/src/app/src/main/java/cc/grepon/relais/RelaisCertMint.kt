@@ -301,39 +301,56 @@ internal object RelaisCertMint {
    * network should stop claiming it. Only the *forced* path is constrained.
    */
   fun wouldNarrow(leaf: X509Certificate, newSans: List<GeneralName>): Boolean =
-    !comparisonKeys(newSans).containsAll(comparisonKeys(leaf))
+    !SanSet.of(newSans).covers(SanSet.of(leaf))
 
   /**
-   * The certificate's SANs as **rendering-independent** comparison keys.
+   * A set of subject-alternative names that can **only** be compared byte-wise.
    *
-   * The obvious implementation — compare the strings `getSubjectAlternativeNames` hands back
-   * against the strings the [GeneralName] list would produce — is wrong, and wrong in a way that
-   * hides: the JDK's IPv6 formatting here is **provider-dependent**. Measured, the same certificate
-   * reported `0:0:0:0:0:0:0:1` when its test class ran alone and `::1` when the full suite ran, so a
-   * string comparison called a re-issue "narrowing" only in the full suite. An expensive lesson
-   * twice over, since [needsReissue]'s own KDoc already warns not to compare rendered SAN strings —
-   * and this was written anyway.
+   * This type exists because a comment did not work. [needsReissue] already documented that
+   * comparing *rendered* SAN strings is unsafe — the JDK's IPv6 formatting is provider-dependent,
+   * and the same certificate reports `0:0:0:0:0:0:0:1` alone and `::1` under the full suite — and a
+   * later guard was written on rendered strings anyway, because a warning parked on one function
+   * does not fire while you are writing the next one. The durable fix is to make the wrong thing
+   * unrepresentable rather than discouraged.
    *
-   * So an address is keyed on its **bytes** and a name on its lowercased text, and neither side
-   * gets to depend on how anything chose to print it.
+   * So there is no way to get the strings back out. Construct from a certificate or from a
+   * [GeneralName] list, ask [covers], and that is the whole surface. For text a human reads, use
+   * `RelaisTls.RelaisCertPem.displayStrings` — which is named to be obviously unfit for comparison.
    */
-  private fun comparisonKeys(cert: X509Certificate): Set<String> =
-    runCatching {
-      cert.subjectAlternativeNames.orEmpty().mapNotNull { it.getOrNull(1) as? String }.map(::sanKey).toSet()
-    }
-      .getOrDefault(emptySet())
+  class SanSet private constructor(private val keys: Set<String>) {
 
-  /** The same keys for a not-yet-minted SAN list, derived the same way so the two are comparable. */
-  private fun comparisonKeys(sans: List<GeneralName>): Set<String> =
-    sans
-      .mapNotNull { gn ->
-        when (gn.tagNo) {
-          GeneralName.iPAddress ->
-            runCatching { ASN1OctetString.getInstance(gn.name).octets.toHexKey() }.getOrNull()
-          else -> gn.name.toString().lowercase()
-        }
-      }
-      .toSet()
+    /** Does this set contain every name in [other]? The only comparison this type permits. */
+    fun covers(other: SanSet): Boolean = keys.containsAll(other.keys)
+
+    companion object {
+      /** The names a certificate actually carries. */
+      fun of(cert: X509Certificate): SanSet =
+        SanSet(
+          runCatching {
+            cert.subjectAlternativeNames
+              .orEmpty()
+              .mapNotNull { it.getOrNull(1) as? String }
+              .map(::sanKey)
+              .toSet()
+          }
+            .getOrDefault(emptySet())
+        )
+
+      /** The names a not-yet-minted SAN list would carry, keyed identically. */
+      fun of(sans: List<GeneralName>): SanSet =
+        SanSet(
+          sans
+            .mapNotNull { gn ->
+              when (gn.tagNo) {
+                GeneralName.iPAddress ->
+                  runCatching { ASN1OctetString.getInstance(gn.name).octets.toHexKey() }.getOrNull()
+                else -> gn.name.toString().lowercase()
+              }
+            }
+            .toSet()
+        )
+    }
+  }
 
   /**
    * One SAN literal as a comparison key: raw address bytes for an IP, lowercased text for a name.

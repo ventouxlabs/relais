@@ -283,7 +283,7 @@ class RelaisCertMintTest {
         RelaisCertMint.buildSanList(listOf(InetAddress.getByName("192.168.1.40"))),
       )
 
-    val reported = RelaisTls.RelaisCertPem.sansOf(leaf)
+    val reported = RelaisTls.RelaisCertPem.displayStrings(leaf)
 
     assertTrue("must report what the cert carries", reported.contains("192.168.1.40"))
     assertTrue("loopback is always in the cert", reported.contains("127.0.0.1"))

@@ -380,7 +380,7 @@ internal object RelaisTls {
     RelaisCertInfo(
       caFingerprint = RelaisCertFingerprint.spkiSha256Base64(caCert.publicKey),
       nodeKeyPin = RelaisCertFingerprint.spkiSha256Base64(leaf.publicKey),
-      sanList = RelaisCertPem.sansOf(leaf),
+      sanList = RelaisCertPem.displayStrings(leaf),
       leafNotAfter = leaf.notAfter.time,
       caPem = RelaisCertPem.toPem(caCert),
       caWasReplaced = caWasReplaced,
@@ -407,7 +407,12 @@ internal object RelaisTls {
     }
 
     /**
-     * The SAN literals **the given certificate actually carries**, read back off its own extension.
+     * The SAN literals **the given certificate actually carries**, for a human to read.
+     *
+     * **Display only — never compare these.** The JDK's IPv6 rendering here is provider-dependent
+     * (`::1` under one configuration, `0:0:0:0:0:0:0:1` under another), so two runs can disagree
+     * about strings describing an identical certificate. Comparison goes through
+     * [RelaisCertMint.SanSet], which keys on bytes and deliberately offers no way back to text.
      *
      * Deliberately sourced from the certificate rather than from the address list that was used to
      * mint it: those two agree only immediately after a re-mint, and the case where they disagree
@@ -418,7 +423,7 @@ internal object RelaisTls {
      * Empty on a malformed or absent extension rather than throwing: this feeds display surfaces,
      * and a status page that fails to render tells the user less than one showing no SANs.
      */
-    fun sansOf(cert: X509Certificate): List<String> =
+    fun displayStrings(cert: X509Certificate): List<String> =
       runCatching {
         cert.subjectAlternativeNames.orEmpty().mapNotNull { entry ->
           (entry.getOrNull(1) as? String)?.takeIf { it.isNotBlank() }
