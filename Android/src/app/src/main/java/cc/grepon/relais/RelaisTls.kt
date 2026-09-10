@@ -16,6 +16,8 @@ import android.content.Context
 import android.util.Log
 import java.io.File
 import java.net.ServerSocket
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.KeyPair
 import java.security.KeyStore
 import java.security.PrivateKey
@@ -124,6 +126,39 @@ internal object RelaisTls {
     return runCatching { loadOrMint(context, allowMintCa = false, allowMintLeaf = false).info }.getOrNull()
   }
 
+  /**
+   * Writes [ks] to [target] via a temp file and an **atomic** rename, so [target] is never observed
+   * half-written.
+   *
+   * `File.outputStream()` truncates before `store` fills it, leaving a window in which a power loss
+   * or write error yields an unreadable keystore. **That pattern predates this branch** — it is
+   * verbatim from the pre-feature `loadOrCreateKeystore` — but this branch made its consequence far
+   * worse, and the interaction is the reason to fix the write rather than relax the read:
+   *
+   *  - [loadLeafKeyPair] now throws on anything except "file absent", deliberately, so a transient
+   *    read failure can never silently regenerate the leaf key and move the NODE KEY PIN.
+   *  - With a non-atomic write, a truncated keystore is therefore **fatal at next start** instead of
+   *    being silently replaced.
+   *
+   * Two individually correct decisions composing into "the node cannot start without discarding its
+   * pinned identity". Keeping the strict read and making the write leave no state that can trigger
+   * it is the combination that satisfies both.
+   *
+   * The temp file is a sibling so the rename stays within one filesystem, which is what makes
+   * `ATOMIC_MOVE` possible; it is deleted on any failure so a crashed write leaves no litter for the
+   * next one to trip over.
+   */
+  private fun storeAtomically(ks: KeyStore, target: File, pass: CharArray) {
+    val tmp = File(target.parentFile, "${target.name}.tmp")
+    try {
+      tmp.outputStream().use { ks.store(it, pass) }
+      Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    } catch (e: Exception) {
+      runCatching { tmp.delete() }
+      throw e
+    }
+  }
+
   /** The loaded keystore plus everything the callers above need, so a load happens once per call. */
   private class State(
     val keystore: KeyStore,
@@ -212,7 +247,7 @@ internal object RelaisTls {
     val ks = KeyStore.getInstance("PKCS12").apply { load(null, tlsPass) }
     // [leaf, ca] in that order — a bare [leaf] leaves clients unable to build the path.
     ks.setKeyEntry(TLS_KEY_ALIAS, pair.private, tlsPass, arrayOf<java.security.cert.Certificate>(leaf, caCert))
-    if (reissue) tlsFile.outputStream().use { ks.store(it, tlsPass) }
+    if (reissue) storeAtomically(ks, tlsFile, tlsPass)
 
     return State(ks, leaf, buildInfo(caCert, leaf))
   }
@@ -254,7 +289,7 @@ internal object RelaisTls {
       pass,
       arrayOf<java.security.cert.Certificate>(minted.certificate),
     )
-    file.outputStream().use { ks.store(it, pass) }
+    storeAtomically(ks, file, pass)
     Log.i(
       TAG,
       "Minted per-node CA ${RelaisCertFingerprint.spkiSha256Base64(minted.keyPair.public)} at ${file.path}",
