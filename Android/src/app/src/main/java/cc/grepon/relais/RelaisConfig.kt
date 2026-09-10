@@ -371,7 +371,8 @@ object RelaisConfig {
    * migrate and adding it would only widen the legacy read.
    *
    * `@Synchronized` for the same reason as [tlsKeystorePassword], and the consequence here is worse:
-   * an unreadable CA keystore rotates the **CA**, invalidating every client's import.
+   * a CA keystore whose key material is provably unrecoverable rotates the **CA**, invalidating
+   * every client's import.
    */
   @Synchronized
   fun caKeystorePassword(context: Context): String {

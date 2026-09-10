@@ -148,7 +148,8 @@ class RelaisCertReissueTest {
   /**
    * A leaf is only reusable if the **current** CA signed it (codex P2).
    *
-   * `RelaisTls` recovers from a deleted or corrupt `relais_ca.p12` by minting a replacement CA. The
+   * `RelaisTls` recovers from a `relais_ca.p12` that is absent, or whose key material is provably
+   * unrecoverable, by minting a replacement CA. The
    * leaf on disk survives that, with its SAN set and expiry untouched — so [needsReissue] alone
    * says "keep it", and the node would serve a leaf chained to a CA that cannot have signed it.
    * Nothing about the certificate looks wrong; it simply fails to validate at every client.

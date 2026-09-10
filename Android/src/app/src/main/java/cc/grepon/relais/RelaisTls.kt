@@ -68,7 +68,8 @@ internal object RelaisTls {
   private const val CA_KEYSTORE_FILE = "relais_ca.p12"
 
   /**
-   * Set when an unreadable CA keystore forced a replacement CA to be minted, so the surfaces that
+   * Set when a CA keystore whose key material was provably unrecoverable forced a replacement CA
+   * to be minted, so the surfaces that
    * show certificate state can say so.
    *
    * Process-lifetime only, deliberately: it exists to explain "why did every client suddenly stop
@@ -145,11 +146,18 @@ internal object RelaisTls {
     loadOrMint(context, allowMintCa = true, allowMintLeaf = true).info
 
   /**
-   * Load-**only**. Returns null when the node has never been started, so no keystore exists yet.
+   * Load-**only**. Returns null when there is nothing readable to report.
    *
    * This is the reader the CONFIGURE screen calls, and the nullable return is the whole point:
    * opening a settings screen must never mint. It is still filesystem and crypto work, so callers
    * must stay off the main thread.
+   *
+   * **Null is not proof that the node has never started.** It also covers an unreadable keystore,
+   * because swallowing here is safe for the one property that matters — both permissions are off,
+   * so no path below can rotate or mint key material — but it is *not* safe to render as "no
+   * certificate yet". A UI that says that when the truth is "your key material is gone" sends the
+   * user looking for a START button instead of the replacement warning on `GET /`. Distinguish the
+   * two cases before building a message on this, rather than treating null as first-run.
    */
   fun certInfoOrNull(context: Context): RelaisCertInfo? {
     val caFile = File(context.filesDir, CA_KEYSTORE_FILE)
@@ -240,7 +248,8 @@ internal object RelaisTls {
     val liveSans = RelaisCertMint.buildSanList(RelaisLanIp.allLanAddresses())
 
     // A leaf counts as reusable only if the CURRENT CA actually signed it. If `relais_ca.p12` was
-    // deleted or corrupted, loadOrMintCa quietly mints a replacement — and the leaf on disk is then
+    // deleted, or its key material is unrecoverable, loadOrMintCa mints a replacement — and the
+    // leaf on disk is then
     // signed by a CA that no longer exists. The SAN set and the expiry are both unchanged in that
     // case, so the re-issue predicate would happily keep it, and the node would serve a leaf
     // chained to a CA that cannot have signed it: a chain no client can validate, produced by a
@@ -285,9 +294,13 @@ internal object RelaisTls {
   }
 
   /**
-   * Loads the CA, minting it on first use. A **corrupt or unreadable** keystore re-mints rather
-   * than throwing: a listener that will not start at all is a worse outcome than a CA the user has
-   * to re-import, and the old CA was unreadable to us so it was equally unusable to them.
+   * Loads the CA, minting it on first use, and re-minting **only** when the existing key material
+   * is provably unrecoverable ([isKeyMaterialUnrecoverable]).
+   *
+   * Replacing the CA invalidates every client's import at once, so the bar for doing it is proof
+   * that the old one is already unusable to them — not merely that this read failed. A transient
+   * IO error propagates and is retried on the next start; that is the whole point of the
+   * distinction, and this doc previously described the opposite rule.
    */
   private fun loadOrMintCa(
     file: File,
