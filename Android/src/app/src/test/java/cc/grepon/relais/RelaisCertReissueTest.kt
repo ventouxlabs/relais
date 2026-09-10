@@ -216,66 +216,6 @@ class RelaisCertReissueTest {
     )
   }
 
-  /**
-   * A forced re-issue must never drop coverage the current leaf already has.
-   *
-   * The forced path exists for one situation — the LAN came up, cover it — and takes its own
-   * address snapshot after the caller has decided to force. If an interface disappears in that
-   * window the snapshot is loopback-only, and minting from it would overwrite a working LAN
-   * certificate with one that fails hostname verification, *and* the caller would then consider the
-   * job done. A transient Wi-Fi blip during boot would downgrade rather than fail.
-   */
-  @Test
-  fun `a forced re-issue that would drop LAN coverage is recognised as narrowing`() {
-    val ca = RelaisCertMint.mintCa()
-    val leafKey = RelaisCertMint.generateLeafKeyPair()
-    val onLan = RelaisCertMint.buildSanList(addrs("192.168.1.40"))
-    val leaf = RelaisCertMint.mintLeaf(ca.keyPair.private, ca.certificate, leafKey.public, onLan)
-
-    // The interface vanished between the caller's check and the mint's own snapshot.
-    val loopbackOnly = RelaisCertMint.buildSanList(emptyList())
-    assertTrue(
-      "losing the LAN address must be recognised as narrowing",
-      RelaisCertMint.wouldNarrow(leaf, loopbackOnly),
-    )
-
-    // The same rule catches a multi-homed device losing one interface of several, which is why it
-    // is phrased as "does not narrow" rather than "the address list is non-empty".
-    val multiHomed =
-      RelaisCertMint.mintLeaf(
-        ca.keyPair.private,
-        ca.certificate,
-        leafKey.public,
-        RelaisCertMint.buildSanList(addrs("192.168.1.40", "10.0.0.7")),
-      )
-    assertTrue(
-      "dropping one of several addresses is still narrowing",
-      RelaisCertMint.wouldNarrow(multiHomed, onLan),
-    )
-  }
-
-  @Test
-  fun `re-issuing with the same or a wider address set is not narrowing`() {
-    val ca = RelaisCertMint.mintCa()
-    val leafKey = RelaisCertMint.generateLeafKeyPair()
-    val onLan = RelaisCertMint.buildSanList(addrs("192.168.1.40"))
-    val leaf = RelaisCertMint.mintLeaf(ca.keyPair.private, ca.certificate, leafKey.public, onLan)
-
-    // Unchanged — the ordinary case, and it must not be mistaken for a downgrade.
-    //
-    // This assertion is load-bearing beyond the obvious: the leaf always carries `::1`, and the
-    // JDK's IPv6 rendering in `getSubjectAlternativeNames` is PROVIDER-DEPENDENT — measured, the
-    // same certificate reported `0:0:0:0:0:0:0:1` alone and `::1` under the full suite. A first
-    // version of `wouldNarrow` compared rendered strings and so called this "narrowing" only when
-    // the whole suite ran. If this ever fails again, suspect a rendering comparison before
-    // suspecting the address logic.
-    assertFalse(RelaisCertMint.wouldNarrow(leaf, onLan))
-    // Gaining an interface is the whole point of the forced path.
-    assertFalse(
-      RelaisCertMint.wouldNarrow(leaf, RelaisCertMint.buildSanList(addrs("192.168.1.40", "10.0.0.7"))),
-    )
-  }
-
   private fun addrs(vararg s: String): List<InetAddress> = s.map { InetAddress.getByName(it) }
 
   private fun mint(sans: List<org.bouncycastle.asn1.x509.GeneralName>): X509Certificate {

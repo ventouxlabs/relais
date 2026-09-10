@@ -250,7 +250,7 @@ class RelaisHttpServer(
    * ordinary sequential composition rather than mutual exclusion.
    *
    * Binding on the caller is safe because neither caller is the main thread: node startup runs on
-   * `relais-init`, and the LAN rebind on `lanReissueExecutor`. It does mean startup now waits for
+   * `relais-init`. It does mean startup now waits for
    * the certificate mint, which is correct — the node is not up until the listener is.
    *
    * A bind failure now propagates instead of being swallowed by a background thread, which is what

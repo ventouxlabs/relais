@@ -37,8 +37,7 @@ import org.bouncycastle.asn1.x509.GeneralName
  * a SAN. A client imports the CA once and does not have to re-import when the leaf is re-issued,
  * because only the leaf changes.
  *
- * **Re-issue happens at node start, plus once when the LAN first appears after a boot-time start —
- * not on a live address change.** A node that moves network mid-session keeps serving a certificate
+ * **Re-issue happens at node start — not on a live address change.** A node that moves network mid-session keeps serving a certificate
  * that no longer covers its address until it restarts. Do not describe this as surviving DHCP
  * churn: that claim was made, shipped into client-facing copy, and had to be retracted after
  * hardware showed the stale-leaf case.
@@ -125,52 +124,6 @@ internal object RelaisTls {
     return runCatching { loadOrMint(context, allowMintCa = false, allowMintLeaf = false).info }.getOrNull()
   }
 
-  /**
-   * Does the current leaf lack any LAN address it could now carry? A pure check, safe to call from
-   * a `NetworkCallback` without touching the running listener.
-   *
-   * True only in the boot race: `BOOT_COMPLETED` starts the service before DHCP completes, so the
-   * first mint sees no interfaces and produces a loopback-only certificate. Without a re-mint the
-   * node would serve that certificate for its entire uptime and every LAN client would fail
-   * hostname verification until a human restarted it — in exactly the unattended-appliance mode the
-   * README advertises. [RelaisNodeService] watches for this; see `reissueForLan`.
-   */
-  fun needsLanReissue(context: Context): Boolean {
-    val live = RelaisLanIp.allLanAddresses()
-    // Nothing to re-issue *for* yet. The boot race is handled by the caller arming on this same
-    // emptiness, not by this predicate.
-    if (live.isEmpty()) return false
-    val state = runCatching { loadOrMint(context, allowMintCa = false, allowMintLeaf = false) }.getOrNull()
-    // Unreadable or not yet written — and "unknown" must answer TRUE, not false. `start()` mints on
-    // the accept thread, so a caller running just after it can legitimately find no keystore at
-    // all; answering false there would skip the watch on the strength of a race. Over-answering is
-    // cheap because the acting caller re-checks this before it rebinds anything.
-      ?: return true
-    return RelaisCertMint.needsReissue(state.leaf, RelaisCertMint.buildSanList(live), System.currentTimeMillis())
-  }
-
-  /**
-   * Re-mints the leaf certificate for the addresses live right now, reusing the existing leaf key
-   * so the NODE KEY PIN does not move, and rewrites `relais_tls.p12`.
-   *
-   * This only changes what a **newly constructed** listener will serve. A bound `SSLServerSocket`
-   * cannot pick up a new certificate, so the caller must stop and reconstruct the listener —
-   * [RelaisNodeService] owns `httpsServer` and does exactly that.
-   *
-   * **Returns whether anything was actually re-issued, and the caller must honour it.** This used
-   * to swallow the failure and return `Unit`, so a caller tore down and rebuilt a listener having
-   * changed nothing — pure downside. The realistic failure is not exotic: on a fresh install this
-   * runs with `allowMintCa = false` while the accept thread is still generating the CA, so the
-   * load throws, and the guard upstream cannot prevent it because `needsLanReissue` deliberately
-   * answers "true" when it cannot read the keystore, which is exactly that state.
-   */
-  fun reissueForLan(context: Context): Boolean =
-    runCatching {
-        loadOrMint(context, allowMintCa = false, allowMintLeaf = true, forceLeafReissue = true)
-      }
-      .onFailure { Log.w(TAG, "LAN re-issue failed; keeping the existing certificate", it) }
-      .isSuccess
-
   /** The loaded keystore plus everything the callers above need, so a load happens once per call. */
   private class State(
     val keystore: KeyStore,
@@ -197,25 +150,18 @@ internal object RelaisTls {
    * what the store, and therefore the reported NODE KEY PIN, contains. Or neither, and a half
    * written PKCS12.
    *
-   * `RelaisNodeService`'s `teardownLock` does **not** help here: it serialises the rebind against
-   * teardown, an adjacent window, and nothing at all against the accept thread. Two different
-   * pairings, two different locks — this is the one that protects the keystore.
-   *
    * The invariant at stake is the same one [loadLeafKeyPair] refuses to break quietly: the leaf key
    * is generated once and reused forever, because feature-23 pins its SPKI.
    *
    * @param allowMintCa may create the CA. False for every read path.
    * @param allowMintLeaf may create or re-mint the leaf **and write the keystore**. False for every
-   *   read path; true for the node start path and for the boot-race re-issue.
-   * @param forceLeafReissue re-mint even if [RelaisCertMint.needsReissue] says otherwise, because
-   *   the caller has already decided (the boot race). Requires [allowMintLeaf].
+   *   read path; true for the node start path.
    */
   @Synchronized
   private fun loadOrMint(
     context: Context,
     allowMintCa: Boolean,
     allowMintLeaf: Boolean,
-    forceLeafReissue: Boolean = false,
   ): State {
     val caPass = RelaisConfig.caKeystorePassword(context).toCharArray()
     val tlsPass = RelaisConfig.tlsKeystorePassword(context).toCharArray()
@@ -237,19 +183,9 @@ internal object RelaisTls {
       else loadLeaf(tlsFile, tlsPass)?.takeIf { leaf ->
         runCatching { leaf.verify(caCert.publicKey) }.isSuccess
       }
-    // A forced re-issue must never LOSE coverage. `liveSans` above is this function's own snapshot,
-    // taken after the caller decided to force — so an interface that disappeared in between would
-    // otherwise write a loopback-only leaf over a working LAN one, and the caller would mark the
-    // job done. A Wi-Fi blip during boot would downgrade a good certificate rather than merely fail
-    // to improve it. Throwing (rather than silently minting) is what makes `reissueForLan` return
-    // false, which the service treats as "not yet — stay armed and retry".
-    check(!(forceLeafReissue && existingLeaf != null && RelaisCertMint.wouldNarrow(existingLeaf, liveSans))) {
-      "forced re-issue would drop SANs the current leaf covers; the address set moved underneath us"
-    }
     val reissue =
       allowMintLeaf &&
-        (forceLeafReissue ||
-          existingLeaf == null ||
+        (existingLeaf == null ||
           RelaisCertMint.needsReissue(existingLeaf, liveSans, System.currentTimeMillis()))
 
     // A read-only caller with nothing usable on disk has nothing to report. Throwing rather than
@@ -411,8 +347,8 @@ internal object RelaisTls {
      *
      * **Display only — never compare these.** The JDK's IPv6 rendering here is provider-dependent
      * (`::1` under one configuration, `0:0:0:0:0:0:0:1` under another), so two runs can disagree
-     * about strings describing an identical certificate. Comparison goes through
-     * [RelaisCertMint.SanSet], which keys on bytes and deliberately offers no way back to text.
+     * about strings describing an identical certificate. Any comparison of SAN sets must key on
+     * bytes — see [RelaisCertMint.needsReissue], which compares DER for exactly this reason.
      *
      * Deliberately sourced from the certificate rather than from the address list that was used to
      * mint it: those two agree only immediately after a re-mint, and the case where they disagree

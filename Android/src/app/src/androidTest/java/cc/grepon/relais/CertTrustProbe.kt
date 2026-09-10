@@ -168,13 +168,14 @@ class CertTrustProbe {
   }
 
   /**
-   * `stop()` then immediately `start()` on the same port must succeed — the on-device proof that
-   * the LAN rebind cannot lose a bind race against the listener it just replaced.
+   * `stop()` then immediately `start()` on the same port must succeed — the on-device proof that a
+   * restart cannot lose a bind race against the listener it just replaced.
    *
-   * This is the check for the fourth and last race in that mechanism: `stop()` used to return while
-   * the old accept thread still held the port, so the replacement's bind could lose, exit silently,
-   * and leave the node with **no** HTTPS listener while believing it had rebound. `stop()` now joins
-   * the accept thread, so the port is provably free before the next `start()` needs it.
+   * `stop()` used to return while the old accept thread still held the port, so a replacement's
+   * bind could lose, exit silently, and leave the node with **no** HTTPS listener while believing
+   * it had one. `stop()` now joins the accept thread, so the port is provably free before the next
+   * `start()` needs it. Found while building the dynamic LAN rebind (cut from this release, see the
+   * tracked follow-up), but it is a property of the listener itself and matters to every restart.
    *
    * No sleep between the two calls, deliberately: a sleep would hide exactly the defect this is for.
    */

@@ -138,8 +138,8 @@ object RelaisClientConfig {
       "After that first fetch you get the full property: no more disabled verification, and real " +
       "MITM protection on every subsequent connection. The imported CA stays valid across " +
       "re-issues, so you do not re-import when the node's address changes — but the certificate is " +
-      "re-issued at node start (and once when the LAN first appears after a boot-time start), so " +
-      "an address change while the node is running is not picked up until it restarts. " +
+      "re-issued at node start, so any address change — including one during boot — is not picked " +
+      "up until the node restarts. " +
       "Fallback only: if you cannot import the CA, scope any verify-disable to THIS LAN base URL " +
       "only — never globally — and understand that doing so removes MITM protection for that " +
       "connection."

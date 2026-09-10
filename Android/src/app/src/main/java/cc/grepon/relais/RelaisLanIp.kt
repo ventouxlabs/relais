@@ -86,9 +86,11 @@ internal object RelaisLanIp {
    * Sorted by `hostAddress` so the result is **totally** ordered: the re-issue check compares SAN
    * sets, and an unstable order would thrash the same way.
    *
-   * An empty return is meaningful, not a failure: it is the boot race (`BOOT_COMPLETED` starts the
-   * service before DHCP completes) that [RelaisNodeService] watches for. Do not paper over it with
-   * a `0.0.0.0` fallback — a wildcard is not an address anything can be reached at.
+   * An empty return is meaningful, not a failure: on a `BOOT_COMPLETED` start the service comes up
+   * before DHCP completes, so the leaf is minted loopback-only and the node needs a restart once the
+   * LAN is up. (Recovering from that automatically was built and cut — see the tracked follow-up.)
+   * Do not paper over it with a `0.0.0.0` fallback — a wildcard is not an address anything can be
+   * reached at.
    */
   fun allLanAddresses(): List<InetAddress> =
     runCatching {

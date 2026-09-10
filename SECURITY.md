@@ -148,8 +148,7 @@ neither. The leaf key is generated once and **reused** across every re-issue, so
 `--pinnedpubkey` pin survives a re-issue; only the certificate is re-minted.
 
 **When re-issue actually happens, which is narrower than it sounds:** at node
-start, plus once when the LAN first appears after a boot-time start. It is **not**
-triggered by an address change while the node is running — a phone that moves
+start. It is **not** triggered by an address change while the node is running — a phone that moves
 network mid-session keeps serving a certificate that no longer covers its address,
 and clients will fail hostname verification until the node is restarted. Restart
 after moving networks.
@@ -266,8 +265,7 @@ the right one in a store containing several.
   authentication (not code signing, e-mail, or timestamping), which bounds but
   does not eliminate the exposure.
 - **A node running longer than 90 days serves an expired leaf.** Re-issue is
-  computed at node start (and once when the LAN first comes up after a boot-time
-  start), not on a timer. Restart to re-issue. Tracked as a follow-up.
+  computed at node start, not on a timer. Restart to re-issue. Tracked as a follow-up.
 - **mTLS ("hardened mode") is not implemented.** The work above authenticates the
   *server* to the client; mTLS would authenticate the *client* to the server. It
   composes cleanly on top of the CA built here and remains deferred.

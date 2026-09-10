@@ -66,12 +66,10 @@ import org.junit.runner.RunWith
  * would have shown a correct-looking SAN row throughout. The certificate is checked against itself
  * everywhere; this is the only step that checks it against the **listener**.
  *
- * ## Manual: STOP MUST ACTUALLY STOP (feature-18 T5b, security review H2)
+ * ## Manual: STOP MUST ACTUALLY STOP
  *
  * No automated test can cover this — nothing in the JVM lane constructs a `Service`, and this probe
- * runs in-process rather than driving the real service lifecycle. **Run it from a second machine,
- * and run it after a network change**, because a queued network callback is what resurrects the
- * listener:
+ * runs in-process rather than driving the real service lifecycle. **Run it from a second machine:**
  *
  * ```
  * # 1. Start the node from the app, confirm it answers:
@@ -80,16 +78,17 @@ import org.junit.runner.RunWith
  * # 2. Stop it from the app. Then, from the OTHER machine:
  * curl -k --max-time 5 https://<phone-ip>:8443/health          # MUST fail to connect
  * nmap -Pn -p 8443 <phone-ip>                                  # 8443 MUST NOT be open
- *
- * # 3. Repeat with a network change between start and stop (toggle Wi-Fi, or move networks),
- * #    which is what puts a reissueAndRebind post on the main looper in the first place.
  * ```
  *
- * A listener still answering after step 2 is the H2 defect: the notification is gone, the QS tile
- * and control panel both read "stopped", and mDNS has been unregistered — so every surface says the
- * node is off while `0.0.0.0:8443` is bound and presenting the node's certificate to the LAN. There
- * is no in-app remedy; only a force-stop clears it, and the user has no reason to think they need
- * one. Treat a failure here as release-blocking.
+ * A listener still answering after step 2 means every user-visible surface says the node is off —
+ * notification gone, QS tile and control panel reading "stopped", mDNS unregistered — while
+ * `0.0.0.0:8443` is bound and presenting the node's certificate to the LAN, with no in-app remedy.
+ * Treat a failure here as release-blocking.
+ *
+ * The dynamic LAN rebind that originally motivated this check is **not in this release** (see the
+ * tracked follow-up), so there is no longer a scheduled callback that could resurrect the listener
+ * after teardown. The check stays because the property it tests — stopping the node frees the port
+ * — is worth verifying on its own, and because the rebind is expected to return.
  */
 @RunWith(AndroidJUnit4::class)
 class CertReissueProbe {
@@ -121,8 +120,11 @@ class CertReissueProbe {
     }
     assertTrue("loopback must always be covered", before.sanList.contains("127.0.0.1"))
 
-    // Force a re-issue with the addresses unchanged, then prove the identity did not move.
-    RelaisTls.reissueForLan(context)
+    // Re-read after a second load, then prove the identity did not move. This used to force a
+    // re-issue through the dynamic-rebind path; that path is not in this release (see the tracked
+    // follow-up), so what is checked here is the property that matters either way — the CA and the
+    // leaf key are stable across loads, which is what an imported `relais-ca.crt` and a
+    // `--pinnedpubkey` pin depend on.
     val after = RelaisTls.certInfo(context)
     Log.i(TAG, "--- AFTER RE-ISSUE ---")
     logInfo(after)

@@ -45,8 +45,7 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
  * churns underneath it whenever the node re-issues, so the import is not invalidated by a re-issue.
  * That is the entire reason for the extra moving part.
  *
- * Note the scope: re-issue is computed at node start and once when the LAN first appears after a
- * boot-time start, **not** on a live address change. "One import and it always verifies" overstates
+ * Note the scope: re-issue is computed at node start, **not** on a live address change. "One import and it always verifies" overstates
  * it — see [RelaisTls].
  *
  * **This object has no `android.` imports and must keep none.** `RelaisTlsHandshakeTest` runs a
@@ -128,7 +127,8 @@ internal object RelaisCertMint {
         // IPv4 only, filtered HERE and not only at the source. `RelaisLanIp.allLanAddresses`
         // already excludes IPv6, but this is the function that decides what a certificate claims,
         // so a future caller handing it an IPv6 address must not be able to re-create a certified
-        // address nothing serves. Same reasoning as `SanSet`: constrain where the mistake is made.
+        // address nothing serves: constrain where the mistake is made, not only where today's
+        // caller happens to be.
         .filterIsInstance<Inet4Address>()
         .mapNotNull { it.hostAddress }
         // A scope suffix ("fe80::1%wlan0") is not a certificate name. allLanAddresses already drops
@@ -294,94 +294,6 @@ internal object RelaisCertMint {
     val signer = JcaContentSignerBuilder("SHA256withECDSA").build(caKey)
     return JcaX509CertificateConverter().getCertificate(builder.build(signer))
   }
-
-  /**
-   * Would re-minting with [newSans] **drop** names the existing [leaf] already covers?
-   *
-   * Guards the forced re-issue path, whose entire purpose is "the LAN came up, cover it" — an
-   * operation that should only ever *add* coverage. A forced mint takes its own address snapshot,
-   * so an interface disappearing between the caller's check and that snapshot would otherwise
-   * write a loopback-only leaf over a perfectly good LAN one, and the caller would then mark the
-   * job done. A transient Wi-Fi blip during boot would not merely fail to help: it would
-   * **downgrade** a working certificate to one that fails hostname verification until restart.
-   *
-   * Expressed as "does not narrow" rather than "the address list is non-empty" on purpose. It is
-   * the same rule for a multi-homed device losing one interface of several, and it states the harm
-   * — losing coverage — instead of one symptom of it. This is the third time-of-check/time-of-use
-   * defect in this family, so the rule is a predicate that can be tested rather than a condition
-   * spelled out at one call site.
-   *
-   * Not symmetric with a plain node start, which legitimately narrows: a node genuinely moved off a
-   * network should stop claiming it. Only the *forced* path is constrained.
-   */
-  fun wouldNarrow(leaf: X509Certificate, newSans: List<GeneralName>): Boolean =
-    !SanSet.of(newSans).covers(SanSet.of(leaf))
-
-  /**
-   * A set of subject-alternative names that can **only** be compared byte-wise.
-   *
-   * This type exists because a comment did not work. [needsReissue] already documented that
-   * comparing *rendered* SAN strings is unsafe — the JDK's IPv6 formatting is provider-dependent,
-   * and the same certificate reports `0:0:0:0:0:0:0:1` alone and `::1` under the full suite — and a
-   * later guard was written on rendered strings anyway, because a warning parked on one function
-   * does not fire while you are writing the next one. The durable fix is to make the wrong thing
-   * unrepresentable rather than discouraged.
-   *
-   * So there is no way to get the strings back out. Construct from a certificate or from a
-   * [GeneralName] list, ask [covers], and that is the whole surface. For text a human reads, use
-   * `RelaisTls.RelaisCertPem.displayStrings` — which is named to be obviously unfit for comparison.
-   */
-  class SanSet private constructor(private val keys: Set<String>) {
-
-    /** Does this set contain every name in [other]? The only comparison this type permits. */
-    fun covers(other: SanSet): Boolean = keys.containsAll(other.keys)
-
-    companion object {
-      /** The names a certificate actually carries. */
-      fun of(cert: X509Certificate): SanSet =
-        SanSet(
-          runCatching {
-            cert.subjectAlternativeNames
-              .orEmpty()
-              .mapNotNull { it.getOrNull(1) as? String }
-              .map(::sanKey)
-              .toSet()
-          }
-            .getOrDefault(emptySet())
-        )
-
-      /** The names a not-yet-minted SAN list would carry, keyed identically. */
-      fun of(sans: List<GeneralName>): SanSet =
-        SanSet(
-          sans
-            .mapNotNull { gn ->
-              when (gn.tagNo) {
-                GeneralName.iPAddress ->
-                  runCatching { ASN1OctetString.getInstance(gn.name).octets.toHexKey() }.getOrNull()
-                else -> gn.name.toString().lowercase()
-              }
-            }
-            .toSet()
-        )
-    }
-  }
-
-  /**
-   * One SAN literal as a comparison key: raw address bytes for an IP, lowercased text for a name.
-   *
-   * The IP test is textual rather than a parse attempt because `InetAddress.getByName` performs a
-   * DNS lookup for anything that is not a literal — turning a comparison into network IO, and a
-   * `localhost` entry into whatever the resolver happens to say today.
-   */
-  private fun sanKey(literal: String): String {
-    val looksLikeIp =
-      literal.contains(':') || literal.matches(Regex("""\d{1,3}(\.\d{1,3}){3}"""))
-    if (!looksLikeIp) return literal.lowercase()
-    return runCatching { InetAddress.getByName(literal).address.toHexKey() }
-      .getOrDefault(literal.lowercase())
-  }
-
-  private fun ByteArray.toHexKey(): String = joinToString("") { "%02x".format(it) }
 
   /** The RSA-2048 leaf key. Generated once per node and reused across every re-mint — see [needsReissue]. */
   fun generateLeafKeyPair(): KeyPair =
