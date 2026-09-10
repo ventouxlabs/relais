@@ -101,10 +101,31 @@ curl -k -o relais-ca.crt https://<phone-ip>:8443/ca.crt   # -k only for this boo
 curl --cacert relais-ca.crt https://<phone-ip>:8443/health
 ```
 
-**Check what you fetched.** Compare it against the `CA FINGERPRINT` shown on the
-node before trusting it — fetching the CA over a link that is already
-man-in-the-middled and skipping this check is *worse* than `-k`, because it feels
-verified:
+### That first fetch is trust-on-first-use
+
+**This release has no way to verify the CA out of band, and you should know that
+rather than infer it.** If someone is already intercepting the link you fetch
+`/ca.crt` over, you import their CA and everything afterwards verifies perfectly
+against the wrong party.
+
+**The fingerprint on the node's status page does not close this.** It is served
+over the same connection you are trying to verify, so an interceptor supplies the
+certificate *and* the page showing its fingerprint. Comparing them proves the two
+came from the same place, not that the place is your node. We say this explicitly
+because the comparison looks like a real check, and treating it as one is worse
+than knowing there isn't one.
+
+So: **fetch the CA over a network you already trust** — your own LAN, or a USB
+tether — and out-of-band verification (a QR shown on the node itself) lands in a
+later release.
+
+**What this does buy, which is most of the value.** Once the CA is imported, `-k`
+is gone and every subsequent connection has real MITM protection. The gap is the
+first fetch only — not "TLS is unverified". Import on a network you trust and you
+have the full property today.
+
+Once you have the file, this prints its fingerprint — useful for confirming two
+copies match, or identifying the right certificate in a trust store:
 
 ```
 echo "sha256/$(openssl x509 -in relais-ca.crt -pubkey -noout \
@@ -133,11 +154,8 @@ network mid-session keeps serving a certificate that no longer covers its addres
 and clients will fail hostname verification until the node is restarted. Restart
 after moving networks.
 
-**Fetching the CA over the connection you are trying to secure is circular.** An
-attacker positioned to intercept can serve you their own CA *and* their own
-fingerprint on the status page. Fetch it over a link you already trust, or pull it
-off the device directly (`adb`), and compare. Out-of-band verification — a QR on
-the node's own screen — is a tracked follow-up and is not in this release.
+The first fetch is trust-on-first-use — see "That first fetch is
+trust-on-first-use" above for what that does and does not protect.
 
 Prefer per-connection `--cacert` over installing the CA into a system trust
 store. A system-store install is trusted by *everything* on that client — see the

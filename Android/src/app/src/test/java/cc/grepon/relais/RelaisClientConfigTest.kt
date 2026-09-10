@@ -280,11 +280,44 @@ class RelaisClientConfigTest {
       "re-issue is at node start, not on a live address change",
       note.contains("keeps verifying when the node's ip changes"),
     )
+    // `run-as` cannot read a non-debuggable package and would emit an encrypted PKCS12 the user
+    // has no password for. Two rewrites produced two unperformable instructions; the third
+    // attempt was to stop writing instructions.
+    assertFalse("do not tell users to run an adb command that cannot work", note.contains("adb"))
+
     // The honest replacements, so this can't be satisfied by simply deleting the claims.
-    assertTrue("must say a running node does not pick up an address change", note.contains("restart"))
+    assertTrue("must name the trust-on-first-use gap outright", note.contains("trust on first use"))
     assertTrue(
-      "must warn that fetching the CA over the untrusted link is circular",
-      note.contains("circular"),
+      "must say the status-page fingerprint does not close the first-fetch gap",
+      note.contains("does not help") || note.contains("not help"),
+    )
+    assertTrue("must say a running node does not pick up an address change", note.contains("restart"))
+  }
+
+  /**
+   * The note must also say what the feature **does** buy. An honest limitation with no counterweight
+   * reads as "TLS here is not trustworthy", which is a bigger retreat than the truth: the gap is the
+   * first fetch only, and a user who imports over a network they trust has the full property today.
+   */
+  @Test
+  fun `tls note states the protection gained, not only the gap`() {
+    val note = clientConfig().getJSONObject("tls").getString("note").lowercase()
+
+    // NOT a bare "mitm protection" check: the fallback paragraph warns that disabling verification
+    // *removes* MITM protection, so that phrase alone is satisfied by a note that states only the
+    // downside. Proven by mutation — deleting the gained-protection sentence left such a check
+    // green. Pin the claim that protection is gained on connections AFTER the first fetch.
+    assertTrue(
+      "must say protection applies to connections after the first fetch",
+      note.contains("every subsequent connection"),
+    )
+    assertTrue(
+      "must scope the gap to the first fetch rather than to TLS generally",
+      note.contains("first fetch") || note.contains("first use"),
+    )
+    assertTrue(
+      "must tell the user the actionable mitigation",
+      note.contains("network you trust"),
     )
   }
 

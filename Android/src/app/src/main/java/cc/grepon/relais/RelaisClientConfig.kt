@@ -128,16 +128,18 @@ object RelaisClientConfig {
    * MITM caveat — we never emit guidance that globally disables TLS verification.
    */
   private const val TLS_NOTE =
-    "This node serves a certificate issued by its own per-node CA. Preferred: import the CA once " +
+    "This node serves a certificate issued by its own per-node CA. Import the CA once " +
       "(GET $CA_ROUTE) and pass it per connection, e.g. curl --cacert relais-ca.crt. " +
-      "IMPORTANT: fetching the CA over the same LAN connection you are trying to secure is " +
-      "circular — an attacker in position to intercept can serve their own CA and their own " +
-      "fingerprint. Until out-of-band verification ships, fetch it over a link you already trust, " +
-      "or pull it directly off the device with " +
-      "'adb exec-out run-as <package> cat files/relais_ca.p12' and compare. " +
-      "The certificate covers the addresses the node held when it last issued one, and is " +
-      "re-issued at node start (and once when the LAN first appears after a boot-time start) — " +
-      "so an address change while the node is running is NOT picked up until it restarts. " +
+      "TRUST ON FIRST USE: this release has no way to verify the CA out of band. Fetching it over " +
+      "a link an attacker already controls means trusting whatever they serve, and the fingerprint " +
+      "shown on the node's status page does NOT help — it arrives over the same connection, so an " +
+      "interceptor supplies both. Fetch the CA over a network you trust (your own LAN, or a USB " +
+      "tether); out-of-band verification lands in a later release. " +
+      "After that first fetch you get the full property: no more disabled verification, and real " +
+      "MITM protection on every subsequent connection. The imported CA stays valid across " +
+      "re-issues, so you do not re-import when the node's address changes — but the certificate is " +
+      "re-issued at node start (and once when the LAN first appears after a boot-time start), so " +
+      "an address change while the node is running is not picked up until it restarts. " +
       "Fallback only: if you cannot import the CA, scope any verify-disable to THIS LAN base URL " +
       "only — never globally — and understand that doing so removes MITM protection for that " +
       "connection."
