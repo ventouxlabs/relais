@@ -48,4 +48,10 @@ data class RelaisCertInfo(
   val leafNotAfter: Long,
   val caPem: String,
   val caWasReplaced: Boolean = false,
+  /**
+   * True when the leaf keystore's password was gone this session, so a new leaf key had to be
+   * minted and the NODE KEY PIN moved. Any `--pinnedpubkey` client must re-pin; nothing else about
+   * the node changed, and the imported CA is still valid.
+   */
+  val leafKeyWasReplaced: Boolean = false,
 )

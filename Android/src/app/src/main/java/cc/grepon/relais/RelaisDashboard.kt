@@ -207,10 +207,25 @@ fun renderDashboardHtml(status: DashboardStatus): String {
           )}</td>
     </tr>"""
         }
+      // A moved pin is invisible from the client side: --pinnedpubkey just fails, naming nothing.
+      // Narrower than a CA replacement — the imported CA is still good — so it says so, to stop a
+      // user re-importing a CA that was never the problem.
+      val pinMovedRow =
+        if (!cert.leafKeyWasReplaced) "" else {
+          """
+    <tr>
+      <td class="label">node key pin changed</td>
+      <td class="value">${escapeHtml(
+            "the leaf key could not be recovered, so a new one was minted — anyone using " +
+              "curl --pinnedpubkey must re-pin to the value below. The CA is unchanged; do not " +
+              "re-import it."
+          )}</td>
+    </tr>"""
+        }
       """
 <div class="panel">
   <div class="panel-title">Certificate</div>
-  <table>$replacedRow
+  <table>$replacedRow$pinMovedRow
     <tr>
       <td class="label">ca fingerprint</td>
       <td class="value">${escapeHtml(cert.caFingerprint)}</td>

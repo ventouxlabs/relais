@@ -21,6 +21,7 @@ import java.nio.file.StandardCopyOption
 import java.security.KeyPair
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.UnrecoverableKeyException
 import java.security.cert.X509Certificate
 import java.util.Base64
 import javax.net.ssl.KeyManagerFactory
@@ -75,6 +76,37 @@ internal object RelaisTls {
    * is a re-import, and once the user has done that the message would be actively misleading.
    */
   @Volatile private var caWasReplaced = false
+
+  /**
+   * Set when the leaf keystore's password was gone and a **new leaf key** had to be minted, so the
+   * NODE KEY PIN moved. Surfaced for the same reason as [caWasReplaced]: a `--pinnedpubkey` client
+   * fails with an error naming nothing, and the user needs somewhere to find out why.
+   */
+  @Volatile private var leafKeyWasReplaced = false
+
+  /**
+   * Is [e] proof that the stored key material can **never** be read again, as opposed to a failure
+   * that might not recur?
+   *
+   * This is the companion to the rule that a read failure must never silently rotate key material.
+   * That rule was right and is kept — a silent rotation moves the pin invisibly, which is worse
+   * than a visible failure — but on its own it conflated two situations needing opposite handling:
+   *
+   *  - **Transient or ambiguous** (IO error, partial read, unknown cause): retrying may work, so
+   *    rotating would destroy a recoverable identity. Must fail loudly and change nothing.
+   *  - **Provably unrecoverable** (the password is gone, so nothing can ever decrypt this file):
+   *    retrying is pointless *by construction*, and refusing to re-mint turns a recoverable
+   *    situation into a permanently unstartable node.
+   *
+   * `UnrecoverableKeyException` — thrown directly by `getKey`, or wrapped in the `IOException` that
+   * `KeyStore.load` raises for a wrong password — is the provable case. It happens when
+   * `EncryptedSharedPreferences` is reset after AndroidKeyStore invalidation, which lockscreen and
+   * biometric enrolment changes and some backup/restore paths cause on real devices. A corrupt file
+   * throws `IOException` with a *different* cause and is deliberately NOT matched here: corruption
+   * is not proof that the password is gone.
+   */
+  internal fun isKeyMaterialUnrecoverable(e: Throwable): Boolean =
+    generateSequence(e) { it.cause }.any { it is UnrecoverableKeyException }
 
   /**
    * Plain (tls=false) or TLS server socket.
@@ -272,12 +304,17 @@ internal object RelaisTls {
           key to cert
         }
       loaded.getOrNull()?.let { return it }
+      // Same rule as the leaf, and it had the OPPOSITE defect: this rotated on *any* failure, so a
+      // transient IO error would replace a perfectly good CA and invalidate every client's import.
+      // Only provable unrecoverability may rotate; everything else propagates and is retried.
+      val cause = loaded.exceptionOrNull()
+      if (cause != null && !isKeyMaterialUnrecoverable(cause)) throw cause
       // The single most consequential event this class can produce: a new CA invalidates EVERY
       // client's imported `relais-ca.crt` at once, and every one of them starts failing
       // verification with no indication of why. It must not be a `Log.w` nobody reads — the flag
       // is surfaced on `GET /` (and, once feature-18 PR B lands the CONFIGURE section, in the UI),
       // so a user who suddenly cannot connect has somewhere to find the reason.
-      Log.e(TAG, "CA keystore unreadable; minting a REPLACEMENT CA — every client must re-import", loaded.exceptionOrNull())
+      Log.e(TAG, "CA keystore password is gone; minting a REPLACEMENT CA — every client must re-import", cause)
       caWasReplaced = true
     }
     check(allowMint) { "no CA keystore and minting is disabled" }
@@ -306,21 +343,39 @@ internal object RelaisTls {
    * cannot be read, a fresh key is generated.
    */
   private fun loadLeafKeyPair(file: File, pass: CharArray): KeyPair? {
-    // Absent is the ONLY case that may return null. Everything else throws.
+    // Null means "there is no key to reuse" — either the file is absent, or its password is
+    // provably gone. Every OTHER failure throws.
     //
-    // This used to be `runCatching { ... }.getOrNull()`, which turned *every* failure — a truncated
-    // read, a password mismatch, a transient IO error — into "generate a fresh key", which was then
-    // minted and written over the old one. That silently changes the NODE KEY PIN, and the leaf key
-    // pair surviving every re-mint is a **contract**: feature-23 pins that SPKI, and a user who put
-    // `curl --pinnedpubkey` in a script gets an opaque failure with no log line and nothing in the
-    // UI to explain it. Failing loudly here is strictly better than rotating quietly: a listener
-    // that will not start is visible and recoverable, a rotated pin is neither.
+    // The throwing half is the important half: this was once `runCatching { }.getOrNull()`, which
+    // turned a truncated read or a transient IO error into "generate a fresh key", silently moving
+    // the NODE KEY PIN. The leaf key surviving every re-mint is a **contract** — feature-23 pins
+    // that SPKI, and a user with `curl --pinnedpubkey` in a script would get an opaque failure with
+    // nothing to explain it.
+    //
+    // The null half exists because that rule, alone, bricked the node. If
+    // `EncryptedSharedPreferences` is reset by AndroidKeyStore invalidation the password is gone
+    // while the file remains, so the load throws, startup aborts, and every retry reads the same
+    // undecryptable file — forever, with no in-app way out. Retrying is pointless *by
+    // construction* there, so re-minting is the only path forward and refusing it converts a
+    // recoverable state into a permanent one.
     if (!file.exists()) return null
-    val ks = KeyStore.getInstance("PKCS12")
-    file.inputStream().use { ks.load(it, pass) }
-    val key = ks.getKey(TLS_KEY_ALIAS, pass) as PrivateKey
-    val cert = ks.getCertificate(TLS_KEY_ALIAS) as X509Certificate
-    return KeyPair(cert.publicKey, key)
+    return try {
+      val ks = KeyStore.getInstance("PKCS12")
+      file.inputStream().use { ks.load(it, pass) }
+      val key = ks.getKey(TLS_KEY_ALIAS, pass) as PrivateKey
+      val cert = ks.getCertificate(TLS_KEY_ALIAS) as X509Certificate
+      KeyPair(cert.publicKey, key)
+    } catch (e: Exception) {
+      if (!isKeyMaterialUnrecoverable(e)) throw e
+      Log.e(
+        TAG,
+        "Leaf keystore password is gone (AndroidKeyStore reset?); the old key cannot be recovered. " +
+          "Minting a NEW leaf key — the NODE KEY PIN changes and every --pinnedpubkey client must re-pin.",
+        e,
+      )
+      leafKeyWasReplaced = true
+      null
+    }
   }
 
   private fun loadLeaf(file: File, pass: CharArray): X509Certificate? =
@@ -355,6 +410,7 @@ internal object RelaisTls {
       leafNotAfter = leaf.notAfter.time,
       caPem = RelaisCertPem.toPem(caCert),
       caWasReplaced = caWasReplaced,
+      leafKeyWasReplaced = leafKeyWasReplaced,
     )
 
   /** Base64 line width for PEM, fixed by RFC 7468. */
