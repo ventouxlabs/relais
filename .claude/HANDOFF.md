@@ -196,7 +196,21 @@ alone) → #09 delta → #22 gap-closure → #17 → #18 rest → #19/#21 → #2
    updated 2026-09-07 with the 0.12.0-fixed / 0.11.0-and-0.13.1-broken reconciliation.
 6. [#313](https://github.com/ventouxlabs/relais/issues/313) — mDNS TXT `model=` goes stale after every #180 hot-swap.
 
-### Follow-up owed by feature-18 PR A — NOT YET FILED as a GitHub issue
+### feature-18 PR A — follow-ups for the PR body
+
+Two, both filed, both to be listed under "Follow-ups" when PR A is opened:
+
+- **[#320](https://github.com/ventouxlabs/relais/issues/320)** — bind dual-stack AND restore IPv6
+  SANs (one change, not two).
+- **[#321](https://github.com/ventouxlabs/relais/issues/321)** — restore the boot-race LAN rebind
+  (T5b), cut from PR A after eight review rounds.
+
+Also for the PR body: **an IPv6-only client cannot reach the node**, and **a network change needs a
+node restart**. Both are true of this release regardless of the certificate work — the listener is
+IPv4-only and re-issue is computed at start — so state them as documented limitations rather than
+regressions.
+
+### Follow-up from feature-18 PR A — FILED as [#320](https://github.com/ventouxlabs/relais/issues/320)
 
 **"Bind dual-stack AND restore IPv6 SANs" — one issue, one change, not two.**
 
@@ -219,9 +233,11 @@ Care needed when it is done: dual-stack behaviour varies across Android versions
 `java.net.preferIPv4Stack`, and the listener lifecycle is the mechanism that needed five separate
 corrections during PR A — so it wants its own PR and its own device session, not a fold-in.
 
-### Follow-up owed by feature-18 PR A — "Restore the boot-race LAN rebind (T5b)" — NOT YET FILED
+### Follow-up from feature-18 PR A — FILED as [#321](https://github.com/ventouxlabs/relais/issues/321)
 
-**Ready to post as a GitHub issue. Text below is the issue body.**
+**"Restore the boot-race LAN rebind (feature-18 T5b), cut from PR A."** The issue body is the text
+below, posted verbatim; kept here because the ten-defect history is the part worth finding from
+either direction.
 
 ---
 
