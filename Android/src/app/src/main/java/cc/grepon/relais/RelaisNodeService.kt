@@ -33,11 +33,11 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 private const val TAG = "RelaisNodeService"
@@ -52,6 +52,12 @@ private const val NOTIFICATION_ID = 4242
 // unload, so polling every minute is negligible overhead for a foreground service that's already
 // resident and holding a wake lock.
 private const val IDLE_TTL_POLL_INTERVAL_MS = 60_000L
+
+// Retry cadence for a LAN re-issue blocked by the initial mint (feature-18 T5b). Five seconds is
+// comfortably longer than a mint; 24 attempts is ~2 minutes, after which a failure is structural
+// rather than a race and retrying forever would just burn crypto for the life of the node.
+private const val LAN_REISSUE_RETRY_DELAY_MS = 5_000L
+private const val LAN_REISSUE_MAX_ATTEMPTS = 24
 
 /**
  * Pure decision behind [RelaisNodeService]'s startup dispatch guard: should a new init attempt be
@@ -122,8 +128,18 @@ class RelaisNodeService : Service() {
    * The trade is losing `removeCallbacksAndMessages`, so shutdown rests entirely on [destroyed] —
    * checked as the first statement of the scheduled work, and set before this is shut down.
    */
-  private val lanReissueExecutor: ExecutorService =
-    Executors.newSingleThreadExecutor { Thread(it, "relais-lan-reissue") }
+  private val lanReissueExecutor: ScheduledExecutorService =
+    Executors.newSingleThreadScheduledExecutor { Thread(it, "relais-lan-reissue") }
+
+  /**
+   * Guards the stop/construct sequence against [onDestroy], which holds it while setting
+   * [destroyed]. Not the same as thread-confinement — see the invariant note at the construction
+   * site for why that argument does not apply here and must not be reintroduced.
+   */
+  private val teardownLock = Any()
+
+  /** Bounded retries for a re-issue blocked by the initial mint; see [scheduleReissueRetry]. */
+  private val lanReissueAttempts = AtomicInteger(0)
 
   // Guards the single init path (delta review: onStartCommand used to be a bare START_STICKY, so a
   // retry START against an already-alive-but-failed service — gated-repo 401, bad model id, process
@@ -380,37 +396,54 @@ class RelaisNodeService : Service() {
     // A failed re-issue leaves the certificate on disk unchanged, so rebinding would drop live
     // connections to serve exactly what was being served before. It is also RECOVERABLE and must
     // not spend the one-shot: on a fresh install this runs with CA minting disabled while the
-    // accept thread is still generating the CA, and the next callback will succeed.
+    // accept thread is still generating the CA.
+    //
+    // Retry on our OWN schedule rather than waiting for another callback. "Stay armed" is not a
+    // plan when the callbacks already delivered were the last ones — a node whose Wi-Fi came up
+    // during the initial mint would then serve the loopback-only certificate until something
+    // unrelated changed the network, or until a restart.
     if (!RelaisTls.reissueForLan(applicationContext)) {
-      Log.w(TAG, "LAN re-issue produced no new certificate yet; staying armed")
+      scheduleReissueRetry()
       return
     }
 
     // Committed. From here exactly one rebind happens and the watch ends, however it goes.
     lanReissueDone.set(true)
     try {
-      httpsServer?.stop()
-      // ── INVARIANT: after this service is destroyed, nothing may construct a RelaisHttpServer. ──
+      // ── INVARIANT: once teardown has begun, nothing may construct a RelaisHttpServer. ──
       //
-      // This is the ONLY place outside dispatchStartupIfNeeded that builds one, and it runs from a
-      // main-looper post, which can outlive onDestroy. The listener it creates binds
-      // `0.0.0.0:8443` on `applicationContext` — which survives the service — so a construction
-      // that slips past teardown leaves a LAN-facing TLS listener that nothing can stop short of
-      // killing the process, while the notification is gone, the QS tile reads "stopped", and
-      // mDNS has been unregistered. The user sees a node that is off and cannot turn off what is
-      // actually still listening.
+      // This is the ONLY place outside dispatchStartupIfNeeded that builds one. The listener binds
+      // `0.0.0.0:8443` on `applicationContext`, which OUTLIVES this service — so a construction
+      // that slips past teardown leaves a LAN-facing TLS listener nothing can stop short of killing
+      // the process, while the notification is gone, the QS tile reads "stopped", and mDNS has been
+      // unregistered. The user sees a node that is off and cannot turn off what is still listening.
       //
-      // The `destroyed` check at the top of this method is what upholds that, and it works only
-      // because onDestroy sets the flag on the same (main) thread that runs this. **If you add
-      // another path that posts here, or move this construction, re-derive that guarantee — do not
-      // assume it.**
-      //
-      // Byte-for-byte the construction in dispatchStartupIfNeeded, just later. In-flight
-      // connections on the old listener are dropped — acceptable, since it was serving a
-      // loopback-only cert no LAN client could verify anyway.
-      httpsServer =
-        RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0")
-          .also { it.start() }
+      // **WHAT THIS RESTS ON — check it against the code, do not trust this sentence.** The guard
+      // is `destroyed` re-read *inside* [teardownLock], which `onDestroy` also holds while setting
+      // it. Both of those are load-bearing:
+      //  - **Inside the lock**, because the check at the top of this method is separated from this
+      //    construction by a re-issue costing hundreds of milliseconds. A teardown landing in that
+      //    gap passes the early check and still reaches here.
+      //  - **A lock rather than a thread-confinement argument**, because this method does not run
+      //    on `onDestroy`'s thread. An earlier version of this comment claimed it did — true when
+      //    the work was a `mainHandler.post`, and made false by the later swap to
+      //    [lanReissueExecutor] without the comment noticing. Do not restore a
+      //    "same thread as onDestroy" argument unless you have re-derived it: **whether these two
+      //    sequences share a thread is a property of how the work is scheduled, and that has
+      //    already changed once underneath this reasoning.**
+      synchronized(teardownLock) {
+        if (destroyed || Thread.currentThread().isInterrupted) {
+          Log.i(TAG, "Teardown began during the re-issue; not rebinding :8443")
+          return
+        }
+        httpsServer?.stop()
+        // Byte-for-byte the construction in dispatchStartupIfNeeded, just later. In-flight
+        // connections on the old listener are dropped — acceptable, since it was serving a
+        // loopback-only cert no LAN client could verify anyway.
+        httpsServer =
+          RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0")
+            .also { it.start() }
+      }
       Log.i(TAG, "Re-issued the leaf certificate for the LAN and rebound :8443")
     } catch (e: Exception) {
       Log.e(TAG, "LAN rebind failed after a successful re-issue", e)
@@ -418,6 +451,38 @@ class RelaisNodeService : Service() {
       // In a finally: a throw partway through must still end the watch, or a flapping link retries
       // the same failure forever.
       unregisterLanReissue()
+    }
+  }
+
+  /**
+   * Re-runs [reissueAndRebind] shortly, for the one failure that is expected and self-resolving:
+   * the initial mint still holding the keystore while this path runs with CA minting forbidden.
+   *
+   * Bounded, because a retry loop that never gives up on a *structural* failure would re-run crypto
+   * every few seconds for the life of the node. [LAN_REISSUE_MAX_ATTEMPTS] × the delay is about two
+   * minutes, which is far longer than a mint and far shorter than an annoyance. Giving up logs at
+   * WARN and leaves the certificate as it is — the node still works, it is simply loopback-only
+   * until restarted, which is the pre-existing behaviour rather than a new failure.
+   */
+  private fun scheduleReissueRetry() {
+    if (destroyed) return
+    val attempt = lanReissueAttempts.incrementAndGet()
+    if (attempt > LAN_REISSUE_MAX_ATTEMPTS) {
+      Log.w(
+        TAG,
+        "LAN re-issue still not possible after $LAN_REISSUE_MAX_ATTEMPTS attempts; " +
+          "the certificate stays loopback-only until the node is restarted",
+      )
+      return
+    }
+    Log.i(TAG, "LAN re-issue not possible yet (attempt $attempt); retrying shortly")
+    // Rejected once the executor is shut down, which is the normal state after onDestroy.
+    runCatching {
+      lanReissueExecutor.schedule(
+        { reissueAndRebind() },
+        LAN_REISSUE_RETRY_DELAY_MS,
+        TimeUnit.MILLISECONDS,
+      )
     }
   }
 
@@ -446,12 +511,15 @@ class RelaisNodeService : Service() {
   }
 
   override fun onDestroy() {
-    // FIRST, before anything can be torn down: everything already queued on the main looper reads
-    // this and bails, and everything scheduled after it never runs.
-    destroyed = true
-    // Order matters: the flag is set BEFORE the executor stops, so a task already running observes
-    // it and returns rather than constructing a listener that would outlive this service.
-    lanReissueExecutor.shutdownNow()
+    // Under [teardownLock], so this cannot interleave with the rebind's stop/construct sequence.
+    // Setting the flag alone is NOT enough: the rebind reads it, then spends hundreds of
+    // milliseconds re-issuing before it constructs, and a teardown landing in that gap used to be
+    // able to stop the old listener and have a new one built behind it. The lock makes the two
+    // sequences mutually exclusive rather than merely unlikely to overlap.
+    synchronized(teardownLock) {
+      destroyed = true
+      lanReissueExecutor.shutdownNow()
+    }
     idleTtlExecutor?.shutdownNow()
     ThermalGovernor.unregister()
     RelaisDiscovery.unregister()
