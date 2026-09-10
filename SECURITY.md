@@ -107,9 +107,13 @@ man-in-the-middled and skipping this check is *worse* than `-k`, because it feel
 verified:
 
 ```
-openssl x509 -in relais-ca.crt -pubkey -noout \
-  | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64
+echo "sha256/$(openssl x509 -in relais-ca.crt -pubkey -noout \
+  | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64)"
 ```
+
+The `sha256/` prefix is part of the value: every fingerprint the node publishes
+carries it, so a command printing bare base64 would show a mismatch for a
+perfectly good CA. Compare the whole string, prefix included.
 
 The node publishes **two** `sha256/...` values and they are not interchangeable:
 

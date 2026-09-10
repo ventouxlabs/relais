@@ -281,6 +281,77 @@ internal object RelaisCertMint {
     return JcaX509CertificateConverter().getCertificate(builder.build(signer))
   }
 
+  /**
+   * Would re-minting with [newSans] **drop** names the existing [leaf] already covers?
+   *
+   * Guards the forced re-issue path, whose entire purpose is "the LAN came up, cover it" — an
+   * operation that should only ever *add* coverage. A forced mint takes its own address snapshot,
+   * so an interface disappearing between the caller's check and that snapshot would otherwise
+   * write a loopback-only leaf over a perfectly good LAN one, and the caller would then mark the
+   * job done. A transient Wi-Fi blip during boot would not merely fail to help: it would
+   * **downgrade** a working certificate to one that fails hostname verification until restart.
+   *
+   * Expressed as "does not narrow" rather than "the address list is non-empty" on purpose. It is
+   * the same rule for a multi-homed device losing one interface of several, and it states the harm
+   * — losing coverage — instead of one symptom of it. This is the third time-of-check/time-of-use
+   * defect in this family, so the rule is a predicate that can be tested rather than a condition
+   * spelled out at one call site.
+   *
+   * Not symmetric with a plain node start, which legitimately narrows: a node genuinely moved off a
+   * network should stop claiming it. Only the *forced* path is constrained.
+   */
+  fun wouldNarrow(leaf: X509Certificate, newSans: List<GeneralName>): Boolean =
+    !comparisonKeys(newSans).containsAll(comparisonKeys(leaf))
+
+  /**
+   * The certificate's SANs as **rendering-independent** comparison keys.
+   *
+   * The obvious implementation — compare the strings `getSubjectAlternativeNames` hands back
+   * against the strings the [GeneralName] list would produce — is wrong, and wrong in a way that
+   * hides: the JDK's IPv6 formatting here is **provider-dependent**. Measured, the same certificate
+   * reported `0:0:0:0:0:0:0:1` when its test class ran alone and `::1` when the full suite ran, so a
+   * string comparison called a re-issue "narrowing" only in the full suite. An expensive lesson
+   * twice over, since [needsReissue]'s own KDoc already warns not to compare rendered SAN strings —
+   * and this was written anyway.
+   *
+   * So an address is keyed on its **bytes** and a name on its lowercased text, and neither side
+   * gets to depend on how anything chose to print it.
+   */
+  private fun comparisonKeys(cert: X509Certificate): Set<String> =
+    runCatching {
+      cert.subjectAlternativeNames.orEmpty().mapNotNull { it.getOrNull(1) as? String }.map(::sanKey).toSet()
+    }
+      .getOrDefault(emptySet())
+
+  /** The same keys for a not-yet-minted SAN list, derived the same way so the two are comparable. */
+  private fun comparisonKeys(sans: List<GeneralName>): Set<String> =
+    sans
+      .mapNotNull { gn ->
+        when (gn.tagNo) {
+          GeneralName.iPAddress ->
+            runCatching { ASN1OctetString.getInstance(gn.name).octets.toHexKey() }.getOrNull()
+          else -> gn.name.toString().lowercase()
+        }
+      }
+      .toSet()
+
+  /**
+   * One SAN literal as a comparison key: raw address bytes for an IP, lowercased text for a name.
+   *
+   * The IP test is textual rather than a parse attempt because `InetAddress.getByName` performs a
+   * DNS lookup for anything that is not a literal — turning a comparison into network IO, and a
+   * `localhost` entry into whatever the resolver happens to say today.
+   */
+  private fun sanKey(literal: String): String {
+    val looksLikeIp =
+      literal.contains(':') || literal.matches(Regex("""\d{1,3}(\.\d{1,3}){3}"""))
+    if (!looksLikeIp) return literal.lowercase()
+    return runCatching { InetAddress.getByName(literal).address.toHexKey() }
+      .getOrDefault(literal.lowercase())
+  }
+
+  private fun ByteArray.toHexKey(): String = joinToString("") { "%02x".format(it) }
+
   /** The RSA-2048 leaf key. Generated once per node and reused across every re-mint — see [needsReissue]. */
   fun generateLeafKeyPair(): KeyPair =
     KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()

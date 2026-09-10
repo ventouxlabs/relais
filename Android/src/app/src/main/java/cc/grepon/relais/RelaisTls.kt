@@ -237,6 +237,15 @@ internal object RelaisTls {
       else loadLeaf(tlsFile, tlsPass)?.takeIf { leaf ->
         runCatching { leaf.verify(caCert.publicKey) }.isSuccess
       }
+    // A forced re-issue must never LOSE coverage. `liveSans` above is this function's own snapshot,
+    // taken after the caller decided to force — so an interface that disappeared in between would
+    // otherwise write a loopback-only leaf over a working LAN one, and the caller would mark the
+    // job done. A Wi-Fi blip during boot would downgrade a good certificate rather than merely fail
+    // to improve it. Throwing (rather than silently minting) is what makes `reissueForLan` return
+    // false, which the service treats as "not yet — stay armed and retry".
+    check(!(forceLeafReissue && existingLeaf != null && RelaisCertMint.wouldNarrow(existingLeaf, liveSans))) {
+      "forced re-issue would drop SANs the current leaf covers; the address set moved underneath us"
+    }
     val reissue =
       allowMintLeaf &&
         (forceLeafReissue ||
