@@ -80,7 +80,7 @@ class RelaisTlsHandshakeTest {
     val leaf = mintLeafFor(ca, leafKey, sans)
 
     // Still connects over loopback: the point is that adding LAN addresses does not evict the
-    // loopback trio, which is what would break `adb forward`.
+    // loopback entries, which is what would break `adb forward`.
     handshake(ca.certificate, leaf, leafKey)
   }
 

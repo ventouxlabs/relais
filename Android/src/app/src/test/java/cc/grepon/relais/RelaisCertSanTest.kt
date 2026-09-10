@@ -96,8 +96,10 @@ class RelaisCertSanTest {
     val sans = RelaisCertMint.buildSanList(addrs)
 
     assertEquals(32, sans.size)
-    // The four fixed entries are prepended before the cap, so surplus real addresses are the only
-    // thing ever dropped.
+    // The fixed entries are prepended before the cap, so surplus real addresses are the only thing
+    // ever dropped. Count deliberately unstated here — it changed once already (`::1` removed), and
+    // a number in prose beside a non-hardcoded assertion is what talks the next reader into
+    // "correcting" the assertion to match the comment.
     // take(fixedEntries.size), not a literal: the fixed set shrank from four to three when `::1`
     // was removed, and a hardcoded count silently starts asserting about a dynamic address.
     assertEquals(fixedEntries, sans.take(fixedEntries.size).map { render(it) })

@@ -93,7 +93,7 @@ internal object RelaisCertMint {
   /**
    * The SAN entries for a leaf covering [addrs], in a deterministic order.
    *
-   * Three entries are always present and always first: `127.0.0.1` as `iPAddress`, `localhost` and
+   * These are always present and always first: `127.0.0.1` as `iPAddress`, `localhost` and
    * `relais-node.local` as `dNSName`. Loopback is what keeps the `adb forward tcp:8443` path in the
    * runbook verifiable; without it a developer's own machine is the one place the feature does not
    * work.

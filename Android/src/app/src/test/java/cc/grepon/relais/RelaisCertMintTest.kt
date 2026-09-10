@@ -208,7 +208,7 @@ class RelaisCertMintTest {
       )
 
     // The chain and the SAN encoding are well-formed across a realistic multi-homed address set,
-    // including the loopback trio buildSanList always prepends — without which `adb forward` would
+    // including the loopback entries buildSanList always prepends — without which `adb forward` would
     // be the one path the feature does not cover.
     validate(leaf, ca.certificate)
   }
