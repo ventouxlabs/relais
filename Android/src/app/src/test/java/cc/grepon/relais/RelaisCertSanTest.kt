@@ -131,12 +131,37 @@ class RelaisCertSanTest {
   }
 
   /**
-   * The three entries [RelaisCertMint.buildSanList] always prepends, in [render]'s spelling.
+   * No `.local` name is certified, because the app cannot make one resolve to this node.
    *
-   * Was four until `::1` was removed — the loopback listener binds `127.0.0.1`, so the IPv6
-   * loopback was certified and unreachable exactly like a LAN IPv6 address.
+   * `relais-node.local` was in the fixed set until a device run found it does not resolve. It is
+   * the third instance of one mistake — `::1`, the IPv6 LAN addresses, and this — where the SAN set
+   * was derived from what we *meant* to cover rather than from what the node actually answers to.
+   *
+   * The name looks like it should work because [RelaisDiscovery] registers `serviceName =
+   * "relais-node"`, but that is a DNS-SD **service instance** (`relais-node._relais._tcp.local`,
+   * a PTR/SRV/TXT triple), which is a different namespace from the **host** A record
+   * `relais-node.local`. The host name is the responder's to choose, and `NsdServiceInfo` exposes
+   * `getHostname()` with **no** `setHostname()` in either android-36 (the compileSdk) or
+   * android-37 — the app can read what the platform picked and cannot set it. On the test device
+   * the platform picked one derived from `device_name`, which was `portage-e2e-comet`.
+   *
+   * Re-adding this needs an API that lets the app own the host record, not just a nicer name.
    */
-  private val fixedEntries = listOf("127.0.0.1", "localhost", "relais-node.local")
+  @Test
+  fun `no dot-local name is certified, because the app cannot make one resolve`() {
+    val sans = RelaisCertMint.buildSanList(listOf(InetAddress.getByName("192.168.1.40")))
+
+    assertTrue(".local must not be certified", sans.none { render(it).endsWith(".local") })
+  }
+
+  /**
+   * The two entries [RelaisCertMint.buildSanList] always prepends, in [render]'s spelling.
+   *
+   * Was four. `::1` went first — the loopback listener binds `127.0.0.1`, so the IPv6 loopback was
+   * certified and unreachable exactly like a LAN IPv6 address. `relais-node.local` went for the
+   * same reason, on hardware evidence: see the test below.
+   */
+  private val fixedEntries = listOf("127.0.0.1", "localhost")
 
   /** Renders a [GeneralName] back to its literal, decoding `iPAddress` octets via [InetAddress]. */
   private fun render(gn: GeneralName): String =

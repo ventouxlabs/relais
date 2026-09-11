@@ -577,7 +577,10 @@ private fun ActionLink(label: String, onClick: () -> Unit) {
   - `buildSanList(addrs: List<InetAddress>): List<GeneralName>` — always prepend `127.0.0.1` (iPAddress),
     `::1` (iPAddress), `localhost` (dNSName); append `relais-node.local` (dNSName); then T1's addresses
     as `iPAddress`. Dedupe, stable sort, then **cap the final list at 32 — the single cap in the whole
-    pipeline** (T1 does not cap). The four fixed entries are prepended *before* the cap and are never
+    pipeline** (T1 does not cap). **As-built the fixed set is two, not four** — `::1` and
+    `relais-node.local` were both removed as certified-but-unreachable; see assumption A2 and the
+    `.local` risk row. The text above is the original spec, kept for the record.
+    The fixed entries are prepended *before* the cap and are never
     the ones dropped, so a multi-homed device loses only surplus real addresses, never loopback.
   - `mintCa(): KeyStore` — EC P-256 (`KeyPairGenerator.getInstance("EC")` + `ECGenParameterSpec("secp256r1")`),
     `SHA256withECDSA`, `CN=Relais Node CA (<8 hex chars of the SPKI hash>)`, 10 years,
@@ -1114,7 +1117,7 @@ nmap -Pn -p 8443 <phone-ip>                           # after STOP: 8443 must NO
 | A QR dependency drags in a GMS-tainted transitive | Low | Medium — breaks the degoogled gate | Verify the real closure against `build_android.yaml:73-86`; hand-rolled encoder sidesteps it |
 | Multi-interface device (VPN + Wi-Fi + tethering) churns the SAN set and re-mints every start | Low | Low | Stable sort + set equality + the 32 cap; re-mint is cheap |
 | A node up >90 days serves an expired leaf | Low | Medium | Re-mint at 15 days remaining, checked on start. **Accepted gap** — a periodic timer is a follow-up |
-| `.local` SAN implies a name that does not resolve | Low | Low | Present in the cert, absent from every doc and UI string (assumption A2) |
+| ~~`.local` SAN implies a name that does not resolve~~ **HAPPENED** | ~~Low~~ | ~~Low~~ | **Mitigation was false.** "Absent from every UI string" was untrue the moment T6 shipped the certificate panel: `RelaisDashboard.kt` renders the whole SAN set, so the unresolvable name was displayed as covered. Fixed by removing it (A2), not by hiding it |
 | QR is a new visual element with no DESIGN.md precedent | Medium | Low | Needs JD's explicit sign-off; amber-on-charcoal, no new color, no motion |
 
 ## Notes
@@ -1133,7 +1136,15 @@ nmap -Pn -p 8443 <phone-ip>                           # after STOP: 8443 must NO
 - **A1.** The Android Tailscale client exposes **no** third-party API for `tailscale cert` — no CLI, no
   documented intent/AIDL surface. Not verified this pass; it collapses option (b) to documentation.
 - **A2.** `NsdManager` gives the app no control over the mDNS **host** A record, so the `.local` name
-  the device answers to is neither knowable nor stable from app code.
+  the device answers to is neither knowable nor stable from app code. **VERIFIED 2026-09-10, and it
+  holds.** `NsdServiceInfo` exposes `getHostname()` and no `setHostname()` in android-36 (the
+  compileSdk) or android-37, so the host record is the platform's to choose. `serviceName =
+  "relais-node"` registers the DNS-SD *service instance* `relais-node._relais._tcp.local`, which is
+  a different namespace from the *host* A record `relais-node.local`. On the device, the platform's
+  name derived from `device_name` (`portage-e2e-comet`), and `relais-node.local` did not resolve.
+  Consequence: `relais-node.local` was **removed** from the fixed SAN set, which is now two entries
+  (`127.0.0.1`, `localhost`). The risk row below was accepted on a premise this implementation
+  invalidated — see it.
 - **A3.** An EC P-256 self-signed CA is ~400-550 bytes DER. **A claim to test, not to trust** — T7's
   capacity assertion runs against the real minted DER.
 

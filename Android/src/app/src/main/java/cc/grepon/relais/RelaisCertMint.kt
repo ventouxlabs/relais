@@ -92,10 +92,18 @@ internal object RelaisCertMint {
   /**
    * The SAN entries for a leaf covering [addrs], in a deterministic order.
    *
-   * These are always present and always first: `127.0.0.1` as `iPAddress`, `localhost` and
-   * `relais-node.local` as `dNSName`. Loopback is what keeps the `adb forward tcp:8443` path in the
-   * runbook verifiable; without it a developer's own machine is the one place the feature does not
-   * work.
+   * These are always present and always first: `127.0.0.1` as `iPAddress` and `localhost` as
+   * `dNSName`. Loopback is what keeps the `adb forward tcp:8443` path in the runbook verifiable;
+   * without it a developer's own machine is the one place the feature does not work.
+   *
+   * **No `.local` name, and this is not an oversight.** `relais-node.local` was here until a device
+   * run showed it does not resolve. [RelaisDiscovery] registers `serviceName = "relais-node"`,
+   * which creates the DNS-SD **service instance** `relais-node._relais._tcp.local` — a PTR/SRV/TXT
+   * triple, a different namespace from the **host** A record `relais-node.local`. The host name
+   * belongs to the platform responder: `NsdServiceInfo` has `getHostname()` and **no**
+   * `setHostname()` in android-36 (the compileSdk) or android-37, so the app can read the name the
+   * platform chose and cannot choose it. Re-adding this needs an API that gives the app the host
+   * record, not merely a better name to ask for.
    *
    * **No IPv6, deliberately — the node's listeners are IPv4-only** (`0.0.0.0:8443` and
    * `127.0.0.1:8080`), so an IPv6 address in here would certify something no client can reach. That
@@ -119,7 +127,6 @@ internal object RelaisCertMint {
       listOf(
         GeneralName(GeneralName.iPAddress, "127.0.0.1"),
         GeneralName(GeneralName.dNSName, "localhost"),
-        GeneralName(GeneralName.dNSName, "relais-node.local"),
       )
     val fixedLiterals = setOf("127.0.0.1")
     val dynamic =
