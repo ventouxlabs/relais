@@ -166,6 +166,32 @@ class RelaisNodeService : Service() {
    * what actually makes concurrent calls (onCreate racing onStartCommand, repeated START taps) safe.
    */
   /**
+   * Stops and releases both listeners, leaving the fields null and the shared state false.
+   *
+   * **The rule: never clear or replace a listener reference without stopping what it points at.**
+   * A dropped reference to a *live* server is unreachable and still owns its port, so the next bind
+   * collides with an orphan nothing can stop — and every retry after that fails identically while
+   * the service reports no listeners. That is an unrecoverable node produced by the recovery path
+   * itself.
+   *
+   * This must be unconditional at the start of a retry, not a branch. [RelaisListenerState] is an
+   * AND of two independent listeners, so "one down, one up" is not a rare case — it is half the
+   * state space, and it is exactly the case a retry meets. Making that state *visible* did not make
+   * its transitions safe.
+   *
+   * `stop()` is safe to call on an already-stopped server (it closes a closed socket under
+   * `runCatching`, joins a null thread, and shuts down an idle pool), so the double-stop a caught
+   * failure can produce is a no-op rather than something to guard.
+   */
+  private fun stopListeners() {
+    runCatching { httpServer?.stop() }
+    runCatching { httpsServer?.stop() }
+    httpServer = null
+    httpsServer = null
+    refreshListenerState()
+  }
+
+  /**
    * Recomputes [RelaisListenerState.listenersUp] from the live sockets and returns it.
    *
    * The single place the predicate is written. `isListening`, not `!= null`: a stopped server is
@@ -216,6 +242,10 @@ class RelaisNodeService : Service() {
         // so `/v1/audio/speech` works on degoogled too. Cheap (no load); the route gates on availability
         // and provisions the Piper voice on demand via 503.
         cc.grepon.relais.tts.TtsRegistration.register(applicationContext)
+        // A retry can arrive with one listener still live — `listenersUp` is an AND, so "HTTP died,
+        // HTTPS still bound" is an ordinary state, and assigning over a live server would orphan it
+        // holding its port. Release both before rebuilding either.
+        stopListeners()
         // Security C1: plaintext HTTP is loopback-only (in-device app/dev); the LAN is served only
         // over HTTPS, so the bearer key never crosses the network in cleartext.
         httpServer = RelaisHttpServer(applicationContext, port = 8080, bindAddr = "127.0.0.1").also { it.start() }
@@ -245,15 +275,13 @@ class RelaisNodeService : Service() {
         // The engine deliberately stays resident: it initialised fine, reloading it costs seconds
         // of model load, and the init body is `ensure`-shaped so a retry no-ops through it and
         // rebuilds only what is missing.
-        runCatching { httpServer?.stop() }
-        runCatching { httpsServer?.stop() }
-        httpServer = null
-        httpsServer = null
+        // Through the shared teardown, so the stop-before-clear rule is inherited rather than
+        // restated — and so this path cannot drift from the retry path that must obey the same rule.
+        // It also clears RelaisListenerState: the engine stays resident, so `isReady` remains true,
+        // and without that every surface would read LIVE for a node nothing can reach while the
+        // false LIVE suppressed the retry that would fix it.
+        stopListeners()
         runCatching { RelaisDiscovery.unregister() } // stop advertising a node that is not serving
-        // The engine stays resident, so `isReady` remains true — which is why this line matters:
-        // without it every surface reads LIVE for a node nothing can reach, and the false LIVE also
-        // suppresses the retry that would fix it.
-        refreshListenerState()
         updateNotification("Init failed: ${e.message}")
       } finally {
         RelaisEngine.startupInProgress = false
@@ -281,8 +309,11 @@ class RelaisNodeService : Service() {
    * @return true when a listener is bound and accepting.
    */
   private fun startHttpsListener(): Boolean {
-    // Cleared first, not in the failure branch: between here and a successful assignment there must
+    // Stop, THEN clear. Clearing alone drops a reference that may point at a live listener still
+    // owning :8443 — the replacement bind would then collide with an orphan nothing can reach. The
+    // ordering matters as much as the clearing: between here and a successful assignment there must
     // be no window in which the field names something that is not listening.
+    runCatching { httpsServer?.stop() }
     httpsServer = null
     return runCatching {
         httpsServer =

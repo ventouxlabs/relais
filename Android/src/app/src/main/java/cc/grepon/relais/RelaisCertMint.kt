@@ -314,8 +314,15 @@ internal object RelaisCertMint {
     KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
 
   /**
-   * Should the leaf be re-minted? True when the address set has changed, or when expiry is closer
-   * than [REISSUE_WINDOW_DAYS].
+   * Should the leaf be re-minted? True when the address set has changed, when expiry is closer than
+   * [REISSUE_WINDOW_DAYS], or when the leaf's validity **has not begun yet**.
+   *
+   * **The near-end check answers `now < notBefore` opposite to [needsCaRenewal], on purpose.**
+   * Renewing the CA is destructive — every client must re-import — so a clock that provably
+   * predates the certificate is not evidence worth rotating on, and that function returns false.
+   * Re-issuing the leaf reuses the leaf key, so the NODE KEY PIN does not move and nothing a client
+   * holds is invalidated; the cheap, non-destructive action is the safe one when the dates are
+   * untrustworthy. Same input, opposite answers, because the cost of being wrong runs the other way.
    *
    * The SAN comparison is over the **DER bytes** of the extension, not over rendered strings, and
    * that matters: `X509Certificate.getSubjectAlternativeNames` normalizes an IPv6 address on the
@@ -324,6 +331,11 @@ internal object RelaisCertMint {
    * encodings is exact, and [buildSanList]'s deterministic order is what makes it stable.
    */
   fun needsReissue(leaf: X509Certificate, liveSans: List<GeneralName>, now: Long): Boolean {
+    // Both ends of the validity window, not just the far one. This asked "is it expiring?" and
+    // never "has it started?" — so a leaf minted while the clock was jumped forward kept its
+    // future `notBefore` after the clock corrected, and every client rejected TLS until that date
+    // arrived. Unchanged SANs and a distant `notAfter` made every other re-issue reason absent.
+    if (now < leaf.notBefore.time) return true
     if (leaf.notAfter.time - now < REISSUE_WINDOW_DAYS * MS_PER_DAY) return true
     val current = leaf.getExtensionValue(Extension.subjectAlternativeName.id)
     val currentSans = current?.let { ASN1OctetString.getInstance(it).octets }

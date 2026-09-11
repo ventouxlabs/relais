@@ -35,6 +35,39 @@ class RelaisCertReissueTest {
 
   private val now = System.currentTimeMillis()
 
+  /**
+   * A leaf that has not started yet must be re-issued (codex round 19).
+   *
+   * [RelaisCertMint.needsReissue] asked "is it expiring?" and never "has it started?". If the clock
+   * jumps forward during a restart, the node mints a leaf whose `notBefore` is months ahead; when
+   * the clock corrects, the SAN set is unchanged and `notAfter` is far away, so the predicate kept
+   * it — and every verifying client rejected TLS until that bogus date arrived.
+   *
+   * **The near end is treated differently from the CA's, and the asymmetry is deliberate.**
+   * [RelaisCertMint.needsCaRenewal] returns *false* for `now < notBefore`, because rotating the CA
+   * is destructive — it invalidates every client's import — so a clock that provably predates the
+   * certificate is not evidence worth acting on. Re-issuing the leaf is the opposite: it is cheap
+   * and it **reuses the leaf key**, so the NODE KEY PIN does not move and nothing a client holds is
+   * invalidated. Same input, opposite answers, because the cost of being wrong runs the other way.
+   */
+  @Test
+  fun `a leaf whose validity has not begun is re-issued`() {
+    val ca = RelaisCertMint.mintCa()
+    val leafKey = RelaisCertMint.generateLeafKeyPair()
+    val sans = RelaisCertMint.buildSanList(emptyList())
+    val leaf = RelaisCertMint.mintLeaf(ca.keyPair.private, ca.certificate, leafKey.public, sans)
+
+    // The clock as it reads AFTER correcting: a day before this leaf claims to become valid. Its
+    // SANs are unchanged and expiry is 90 days out, so every other reason to re-issue is absent —
+    // which is what makes this pin the new condition rather than ride on an existing one.
+    val beforeItIsValid = leaf.notBefore.time - 86_400_000L
+
+    assertTrue(
+      "a not-yet-valid leaf cannot be served, so keeping it strands the node",
+      RelaisCertMint.needsReissue(leaf, sans, beforeItIsValid),
+    )
+  }
+
   @Test
   fun `an unchanged address set on a fresh leaf needs no re-issue`() {
     val sans = RelaisCertMint.buildSanList(addrs("192.168.1.40"))
