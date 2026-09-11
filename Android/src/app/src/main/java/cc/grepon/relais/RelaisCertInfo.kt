@@ -25,10 +25,12 @@ package cc.grepon.relais
  * accidentally reach through to key material, and so no consumer has to agree with any other about
  * how a fingerprint is spelled.
  *
- * @property caFingerprint the CA public key as `sha256/<base64>` — the out-of-band value a user
+ * @property caFingerprint the CA public key as `sha256/<base64>` (one slash: a display value, not
+ *   a curl argument) — the out-of-band value a user
  *   checks after fetching the CA. **Not** what `--pinnedpubkey` wants; see [nodeKeyPin].
- * @property nodeKeyPin the *leaf* public key as `sha256/<base64>` — what
- *   `curl --pinnedpubkey sha256//<value>` pins. Survives a re-mint unchanged, which is the whole
+ * @property nodeKeyPin the *leaf* public key as `sha256//<base64>` — the COMPLETE
+ *   `curl --pinnedpubkey <value>` argument, second slash included, so a user pastes it verbatim
+ *   with nothing to prepend. Survives a re-mint unchanged, which is the whole
  *   point of reusing the leaf key.
  * @property sanList the leaf's subject-alternative names as display strings, in certificate order.
  * @property leafNotAfter the leaf's expiry as epoch millis, for the "in N days" row.

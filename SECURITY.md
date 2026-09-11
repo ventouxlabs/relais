@@ -132,19 +132,34 @@ echo "sha256/$(openssl x509 -in relais-ca.crt -pubkey -noout \
   | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64)"
 ```
 
-The `sha256/` prefix is part of the value: every fingerprint the node publishes
-carries it, so a command printing bare base64 would show a mismatch for a
-perfectly good CA. Compare the whole string, prefix included.
+The prefix is part of the value: every fingerprint the node publishes carries
+one, so a command printing bare base64 would show a mismatch for a perfectly
+good CA. Compare the whole string, prefix included.
 
-The node publishes **two** `sha256/...` values and they are not interchangeable:
+The node publishes **two** values, and they differ in both content and spelling:
 
-| Value | What it is | Used for |
-|---|---|---|
-| `CA FINGERPRINT` | the CA's public key | checking the `ca.crt` you downloaded |
-| `NODE KEY PIN` | the **leaf's** public key | `curl --pinnedpubkey sha256//<value>` |
+| Value | What it is | Spelling | Used for |
+|---|---|---|---|
+| `CA FINGERPRINT` | the CA's public key | `sha256/…` (one slash) | checking the `ca.crt` you downloaded, by eye |
+| `NODE KEY PIN` | the **leaf's** public key | `sha256//…` (two slashes) | `curl --pinnedpubkey <value>` |
 
-Pasting the CA value into `--pinnedpubkey` fails with an error that names
-neither. The leaf key is generated once and **reused** across every re-issue, so a
+**Paste the NODE KEY PIN verbatim — do not add a `sha256//` prefix, it is
+already there.** The two slashes are curl's grammar, and the one-slash form is
+what `openssl` output and the CA fingerprint use.
+
+Getting that wrong is worse than a syntax error, because curl does not report it
+as one. `--pinnedpubkey` takes *either* a path to a key file *or* a `sha256//`
+hash, so a one-slash value is read as a **filename**; the file does not exist,
+and the failure is:
+
+```
+curl: (90) SSL: public key does not match pinned public key
+```
+
+which is **the identical message a genuine key mismatch produces**. Pasting the
+CA value instead of the leaf's fails the same way. If you see that error, check
+the spelling and which of the two values you used before concluding the node's
+key has changed. The leaf key is generated once and **reused** across every re-issue, so a
 `--pinnedpubkey` pin survives a re-issue; only the certificate is re-minted.
 
 **When re-issue actually happens, which is narrower than it sounds:** at node

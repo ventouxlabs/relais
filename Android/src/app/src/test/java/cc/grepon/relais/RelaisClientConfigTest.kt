@@ -330,12 +330,12 @@ class RelaisClientConfigTest {
           modelId = "litert-community/gemma-4-E4B-it",
           caps = textOnlyCaps,
           caFingerprint = "sha256/CA-VALUE",
-          nodeKeyPin = "sha256/LEAF-VALUE",
+          nodeKeyPin = "sha256//LEAF-VALUE",
         )
         .getJSONObject("tls")
 
     assertEquals("sha256/CA-VALUE", tls.getString("ca_fingerprint"))
-    assertEquals("sha256/LEAF-VALUE", tls.getString("node_key_pin"))
+    assertEquals("sha256//LEAF-VALUE", tls.getString("node_key_pin"))
     // Distinct keys for distinct values: --pinnedpubkey wants the leaf, --cacert verification wants
     // the CA, and conflating them fails with an error that names neither.
     assertNotEquals(tls.getString("ca_fingerprint"), tls.getString("node_key_pin"))

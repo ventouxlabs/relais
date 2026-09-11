@@ -30,8 +30,9 @@ import java.util.Base64
  *  - **CA FINGERPRINT** — [spkiSha256Base64] of the *CA* public key. This is the out-of-band value
  *    a user checks after fetching `/ca.crt`, to prove the file they downloaded is the node's real
  *    CA and not an interceptor's.
- *  - **NODE KEY PIN** — [spkiSha256Base64] of the *leaf* public key. This is what
- *    `curl --pinnedpubkey sha256//<value>` wants; curl pins the end-entity key, never the issuer's.
+ *  - **NODE KEY PIN** — [curlPin] of the *leaf* public key. This is what
+ *    `curl --pinnedpubkey <value>` wants, already carrying curl's `sha256//` prefix so there is
+ *    nothing to prepend; curl pins the end-entity key, never the issuer's.
  *
  * Pasting the CA value into `--pinnedpubkey` fails with an opaque error, which is why
  * `RelaisCertFingerprintTest` asserts the two values differ for a real minted pair.
@@ -39,9 +40,13 @@ import java.util.Base64
 internal object RelaisCertFingerprint {
 
   /**
-   * `sha256/<base64>` over the DER `SubjectPublicKeyInfo` of [key] — the same bytes and the same
-   * digest curl's `--pinnedpubkey` computes, so the value can be pasted straight into it (curl
-   * spells the separator `sha256//` because its argument grammar takes a second slash).
+   * `sha256/<base64>` over the DER `SubjectPublicKeyInfo` of [key] — the **display** spelling, for
+   * the CA fingerprint a user compares by eye against the `openssl` one-liner in `SECURITY.md`.
+   *
+   * **Not a `--pinnedpubkey` argument.** Use [curlPin] for that; the single slash is a filename to
+   * curl. This KDoc once claimed the value "can be pasted straight into it" and then noted, in the
+   * same sentence's parenthesis, that curl spells the separator with a second slash — the fact that
+   * falsified the claim was sitting inside the claim.
    *
    * `key.encoded` **is** the `SubjectPublicKeyInfo` structure, algorithm identifier included — not
    * the bare RSA modulus or the raw EC point. Hashing anything narrower produces a value that looks
@@ -49,6 +54,29 @@ internal object RelaisCertFingerprint {
    */
   fun spkiSha256Base64(key: PublicKey): String =
     "sha256/" + Base64.getEncoder().encodeToString(sha256(key.encoded))
+
+  /**
+   * The complete `curl --pinnedpubkey` argument for [key]: `sha256//<base64>`, **two slashes**.
+   *
+   * Not a cosmetic difference from [spkiSha256Base64]. curl's grammar is "a path to a public-key
+   * file, **or** hashes preceded by `sha256//`" — so a single-slash value is not rejected as
+   * malformed, it is taken as a **filename**. The file does not exist, the pin never matches, and
+   * the connection fails with:
+   *
+   *     curl: (90) SSL: public key does not match pinned public key
+   *
+   * which is **the same message a genuine key mismatch produces**. That is what makes the wrong
+   * spelling dangerous rather than merely broken: a user pasting the published pin reads that error
+   * as "this node's key changed", and goes looking for the moved-pin explanation on `GET /` for a
+   * reason that is not true.
+   *
+   * The value is the *whole* argument — nothing to prepend. `SECURITY.md` used to say to write
+   * `sha256//<value>` while the value already began `sha256/`, which composes to
+   * `sha256//sha256/…`; both halves of that instruction were individually defensible and together
+   * produced nonsense.
+   */
+  fun curlPin(key: PublicKey): String =
+    "sha256//" + Base64.getEncoder().encodeToString(sha256(key.encoded))
 
   /**
    * Colon-separated uppercase hex of the SHA-256 over the certificate's own DER — the form

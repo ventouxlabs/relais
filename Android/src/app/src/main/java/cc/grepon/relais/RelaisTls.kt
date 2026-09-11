@@ -543,7 +543,9 @@ internal object RelaisTls {
   private fun buildInfo(caCert: X509Certificate, leaf: X509Certificate): RelaisCertInfo =
     RelaisCertInfo(
       caFingerprint = RelaisCertFingerprint.spkiSha256Base64(caCert.publicKey),
-      nodeKeyPin = RelaisCertFingerprint.spkiSha256Base64(leaf.publicKey),
+      // curlPin, not spkiSha256Base64: this value is published for pasting into --pinnedpubkey,
+      // and curl's grammar needs the second slash. See RelaisCertFingerprint.curlPin.
+      nodeKeyPin = RelaisCertFingerprint.curlPin(leaf.publicKey),
       sanList = RelaisCertPem.displayStrings(leaf),
       leafNotAfter = leaf.notAfter.time,
       caPem = RelaisCertPem.toPem(caCert),

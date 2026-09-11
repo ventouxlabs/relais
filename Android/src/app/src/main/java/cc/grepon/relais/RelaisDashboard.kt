@@ -249,7 +249,8 @@ fun renderDashboardHtml(status: DashboardStatus): String {
           "over the same connection, so anyone able to substitute the certificate can substitute " +
           "this fingerprint too. Fetch the CA over a network you already trust; out-of-band " +
           "verification lands in a later release. " +
-          "Use the node key pin — not the ca fingerprint — with curl --pinnedpubkey.",
+          "Paste the node key pin — not the ca fingerprint — straight into curl --pinnedpubkey; "  +
+            "it already carries the sha256// prefix.",
       )}</td>
     </tr>
   </table>

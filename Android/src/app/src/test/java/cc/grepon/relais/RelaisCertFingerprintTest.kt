@@ -73,6 +73,54 @@ class RelaisCertFingerprintTest {
     assertNotEquals(caFingerprint, nodeKeyPin)
   }
 
+  /**
+   * The NODE KEY PIN must be a **complete, pasteable `--pinnedpubkey` argument** (codex round 16).
+   *
+   * It was published as `sha256/<b64>`, the HPKP spelling. curl's grammar is `sha256//<b64>`, and a
+   * single-slash value is not rejected as malformed — it is taken as a **path to a public-key
+   * file**, which does not exist, so the pin never matches.
+   *
+   * That failure is indistinguishable from a real key mismatch: all of our format, a correct format
+   * with a wrong hash, and a nonexistent path produce the identical
+   * `curl: (90) SSL: public key does not match pinned public key`. A user pasting the published pin
+   * would read that as "this node's key changed" — and be sent to the very dashboard row round 10
+   * added to explain a moved pin, for a reason that is not true.
+   *
+   * So the assertion is on the exact separator, not on "contains sha256": the broken value contains
+   * it too.
+   */
+  @Test
+  fun `the node key pin is a complete curl pinnedpubkey argument`() {
+    val leafKey = RelaisCertMint.generateLeafKeyPair()
+
+    val pin = RelaisCertFingerprint.curlPin(leafKey.public)
+
+    assertTrue("curl's grammar is sha256// — one slash is parsed as a filename", pin.startsWith("sha256//"))
+    assertFalse("a third slash is not curl's grammar either", pin.startsWith("sha256///"))
+    // Nothing for the user to prepend, edit, or strip: SECURITY.md told them to write
+    // `sha256//<value>` while the value already began `sha256/`, which composes to
+    // `sha256//sha256/…`. The value must be the whole argument, and what follows the prefix must be
+    // a complete SHA-256 rather than a truncated or re-prefixed one.
+    //
+    // Counted slashes here at first. That is wrong twice over: base64's alphabet CONTAINS '/', so
+    // the count depends on the random key and the test failed about half the time — and the
+    // property was never "how many slashes", it was "the prefix is exact and the rest is a digest".
+    assertEquals(32, Base64.getDecoder().decode(pin.removePrefix("sha256//")).size)
+  }
+
+  @Test
+  fun `the pin and the CA fingerprint carry the same digest in different spellings`() {
+    val key = RelaisCertMint.generateLeafKeyPair().public
+
+    val display = RelaisCertFingerprint.spkiSha256Base64(key)
+    val pin = RelaisCertFingerprint.curlPin(key)
+
+    // Same bytes, two spellings. If these ever diverge, one of the two published values is a digest
+    // of something the other is not, and no error message would say which.
+    assertEquals(display.removePrefix("sha256/"), pin.removePrefix("sha256//"))
+    assertNotEquals("the two spellings must not be interchangeable by accident", display, pin)
+  }
+
   @Test
   fun `the SPKI digest and the certificate digest are over different bytes`() {
     val ca = RelaisCertMint.mintCa()

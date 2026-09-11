@@ -457,7 +457,7 @@ class RelaisDashboardTest {
 
   private fun certInfo(
     caFingerprint: String = "sha256/CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=",
-    nodeKeyPin: String = "sha256/LEAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=",
+    nodeKeyPin: String = "sha256//LEAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=",
     sanList: List<String> = listOf("127.0.0.1", "192.168.1.42"),
   ) = RelaisCertInfo(
     caFingerprint = caFingerprint,
@@ -473,7 +473,7 @@ class RelaisDashboardTest {
 
     assertTrue("panel must be present", html.contains("Certificate"))
     assertTrue("CA fingerprint must render", html.contains("sha256/CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx="))
-    assertTrue("node key pin must render", html.contains("sha256/LEAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx="))
+    assertTrue("node key pin must render", html.contains("sha256//LEAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx="))
     // The two values look identical in shape; only the labels tell a user which goes in
     // --pinnedpubkey. Rendering them unlabelled would be worse than not rendering them.
     assertTrue("must label the CA fingerprint", html.contains("ca fingerprint"))
