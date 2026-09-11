@@ -75,6 +75,13 @@ internal object RelaisCertMint {
   private const val REISSUE_WINDOW_DAYS = 15L
 
   /**
+   * Re-mint the **CA** once it has less than this left. Wider than [REISSUE_WINDOW_DAYS] because a
+   * CA renewal costs every client a re-import, so it must happen once, early, with a month of
+   * starts in which to notice — not in the last fortnight of a ten-year certificate.
+   */
+  private const val CA_RENEWAL_WINDOW_DAYS = 30L
+
+  /**
    * Hard ceiling on SAN entries, applied exactly once — here, after the fixed entries are
    * prepended. [RelaisLanIp.allLanAddresses] deliberately does not cap, so that this is the only
    * place the policy lives.
@@ -323,6 +330,45 @@ internal object RelaisCertMint {
     val wanted =
       if (liveSans.isEmpty()) null else GeneralNames(liveSans.toTypedArray()).encoded
     return !(currentSans contentEquals wanted)
+  }
+
+  /**
+   * Should the **CA** be re-minted? True when it is within [CA_RENEWAL_WINDOW_DAYS] of `notAfter`.
+   *
+   * The CA had a birth and no renewal: it was returned on every successful load regardless of
+   * expiry, so once it lapsed every leaf re-issue would be signed by an **expired trust anchor** and
+   * every verifying client would fail permanently, with nothing on the node able to recover it.
+   *
+   * **The reachable route is a wrong clock, not the calendar.** Ten years is far away; an Android
+   * device whose RTC jumps is not, and a jump past `notAfter` is not cleared by a reboot.
+   *
+   * The two clock directions are handled differently, on purpose:
+   *
+   *  - **Backwards before [X509Certificate.getNotBefore] is provable nonsense** — nothing can
+   *    observe a certificate before it was minted — so it returns false and changes nothing. Same
+   *    shape as [RelaisTls.isKeyMaterialUnrecoverable]: act only on proof.
+   *
+   *    **Be honest about this guard: with the shipped values it is unreachable.** For it to change
+   *    the answer, `now` must be before `notBefore` *and* within [CA_RENEWAL_WINDOW_DAYS] of
+   *    `notAfter`, which needs a validity period shorter than the window — impossible at ten years
+   *    and thirty days. It is kept because those two constants are exactly the kind that get tuned
+   *    later, and the failure it prevents (a flat RTC rotating the CA on every boot, invalidating
+   *    every client's import each time) is unrecoverable. `RelaisCaRenewalTest` constructs a
+   *    short-lived certificate specifically to exercise it, so it is a tested guard rather than
+   *    dead code a refactor deletes on sight.
+   *  - **Forwards cannot be disproved on-device.** There is no upper bound to check a clock against,
+   *    so the clock is believed. That is a deliberate trade, not an omission: refusing to renew an
+   *    expired CA is a *permanent* failure, while renewing on a wrong clock is *recoverable* — the
+   *    user re-imports, and `caWasReplaced` says so. Between one unrecoverable outcome and one
+   *    recoverable one, this chooses the recoverable.
+   *
+   * Renewal is a **replacement**: the caller must set `caWasReplaced`, and the existing leaf stops
+   * verifying against the new CA, so it is re-issued by the same signature check that already
+   * guards a hand-me-down leaf.
+   */
+  fun needsCaRenewal(ca: X509Certificate, now: Long): Boolean {
+    if (now < ca.notBefore.time) return false
+    return ca.notAfter.time - now < CA_RENEWAL_WINDOW_DAYS * MS_PER_DAY
   }
 
   /** A positive, unpredictable 64-bit serial. Sequential serials leak how many certs a node has minted. */

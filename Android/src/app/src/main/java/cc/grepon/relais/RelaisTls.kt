@@ -391,7 +391,21 @@ internal object RelaisTls {
           val cert = ks.getCertificate(CA_KEY_ALIAS) as X509Certificate
           key to cert
         }
-      loaded.getOrNull()?.let { return it }
+      loaded.getOrNull()?.let { (key, cert) ->
+        if (!RelaisCertMint.needsCaRenewal(cert, System.currentTimeMillis())) return key to cert
+        // A read-only caller reports what is on disk and changes nothing — the same rule as every
+        // other flag on this path. Returning the near-expired CA is right: it is still what the
+        // node is serving, and `certInfoOrNull`'s job is to say so, not to pre-empt the mint.
+        if (!allowMint) return key to cert
+        Log.e(
+          TAG,
+          "CA expires ${cert.notAfter}; minting a REPLACEMENT CA — every client must re-import. " +
+            "An expired CA would sign leaves nothing can verify, with no way back.",
+        )
+        caWasReplaced = true
+        // Falls through to mint. The existing leaf is signed by the OLD CA, so the signature check
+        // in loadOrMint rejects it and re-issues under the new one; no extra plumbing needed here.
+      }
       // Same rule as the leaf, and it had the OPPOSITE defect: this rotated on *any* failure, so a
       // transient IO error would replace a perfectly good CA and invalidate every client's import.
       // Only provable unrecoverability may rotate; everything else propagates and is retried.
