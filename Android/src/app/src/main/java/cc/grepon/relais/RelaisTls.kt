@@ -68,9 +68,14 @@ internal object RelaisTls {
   private const val CA_KEYSTORE_FILE = "relais_ca.p12"
 
   /**
-   * Set when a CA keystore whose key material was provably unrecoverable forced a replacement CA
-   * to be minted, so the surfaces that
-   * show certificate state can say so.
+   * Set when a replacement CA had to be minted, so the surfaces that show certificate state can
+   * say so.
+   *
+   * **Two routes reach it, and they must both set it** — the key material was provably
+   * unrecoverable, or the keystore was gone while the leaf survived
+   * ([mintWouldReplaceExistingIdentity]). They are indistinguishable to a client: an imported
+   * `relais-ca.crt` stops verifying either way. Set only on a path that actually mints, never on a
+   * read-only one.
    *
    * Process-lifetime only, deliberately: it exists to explain "why did every client suddenly stop
    * verifying" during the session in which it happened, not to persist a warning forever. Recovery
@@ -79,9 +84,12 @@ internal object RelaisTls {
   @Volatile private var caWasReplaced = false
 
   /**
-   * Set when the leaf keystore's password was gone and a **new leaf key** had to be minted, so the
-   * NODE KEY PIN moved. Surfaced for the same reason as [caWasReplaced]: a `--pinnedpubkey` client
-   * fails with an error naming nothing, and the user needs somewhere to find out why.
+   * Set when a **new leaf key** had to be minted, so the NODE KEY PIN moved. Surfaced for the same
+   * reason as [caWasReplaced]: a `--pinnedpubkey` client fails with an error naming nothing, and
+   * the user needs somewhere to find out why.
+   *
+   * Same two routes as [caWasReplaced] — password provably gone, or the keystore missing while the
+   * CA survived — and the same rule: mint paths only.
    */
   @Volatile private var leafKeyWasReplaced = false
 
@@ -108,6 +116,25 @@ internal object RelaisTls {
    */
   internal fun isKeyMaterialUnrecoverable(e: Throwable): Boolean =
     generateSequence(e) { it.cause }.any { it is UnrecoverableKeyException }
+
+  /**
+   * Does minting this component now **replace an identity clients may already hold**, rather than
+   * create one for the first time?
+   *
+   * **A missing file is not proof of a first install.** The CA and the leaf are two halves of one
+   * identity, so if one is gone and the other survives, this is a node that already had an identity
+   * and lost half of it — and whatever gets minted here breaks clients exactly as a rotation does.
+   * The user-visible outcome is identical to the unrecoverable-password case: `--cacert` clients
+   * stop verifying, or `--pinnedpubkey` clients stop matching. What differs is only the route taken
+   * to get there, which is no reason to explain one and stay silent about the other.
+   *
+   * The sibling's presence is the evidence, and it is the best available: nothing else on disk
+   * distinguishes "fresh install" from "half the identity was deleted". Both files absent is a
+   * genuine first mint and must stay silent, or every new node would warn about a rotation that
+   * never happened.
+   */
+  internal fun mintWouldReplaceExistingIdentity(componentExists: Boolean, siblingExists: Boolean): Boolean =
+    !componentExists && siblingExists
 
   /**
    * Plain (tls=false) or TLS server socket.
@@ -243,8 +270,15 @@ internal object RelaisTls {
     val caFile = File(context.filesDir, CA_KEYSTORE_FILE)
     val tlsFile = File(context.filesDir, TLS_KEYSTORE_FILE)
 
-    val (caKey, caCert) = loadOrMintCa(caFile, caPass, allowMintCa)
-    val leafKey = loadLeafKeyPair(tlsFile, tlsPass)
+    // Snapshot BOTH before either loader runs. loadOrMintCa writes `caFile` on the mint path, so
+    // reading `caFile.exists()` afterwards to decide about the leaf would see the file this call
+    // just created and conclude "the CA survived" — the evidence has to be captured while it still
+    // describes the state the node started in.
+    val caExisted = caFile.exists()
+    val tlsExisted = tlsFile.exists()
+
+    val (caKey, caCert) = loadOrMintCa(caFile, caPass, allowMintCa, siblingExists = tlsExisted)
+    val leafKey = loadLeafKeyPair(tlsFile, tlsPass, allowMint = allowMintLeaf, siblingExists = caExisted)
     val liveSans = RelaisCertMint.buildSanList(RelaisLanIp.allLanAddresses())
 
     // A leaf counts as reusable only if the CURRENT CA actually signed it. If `relais_ca.p12` was
@@ -306,6 +340,7 @@ internal object RelaisTls {
     file: File,
     pass: CharArray,
     allowMint: Boolean,
+    siblingExists: Boolean,
   ): Pair<PrivateKey, X509Certificate> {
     if (file.exists()) {
       val loaded =
@@ -322,6 +357,9 @@ internal object RelaisTls {
       // Only provable unrecoverability may rotate; everything else propagates and is retried.
       val cause = loaded.exceptionOrNull()
       if (cause != null && !isKeyMaterialUnrecoverable(cause)) throw cause
+      // The check precedes the flag: a read-only caller changes nothing, so announcing a
+      // replacement it is not about to perform would be a false warning that outlives the call.
+      check(allowMint) { "CA keystore is unreadable and minting is disabled" }
       // The single most consequential event this class can produce: a new CA invalidates EVERY
       // client's imported `relais-ca.crt` at once, and every one of them starts failing
       // verification with no indication of why. It must not be a `Log.w` nobody reads — the flag
@@ -329,8 +367,19 @@ internal object RelaisTls {
       // so a user who suddenly cannot connect has somewhere to find the reason.
       Log.e(TAG, "CA keystore password is gone; minting a REPLACEMENT CA — every client must re-import", cause)
       caWasReplaced = true
+    } else {
+      check(allowMint) { "no CA keystore and minting is disabled" }
+      // A DELETED CA reaches the same outcome as an unreadable one — every client's import stops
+      // verifying — so it must produce the same warning. Without this, the two routes to an
+      // identical breakage were explained and silent respectively.
+      if (mintWouldReplaceExistingIdentity(componentExists = false, siblingExists = siblingExists)) {
+        Log.e(
+          TAG,
+          "CA keystore is MISSING while leaf state survives; minting a REPLACEMENT CA — every client must re-import",
+        )
+        caWasReplaced = true
+      }
     }
-    check(allowMint) { "no CA keystore and minting is disabled" }
     val minted = RelaisCertMint.mintCa()
     val ks = KeyStore.getInstance("PKCS12").apply { load(null, pass) }
     ks.setKeyEntry(
@@ -355,7 +404,12 @@ internal object RelaisTls {
    * so the pin an early adopter may have recorded survives; only the certificate is replaced. If it
    * cannot be read, a fresh key is generated.
    */
-  private fun loadLeafKeyPair(file: File, pass: CharArray): KeyPair? {
+  private fun loadLeafKeyPair(
+    file: File,
+    pass: CharArray,
+    allowMint: Boolean,
+    siblingExists: Boolean,
+  ): KeyPair? {
     // Null means "there is no key to reuse" — either the file is absent, or its password is
     // provably gone. Every OTHER failure throws.
     //
@@ -371,7 +425,20 @@ internal object RelaisTls {
     // undecryptable file — forever, with no in-app way out. Retrying is pointless *by
     // construction* there, so re-minting is the only path forward and refusing it converts a
     // recoverable state into a permanent one.
-    if (!file.exists()) return null
+    if (!file.exists()) {
+      // A DELETED leaf keystore moves the NODE KEY PIN exactly as a lost password does: the key is
+      // regenerated below and every `--pinnedpubkey` client stops matching. Warning on one route
+      // and not the other made the quieter route the more damaging one.
+      if (allowMint && mintWouldReplaceExistingIdentity(componentExists = false, siblingExists = siblingExists)) {
+        Log.e(
+          TAG,
+          "Leaf keystore is MISSING while the CA survives; minting a NEW leaf key — the NODE KEY " +
+            "PIN changes and every --pinnedpubkey client must re-pin. The CA is unchanged.",
+        )
+        leafKeyWasReplaced = true
+      }
+      return null
+    }
     return try {
       val ks = KeyStore.getInstance("PKCS12")
       file.inputStream().use { ks.load(it, pass) }
@@ -380,13 +447,17 @@ internal object RelaisTls {
       KeyPair(cert.publicKey, key)
     } catch (e: Exception) {
       if (!isKeyMaterialUnrecoverable(e)) throw e
-      Log.e(
-        TAG,
-        "Leaf keystore password is gone (AndroidKeyStore reset?); the old key cannot be recovered. " +
-          "Minting a NEW leaf key — the NODE KEY PIN changes and every --pinnedpubkey client must re-pin.",
-        e,
-      )
-      leafKeyWasReplaced = true
+      // Gated on allowMint for the same reason as the CA and the missing-file branch above: a
+      // read-only caller mints nothing, so it must not announce a pin change that has not happened.
+      if (allowMint) {
+        Log.e(
+          TAG,
+          "Leaf keystore password is gone (AndroidKeyStore reset?); the old key cannot be recovered. " +
+            "Minting a NEW leaf key — the NODE KEY PIN changes and every --pinnedpubkey client must re-pin.",
+          e,
+        )
+        leafKeyWasReplaced = true
+      }
       null
     }
   }
