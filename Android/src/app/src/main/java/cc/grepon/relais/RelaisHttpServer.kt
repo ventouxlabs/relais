@@ -258,10 +258,12 @@ class RelaisHttpServer(
    */
   fun start() {
     if (running) return
+    // bindOrClose, not apply: a bind that throws must not leave the socket it created open. The
+    // retry below makes that leak unbounded — see the function's KDoc.
     val bound =
-      RelaisTls.buildServerSocket(context, tls).apply {
-        reuseAddress = true
-        bind(InetSocketAddress(bindAddr, port))
+      bindOrClose(RelaisTls.buildServerSocket(context, tls)) {
+        it.reuseAddress = true
+        it.bind(InetSocketAddress(bindAddr, port))
       }
     serverSocket = bound
     // After the bind, before the thread: a failed bind must not leave `running` true, and the
@@ -2396,3 +2398,33 @@ internal fun buildEmbeddingsResponse(vectors: List<FloatArray>, model: String, p
  * call sites read `buildEmbeddingsError(msg, type)` rather than the more generic `RelaisError.json`.
  */
 internal fun buildEmbeddingsError(message: String, type: String): JSONObject = RelaisError.json(message, type)
+
+/**
+ * Runs [bind] on [socket], closing it if that throws, and returns it bound.
+ *
+ * **A socket created and not bound is owned by nobody.** The bind used to run inside an `apply`
+ * block, so a failure threw before any field held the socket: nothing closed it, and the descriptor
+ * survived until finalization, which is not a schedule anything can depend on.
+ *
+ * What makes that matter is a *different* fix. Making a bind failure propagate and the node retry
+ * was correct, and it is what turns one leaked descriptor into an unbounded series — every START
+ * burns another until the process cannot open a socket at all, and the recovery path is itself
+ * unrecoverable. The leak is old; the repetition that promotes it to fatal is new.
+ *
+ * Worth carrying forward: **a fix that adds repetition should be followed by asking what the
+ * repeated path leaks.** This is the third time on this branch that a correct fix supplied the
+ * pressure making an adjacent defect reachable.
+ *
+ * The close is best-effort and never replaces the cause — the caller decides whether to retry, and
+ * it must see the bind failure, not a secondary error raised while tidying up.
+ */
+internal fun <T : java.net.ServerSocket> bindOrClose(socket: T, bind: (T) -> Unit): T {
+  try {
+    bind(socket)
+  } catch (e: Throwable) {
+    runCatching { socket.close() }
+    throw e
+  }
+  return socket
+}
+
