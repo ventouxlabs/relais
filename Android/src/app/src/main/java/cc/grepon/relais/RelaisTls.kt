@@ -15,9 +15,12 @@ package cc.grepon.relais
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.io.FileOutputStream
 import java.net.ServerSocket
+import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.security.KeyPair
 import java.security.KeyStore
 import java.security.PrivateKey
@@ -194,8 +197,23 @@ internal object RelaisTls {
   }
 
   /**
-   * Writes [ks] to [target] via a temp file and an **atomic** rename, so [target] is never observed
-   * half-written.
+   * Writes [ks] to [target] **atomically and durably**: a temp file that is `fsync`ed before the
+   * rename, then an `ATOMIC_MOVE`, then an `fsync` of the directory holding the new name.
+   *
+   * **Atomic and durable are different guarantees, and the first does not imply the second.** This
+   * function was previously named for atomicity alone and delivered only that — closing the temp
+   * stream flushes to the OS page cache, so `ATOMIC_MOVE` made the *name switch* indivisible while
+   * leaving both the bytes and the rename itself free to be lost in a power cut. A reader checking
+   * "is the write atomic?" got a yes and stopped, which is exactly how this survived a round that
+   * was explicitly about this write path. **The name did the concealing**; it now names both
+   * properties, because a fix named for half of what it must deliver reads as complete.
+   *
+   * What each step buys:
+   *  - `fd.sync()` on the temp: the bytes are on the device before any name points at them.
+   *  - `ATOMIC_MOVE`: no reader ever sees a half-written [target].
+   *  - directory `force`: the *rename* survives a crash, not just the bytes. Best effort — if it
+   *    fails the rename may be lost, which leaves the PREVIOUS keystore in place. That is the safe
+   *    direction, so it is logged rather than thrown.
    *
    * `File.outputStream()` truncates before `store` fills it, leaving a window in which a power loss
    * or write error yields an unreadable keystore. **That pattern predates this branch** — it is
@@ -215,15 +233,37 @@ internal object RelaisTls {
    * `ATOMIC_MOVE` possible; it is deleted on any failure so a crashed write leaves no litter for the
    * next one to trip over.
    */
-  private fun storeAtomically(ks: KeyStore, target: File, pass: CharArray) {
+  internal fun storeAtomically(ks: KeyStore, target: File, pass: CharArray) {
     val tmp = File(target.parentFile, "${target.name}.tmp")
     try {
-      tmp.outputStream().use { ks.store(it, pass) }
+      FileOutputStream(tmp).use { out ->
+        ks.store(out, pass)
+        out.flush()
+        // The step that makes this durable rather than merely atomic. Without it `store` has only
+        // reached the page cache, and the rename below can publish a name pointing at bytes that
+        // never landed — on the leaf keystore that means a new key next start and a moved pin.
+        out.fd.sync()
+      }
       Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+      syncDirectory(target.parentFile)
     } catch (e: Exception) {
       runCatching { tmp.delete() }
       throw e
     }
+  }
+
+  /**
+   * `fsync`s [dir] so the *rename* performed inside it is durable, not just the file's contents.
+   *
+   * Deliberately best-effort. Opening a directory as a channel is a POSIX behaviour the JDK does
+   * not guarantee everywhere, and the failure is benign in a way the others are not: an unsynced
+   * rename that is lost leaves the **previous** keystore in place, which is complete and readable.
+   * Throwing here would convert a safe outcome into a failed start.
+   */
+  private fun syncDirectory(dir: File?) {
+    if (dir == null) return
+    runCatching { FileChannel.open(dir.toPath(), StandardOpenOption.READ).use { it.force(true) } }
+      .onFailure { Log.w(TAG, "could not fsync ${dir.path}; a rename may not survive a power loss", it) }
   }
 
   /** The loaded keystore plus everything the callers above need, so a load happens once per call. */
