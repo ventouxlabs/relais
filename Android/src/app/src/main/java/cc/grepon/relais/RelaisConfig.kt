@@ -353,9 +353,34 @@ object RelaisConfig {
     sp.getString(KEY_TLS_PASS, null)?.let {
       return it
     }
-    val pass = UUID.randomUUID().toString().replace("-", "")
-    sp.edit().putString(KEY_TLS_PASS, pass).apply()
-    return pass
+    return persistNewSecret(sp, KEY_TLS_PASS)
+  }
+
+  /**
+   * Generates a secret for [key] and persists it **durably before returning**.
+   *
+   * The property: **key material must never be more durable than the secret that opens it.**
+   *
+   * `commit()`, not `apply()`, and the boolean is checked rather than discarded. `apply()` updates
+   * memory and only *schedules* the disk write, while the caller goes straight on to write a PKCS12
+   * file. A process kill or power loss in that window leaves a perfectly readable keystore whose
+   * password was never persisted. On the next start this accessor sees no stored value, generates a
+   * fresh one, the keystore load fails with `UnrecoverableKeyException`, and [RelaisTls]'s recovery
+   * rule — correctly, on the evidence it is given — concludes the material is provably unrecoverable
+   * and rotates it. For the CA that invalidates every client's import; for the leaf it moves the
+   * node key pin. The rule is not wrong in that scenario; it is being handed a false premise by this
+   * write ordering, which is why the ordering is what gets fixed.
+   *
+   * Failing loudly is the point. A password that could not be persisted must not go on to protect
+   * key material that can — that is precisely the state this exists to prevent, and returning it
+   * silently would recreate the bug one layer down.
+   */
+  internal fun persistNewSecret(sp: SharedPreferences, key: String): String {
+    val value = UUID.randomUUID().toString().replace("-", "")
+    check(sp.edit().putString(key, value).commit()) {
+      "could not persist $key durably; refusing to protect key material with an unpersisted password"
+    }
+    return value
   }
 
   /**
@@ -380,9 +405,7 @@ object RelaisConfig {
     sp.getString(KEY_CA_PASS, null)?.let {
       return it
     }
-    val pass = UUID.randomUUID().toString().replace("-", "")
-    sp.edit().putString(KEY_CA_PASS, pass).apply()
-    return pass
+    return persistNewSecret(sp, KEY_CA_PASS)
   }
 
   /** Process (re)starts observed — survives process death; surfaced via /metrics (Gate 3). */
