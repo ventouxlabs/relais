@@ -25,8 +25,50 @@ class NodeStateTest {
     ready: Boolean = false,
     startupInProgress: Boolean = false,
     lastInitFailed: Boolean = false,
+    listenersUp: Boolean = true,
     thermalStatus: Int = 0,
-  ) = computeNodeState(shouldRun, ready, startupInProgress, lastInitFailed, thermalStatus)
+  ) = computeNodeState(shouldRun, ready, listenersUp, startupInProgress, lastInitFailed, thermalStatus)
+
+  /**
+   * A resident engine is not a reachable node (codex round 18).
+   *
+   * When `:8443` is occupied, the service tears both listeners down but deliberately keeps the
+   * engine resident — correct in itself, since it initialised fine and reloading costs seconds. The
+   * defect was that every user-visible surface keyed on engine readiness, so the panel, the tile and
+   * the widget all read LIVE and offered STOP while nothing could be reached.
+   *
+   * That is the mirror of the H2 failure this branch treated as release-blocking — there, every
+   * surface said OFF while a listener was up — and it is worse in one respect: the false LIVE also
+   * blocks the retry that would fix it, so the node cannot recover on its own even after the port
+   * clears.
+   *
+   * The root is a proxy, the same one fixed a level down when `httpsServer != null` became
+   * `isListening`: `ready` answers "did the engine initialise?", never "can anyone reach this node?"
+   */
+  @Test fun `not live when the engine is ready but no listener is up`() {
+    assertEquals(
+      NodeState.ERROR,
+      state(shouldRun = true, ready = true, listenersUp = false, lastInitFailed = true),
+    )
+  }
+
+  @Test fun `not hot either, when nothing can be reached`() {
+    // HOT is a flavour of LIVE. Reporting thermal throttling on an unreachable node would be a
+    // second surface telling the truth about the device and the wrong thing about the node.
+    assertEquals(
+      NodeState.ERROR,
+      state(shouldRun = true, ready = true, listenersUp = false, lastInitFailed = true, thermalStatus = 3),
+    )
+  }
+
+  @Test fun `starting, not live, while a retry is bringing listeners back`() {
+    // An active retry must not read ERROR; the existing startupInProgress precedence still holds
+    // once `ready` alone can no longer short-circuit to LIVE.
+    assertEquals(
+      NodeState.STARTING,
+      state(shouldRun = true, ready = true, listenersUp = false, startupInProgress = true),
+    )
+  }
 
   @Test fun `off when nothing is running`() {
     assertEquals(NodeState.OFF, state())

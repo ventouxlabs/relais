@@ -21,20 +21,28 @@ private const val THERMAL_HOT_THRESHOLD = 3
 
 /**
  * Pure mapping of the node's raw signals to a single display state. Precedence is deliberate:
- *  - a resident engine reads LIVE (or HOT when the device is throttling), even if a *prior* init
- *    failed (a stale [lastInitFailed] never masks a working engine);
+ *  - a resident engine **whose listeners are up** reads LIVE (or HOT when the device is
+ *    throttling), even if a *prior* init failed (a stale [lastInitFailed] never masks a working
+ *    engine);
+ *  - **[ready] alone is not LIVE, and that is the point.** A `:8443` bind failure leaves the engine
+ *    deliberately resident while both listeners are torn down; keying LIVE on engine readiness made
+ *    every surface report a healthy node that nothing could reach. Worse, `shouldDispatchStartup`
+ *    and the watchdog read the same signal, so the false LIVE suppressed the retry that would have
+ *    fixed it — the state needing recovery was the state preventing it. [ready] answers "did the
+ *    engine initialise?"; only [listenersUp] answers "can anyone reach this node?";
  *  - an in-progress startup reads STARTING even after a prior failure (an active retry is not an error);
  *  - only a node asked-to-run whose last init failed and is NOT currently retrying reads ERROR.
  */
 fun computeNodeState(
   shouldRun: Boolean,
   ready: Boolean,
+  listenersUp: Boolean,
   startupInProgress: Boolean,
   lastInitFailed: Boolean,
   thermalStatus: Int,
 ): NodeState = when {
-  ready && thermalStatus >= THERMAL_HOT_THRESHOLD -> NodeState.HOT
-  ready -> NodeState.LIVE
+  ready && listenersUp && thermalStatus >= THERMAL_HOT_THRESHOLD -> NodeState.HOT
+  ready && listenersUp -> NodeState.LIVE
   startupInProgress -> NodeState.STARTING
   shouldRun && lastInitFailed -> NodeState.ERROR
   shouldRun -> NodeState.STARTING

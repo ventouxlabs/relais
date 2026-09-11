@@ -15,6 +15,7 @@ package cc.grepon.relais.core
 import android.content.Context
 import cc.grepon.relais.RelaisConfig
 import cc.grepon.relais.RelaisEngine
+import cc.grepon.relais.RelaisListenerState
 import cc.grepon.relais.RelaisNodeService
 import cc.grepon.relais.ThermalGovernor
 
@@ -32,6 +33,7 @@ object RelaisNodeController {
     computeNodeState(
       shouldRun = RelaisConfig.shouldRun(context),
       ready = RelaisEngine.isReady,
+      listenersUp = RelaisListenerState.listenersUp,
       startupInProgress = RelaisEngine.startupInProgress,
       lastInitFailed = RelaisEngine.lastInitFailed,
       thermalStatus = ThermalGovernor.statusValue,

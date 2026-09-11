@@ -165,11 +165,25 @@ class RelaisNodeService : Service() {
    * [shouldDispatchStartup] is a readable pre-check; [startupDispatchInFlight]'s `compareAndSet` is
    * what actually makes concurrent calls (onCreate racing onStartCommand, repeated START taps) safe.
    */
+  /**
+   * Recomputes [RelaisListenerState.listenersUp] from the live sockets and returns it.
+   *
+   * The single place the predicate is written. `isListening`, not `!= null`: a stopped server is
+   * still a non-null field, so a null check answered "did someone assign this?" rather than "is a
+   * listener up?" — which is how a failed rebind once became permanent, and how a bind failure came
+   * to report LIVE. Ask the artefact.
+   */
+  private fun refreshListenerState(): Boolean {
+    val up = httpServer?.isListening == true && httpsServer?.isListening == true
+    RelaisListenerState.listenersUp = up
+    return up
+  }
+
   private fun dispatchStartupIfNeeded() {
-    // `isListening`, NOT `!= null`. A stopped server is still non-null, so a null check answered
-    // "did someone assign a field?" rather than "is a listener up?" — and read a dead listener as
-    // healthy, which is how a failed rebind became permanent. Ask the artefact.
-    val listenersUp = httpServer?.isListening == true && httpsServer?.isListening == true
+    // One expression for "are the listeners up", shared with every user-visible surface via
+    // RelaisListenerState — two copies of this predicate is exactly how the display and the retry
+    // gate would drift back apart.
+    val listenersUp = refreshListenerState()
     if (!shouldDispatchStartup(RelaisEngine.isReady, startupDispatchInFlight.get(), listenersUp)) return
     if (!startupDispatchInFlight.compareAndSet(false, true)) return // lost the race; another dispatch is already running
 
@@ -217,6 +231,7 @@ class RelaisNodeService : Service() {
         cc.grepon.relais.worker.BatchWorker.kick(applicationContext)
         updateNotification("Resident engine ready · http 127.0.0.1:8080 · https :8443 (LAN)")
         Log.i(TAG, "Node up: engine resident; http loopback :8080, https LAN :8443")
+        refreshListenerState() // now reachable — surfaces may read LIVE
         // Security H3: never log the API key — it is shown in the Relais Node control screen.
       } catch (e: Exception) {
         Log.e(TAG, "Node init failed", e)
@@ -235,6 +250,10 @@ class RelaisNodeService : Service() {
         httpServer = null
         httpsServer = null
         runCatching { RelaisDiscovery.unregister() } // stop advertising a node that is not serving
+        // The engine stays resident, so `isReady` remains true — which is why this line matters:
+        // without it every surface reads LIVE for a node nothing can reach, and the false LIVE also
+        // suppresses the retry that would fix it.
+        refreshListenerState()
         updateNotification("Init failed: ${e.message}")
       } finally {
         RelaisEngine.startupInProgress = false
@@ -300,6 +319,10 @@ class RelaisNodeService : Service() {
     RelaisDiscovery.unregister()
     httpServer?.stop()
     httpsServer?.stop()
+    // After the stops, so it reads the closed sockets rather than the intent to close them. A
+    // destroyed service that left this true would have the next process read LIVE before any
+    // listener existed.
+    refreshListenerState()
     RelaisEngine.shutdown()
     runCatching { wakeLock?.release() }
     super.onDestroy()
