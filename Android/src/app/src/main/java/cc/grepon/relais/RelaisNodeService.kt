@@ -261,7 +261,13 @@ class RelaisNodeService : Service() {
         cc.grepon.relais.worker.BatchWorker.kick(applicationContext)
         updateNotification("Resident engine ready · http 127.0.0.1:8080 · https :8443 (LAN)")
         Log.i(TAG, "Node up: engine resident; http loopback :8080, https LAN :8443")
-        refreshListenerState() // now reachable — surfaces may read LIVE
+        // Now reachable — surfaces may read LIVE. This must stay ahead of the `finally` that clears
+        // startupInProgress: the invariant every polling surface reads against is that startup is
+        // never published as finished before the listeners it started are published. Publishing
+        // them in the other order lets a poll compose "listeners down" with "startup finished" and
+        // render a node that just came up healthy as OFFLINE, offering START. See the read-order
+        // comment in RelaisShellViewModel.snapshotPanelState.
+        refreshListenerState()
         // Security H3: never log the API key — it is shown in the Relais Node control screen.
       } catch (e: Exception) {
         Log.e(TAG, "Node init failed", e)
