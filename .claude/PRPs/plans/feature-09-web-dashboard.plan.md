@@ -1779,9 +1779,18 @@ verified against the tree before acceptance. **P1s per PR-B round: 2 → 2.**
 input from this route — `id == configured` and not yet in the registry — and that case inherits two
 unstated engine behaviours: a **blocking, possibly-networked** `resolveModel` (`RelaisEngine.kt:452-454`),
 and a full teardown/reload when the operator selects the model the node is **already serving**. The
-second has a fix the codebase already wrote down — `resolveModelRequest`'s *first* check is
-`if (requested == residentModelId) return ServeResident` (`RelaisModelSwap.kt:105-106`) — so Task 8
-gotcha 3 mirrors it: skip the dispatch, still persist, answer `303`. Grep-first, working as intended.
+second looked like it had a fix the codebase already wrote down — `resolveModelRequest`'s *first*
+check is `if (requested == residentModelId) return ServeResident` (`RelaisModelSwap.kt:105-106`) — so
+Task 8 gotcha 3 mirrored it: skip the dispatch, still persist, answer `303`.
+
+> **~~Grep-first, working as intended.~~ SUPERSEDED BY ROUND 3's P1 — do not follow this paragraph.**
+> That mirror bypasses the `swapDispatching` CAS: a concurrent swap can change `residentModelId`
+> between the handler's read and its persist, stranding config **behind** the engine. The
+> short-circuit is **deleted**; the redundant reload is accepted. See Task 8's *"already resident"*
+> GOTCHA and the round-3 disposition. **Left visible rather than rewritten, because it is the clearest
+> example on this branch of grep-first finding the right precedent and the *placement* being the
+> defect** — the rule's own caveat, *mirror the shape, not the policy*, needed a third clause:
+> **and check that the new context preserves what made the original safe.**
 
 **Verified sound and left unchanged**, per the brief: the pure-function audit (`availableModelIdsFor`'s
 three parameters, `pendingModelIdFor`, the parser, the validator, the header helper, and
@@ -1828,6 +1837,14 @@ the *kind* never changed, which is what makes this transferable rather than inci
 > has one.** Not "check the style guide" — check for a working implementation of the same shape. On
 > this branch that check would have caught four of four defects, and it costs one `grep` per helper
 > against review rounds that cost a session each.
+
+**The caveat's third clause, learned in round 3 of PR-B: a correct mirror can still be unsafe in its
+new CONTEXT.** `resolveModelRequest`'s `if (requested == residentModelId) return ServeResident` was the
+right precedent, found by grep, copied in the right shape — and wrong in `handleSelectModel`, because
+the original runs where nothing can change `residentModelId` underneath it and the copy does not. So
+the full rule is: **reuse the shape, re-derive the policy, and check that the new context preserves
+whatever made the original safe.** The third clause is the one no amount of reading the *source*
+function will give you; it is a property of the *destination*.
 
 **The caveat, learned the hard way in round 5: mirror the SHAPE, not the POLICY.** Told to reuse
 `WebhookGuard`, round 4 pointed at the whole function — and `WebhookGuard` decides whether an
