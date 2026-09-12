@@ -31,11 +31,37 @@ import org.junit.Test
  * test the pure source of the TXT attributes — [RelaisClientConfig.buildDiscoveryTxt] — which is the
  * exact map [RelaisDiscovery.register]/`updateModel` iterate into `setAttribute(...)`. This pins the
  * secret-leakage invariant and the worst-case length cap at the boundary that actually produces the
- * broadcast values.
+ * broadcast values. Note that `buildDiscoveryTxt` takes the model id as a PARAMETER, so these tests
+ * are unaffected by where its caller sources that id — which [advertisedModelId] below now decides.
  */
 class RelaisDiscoveryTxtTest {
 
   private val sentinelKey = "SENTINEL_SECRET_abc123def456_DO_NOT_LEAK"
+
+  // ---------------------------------------------------------------------------
+  // Which id gets advertised: reality before intent (feature-09 bug 6)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  fun `advertised id is the RESIDENT model, not the configured one`() {
+    // A discovery record answers "what will this node serve me". Sourcing it from configuration
+    // alone advertises a model the engine is not running for the whole duration of a swap — and
+    // makes the published value depend on whether the caller's persist won a race against the swap
+    // thread, which is the defect this ordering removes rather than mitigates.
+    assertEquals("resident-model", advertisedModelId(resident = "resident-model", configured = "configured-model"))
+  }
+
+  @Test
+  fun `advertised id falls back to configured only before any successful init`() {
+    // At boot RelaisNodeService initialises the engine BEFORE it registers, so this fallback is for
+    // a node whose init never ran or failed — where the configured id is the only answer available.
+    assertEquals("configured-model", advertisedModelId(resident = null, configured = "configured-model"))
+  }
+
+  @Test
+  fun `advertised id is stable when config and engine agree`() {
+    assertEquals("same", advertisedModelId(resident = "same", configured = "same"))
+  }
 
   @Test
   fun `txt attribute keys are exactly the advertised routing set`() {

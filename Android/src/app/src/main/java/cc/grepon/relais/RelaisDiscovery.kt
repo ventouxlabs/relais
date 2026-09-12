@@ -54,7 +54,7 @@ object RelaisDiscovery {
   private fun buildServiceInfo(context: Context, httpPort: Int, httpsPort: Int): NsdServiceInfo {
     val txt =
       RelaisClientConfig.buildDiscoveryTxt(
-        modelId = RelaisConfig.modelId(context),
+        modelId = advertisedModelId(RelaisEngine.residentModelId, RelaisConfig.modelId(context)),
         version = BuildConfig.VERSION_NAME,
         httpsPort = httpsPort,
         caps = liveCaps(),
@@ -102,10 +102,15 @@ object RelaisDiscovery {
    * Re-entrancy is guarded by [lock]; a no-op if the service isn't currently registered (the next
    * [register] picks up the live values anyway).
    *
-   * Integration point: an in-app model switch currently requires a process restart ("Restart to
-   * apply" in RelaisControlActivity), and restart re-registers via [register] — so the TXT is always
-   * fresh after a switch. Call this from any future hot-swap path that changes the model without a
-   * restart.
+   * Called from [RelaisEngine.ensureModelSwapInBackground], on the swap thread, once the engine has
+   * actually transitioned — the hot-swap path #180 introduced, which changes the resident model with
+   * no process restart. (An earlier version of this doc said a switch "currently requires a process
+   * restart … so the TXT is always fresh after a switch". That has been false since #180, and this
+   * function had no callers at all until feature-09 added one, so the TXT went stale after every
+   * in-process swap.)
+   *
+   * The unregister and the re-register are separate asynchronous NSD callbacks, so the two can
+   * interleave; both outcomes are logged, which is what makes a spurious call observable in logcat.
    */
   fun updateModel(context: Context, httpPort: Int = 8080, httpsPort: Int = 8443) {
     synchronized(lock) {
@@ -127,3 +132,21 @@ object RelaisDiscovery {
     }
   }
 }
+
+/**
+ * Which model id the mDNS TXT advertises: what the engine is SERVING, falling back to what the
+ * operator has CONFIGURED.
+ *
+ * Reality before intent, and the order is load-bearing. A discovery record answers "what will this
+ * node serve me", so sourcing it from configuration alone publishes a lie for the whole duration of
+ * a swap — and worse, makes the published value depend on WHEN the re-publish runs relative to the
+ * caller's persist, which are on different threads. Reading [resident] first removes that ordering
+ * question entirely: whenever the TXT is rebuilt, it names the engine's actual model.
+ *
+ * [resident] is null only before any successful init — at boot [RelaisNodeService] initializes the
+ * engine before it registers, so the fallback is for a node whose init never ran or failed, where
+ * the configured id is the only answer available and the honest one.
+ *
+ * Pure; no Context, no Android — unit-tested alongside the TXT map it feeds.
+ */
+internal fun advertisedModelId(resident: String?, configured: String): String = resident ?: configured

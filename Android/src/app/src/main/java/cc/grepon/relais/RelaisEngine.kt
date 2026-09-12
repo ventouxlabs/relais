@@ -422,10 +422,22 @@ object RelaisEngine {
    * request that turns out to name an unresolvable model — this node must never end up with ZERO
    * resident engine because one bad request triggered a swap attempt. Only [shutdown] + the actual
    * reload happen once the new model is confirmed present on disk.
+   *
+   * @return true iff THIS call won [swapDispatching] and started a swap thread — **not** that the
+   * swap succeeded. The thread can still bail (target not on disk) or roll back (engine-create
+   * failed), both of which leave the previous model resident. Callers that persist an operator's
+   * choice must dispatch FIRST and persist only on true: the CAS is the only atomic arbiter, so a
+   * check-then-act on any other flag races it, and persisting after a false would leave config
+   * naming a model no swap is bringing up. A false is the caller's cue to answer "busy, retry"
+   * rather than to report success.
    */
-  fun ensureModelSwapInBackground(context: Context, target: ProvisionedModel? = null) {
-    if (!swapDispatching.compareAndSet(false, true)) return // a swap is already dispatching
+  fun ensureModelSwapInBackground(context: Context, target: ProvisionedModel? = null): Boolean {
+    if (!swapDispatching.compareAndSet(false, true)) return false // a swap is already dispatching
     thread(name = "relais-model-swap") {
+      // Set only on a SUCCESSFUL engine transition. The rollback catch below swallows and lets
+      // execution continue, so a post-lock re-publish with no flag would also fire after a failed
+      // swap; and the file-missing branch returns before anything changes at all.
+      var swapped = false
       try {
         RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead" (same signal as any init)
         // Captured ONCE, before resolveModel runs, so the id stamped on the reloaded engine can never
@@ -468,6 +480,7 @@ object RelaisEngine {
           shutdown() // close the OLD engine only now that the NEW one is confirmed present on disk
           try {
             ensureInitialized(context, modelPath = path, modelId = configuredModelId)
+            swapped = true
           } catch (t: Throwable) {
             Log.w(TAG, "swap to $configuredModelId failed (${t.message}); restoring $previousId")
             if (previousPath != null && previousId != null) {
@@ -481,6 +494,17 @@ object RelaisEngine {
             // uncaught handler, and kill the WHOLE node process — moments after the rollback saved it.
           }
         }
+        // #bug6: re-publish the mDNS TXT once the engine has actually transitioned. HERE, not in the
+        // caller: the dashboard dispatches the swap BEFORE it persists the operator's choice, so a
+        // re-publish on the request thread would advertise the old id (at dispatch) or a model not
+        // yet resident (after persist). And not in the `finally` — that also runs on the
+        // file-missing return above and after a rollback, where nothing changed.
+        //
+        // Correctness does not rest on this placement: buildServiceInfo reads residentModelId first
+        // (see advertisedModelId), so what is published is what the engine is serving regardless of
+        // whether the caller has persisted yet. The `swapped` guard is about not churning an NSD
+        // unregister/re-register for a swap that changed nothing.
+        if (swapped) RelaisDiscovery.updateModel(context)
       } catch (e: Exception) {
         Log.w(TAG, "model swap failed: ${e.message}")
       } finally {
@@ -488,6 +512,7 @@ object RelaisEngine {
         swapDispatching.set(false)
       }
     }
+    return true
   }
 
   /**
