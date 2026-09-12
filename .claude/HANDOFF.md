@@ -6,7 +6,122 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-12 — ⏩ START HERE. **feature-09 PR-A implemented on `feat/dashboard-auth-refresh`. Not pushed, no PR. Six plan-review rounds preceded it.**
+## 2026-09-12 16:45 EDT — ⏩ START HERE. **#318 and #323 MERGED. feature-09 PR-B is mid-implementation and UNCOMMITTED — read "the tree you are inheriting" before touching anything.**
+
+`main` = `62050b83`. Two feature-09 PRs shipped this session, both hardware-verified on rango:
+
+| PR | SHA | What |
+|---|---|---|
+| [#318](https://github.com/ventouxlabs/relais/pull/318) | `cf316146` | per-node EC P-256 CA (10 y) signing an RSA-2048 SAN'd leaf (90 d) — LAN clients can drop `curl -k` |
+| [#323](https://github.com/ventouxlabs/relais/pull/323) | `62050b83` | HTTP Basic + cross-site guard + dashboard auto-refresh + request-log hygiene (feature-09 Tasks 1-3) |
+
+### ⚠ The tree you are inheriting
+
+Branch `feat/dashboard-model-selector`, HEAD `c94f1441`, **unpushed**. The eight commits on it are
+**plan revisions only** — zero implementation is committed. But the working tree is **not clean**:
+
+```
+ M ModelSwitch.kt  RelaisDashboard.kt  RelaisDiscovery.kt  RelaisEngine.kt  RelaisHttpServer.kt
+ M RelaisDashboardTest.kt  RelaisDiscoveryTxtTest.kt  docs/dashboard-copy.md      (+494 / -32)
+?? RelaisHttpPages.kt (158)          RelaisHttpDashboardTest.kt (155)
+?? DashboardHeadersProbe.kt (148)    DashboardSelectModelProbe.kt (180)
+?? Android/src/.kotlin/              <- build detritus, never commit
+```
+
+This is feature-09 **PR-B (Tasks 4-10, the model selector)**, written by the `impl-f09-prb` executor,
+which was **still `running`** when this section was written — so the tree may have advanced past these
+numbers. It has been **reviewed by nobody, codex'd by nobody, run by nothing, and committed nowhere.**
+
+**Do not `git reset --hard`** — that is 641 new lines plus 494 changed with no commit behind them. Do
+not `git add -A` either (`.kotlin/` is sitting right there, and this repo has been bitten before).
+Either finish the review pipeline below, or commit it as WIP first and decide afterwards.
+
+### Where PR-B is in the pipeline
+
+`plan → N review rounds → implement → my review → codex the diff → hardware on rango → PR → merge`
+
+Done through **implement (in flight)**. The plan (`.claude/PRPs/plans/feature-09-web-dashboard.plan.md`,
+Tasks 4-10 per its `:371`) took **8 rounds and 29 findings**; round 8 returned `[P1] None. [P2] None.`
+which fired the stop rule. Everything after "implement" is untouched.
+
+### The one open review item already visible in the diff
+
+**`RelaisHttpServer.kt` went 2713 → 2828 even though the executor created `RelaisHttpPages.kt`.** The
+extraction happened *and* the server still gained +133, net **+115** on the exact file CLAUDE.md tells
+the next change to shrink. `RelaisHttpPages.kt`'s own header argues the case — new code extracted,
+shipped handlers deliberately left alone because relocating them would force `RequestContext`,
+`readBody`, `respondText` and `provisionedOnDisk` to widen, which it calls feature-17's change to make.
+That reasoning is defensible; the number still moved the wrong way. **Ask about it; don't assume it is
+either fine or a defect.** (2713 is `main`; 2828 is the uncommitted tree. `wc -l`, never quote.)
+
+### What PR-B closes, and what it changes on the wire
+
+- **#313** (mDNS TXT `model=` goes stale after every #180 hot-swap) — closed by this diff. New pure
+  `advertisedModelId(resident, configured)` in `RelaisDiscovery.kt` publishes **what the engine is
+  serving**, falling back to configuration; `RelaisEngine.ensureModelSwapInBackground` now calls
+  `RelaisDiscovery.updateModel` on a *successful* transition only. `updateModel` had **no callers at
+  all** before this, and its KDoc claimed a switch "currently requires a process restart … so the TXT
+  is always fresh" — false since #180. The doc is corrected in place, old claim quoted and struck.
+- **`ensureModelSwapInBackground` now returns `Boolean`** — `true` iff *this* call won the
+  `swapDispatching` CAS and started a thread, **not** that the swap succeeded. Callers that persist an
+  operator's choice must dispatch FIRST and persist only on `true`; the CAS is the only atomic arbiter,
+  so check-then-act on any other flag races it. A `false` is the caller's cue to answer "busy, retry".
+  This return value is the distilled output of three separate review rounds — do not simplify it away.
+- First **browser form** in the codebase (`POST /select-model`), so the dashboard CSP gains
+  `form-action 'self'` (it does **not** inherit from `default-src`) and the dashboard's
+  `Referrer-Policy` narrows off `no-referrer`. `/experiments` keeps `form-action 'none'` — leave it.
+
+### Next actions, in order
+
+1. Get `impl-f09-prb`'s report: commit SHAs, RED evidence per new assertion, the mutation table, the
+   three-flavor JVM result, and anything implementation proved wrong in the plan.
+2. My review of the diff → `/codex review` on the diff (`gpt-5.6-terra`; the default `gpt-6-astra`
+   400s on CLI 0.151.0) → **run both new probes on rango** → PR → merge.
+3. The two probes are the *only* cover for the browser-form seams. CI covers neither. Same trap as
+   PR-A's `BasicAuthGateProbe`, which sat un-run until it was run and passed.
+
+### Filed this session, still open
+
+| # | |
+|---|---|
+| #320 | bind dual-stack AND restore IPv6 SANs — one change, not two |
+| #321 | restore the boot-race LAN rebind (feature-18 T5b), cut from PR-A |
+| #322 | liveness signals should be one immutable snapshot, not separate volatile fields |
+| #324 | a failed TLS handshake is recorded as a 500, and auto-refresh floods the log with them |
+
+**#311** (`GET /experiments` 401s on plain browser navigation) is still open but #323 almost certainly
+resolved it incidentally — Basic auth made the page reachable. Verify and close, or say why not.
+
+### Remaining implementation order after PR-B
+
+step 5 = #22 idle-unload · step 6 = #17 Ollama compat · step 7 = #19 power metrics · step 8 = #21 Home
+Assistant. BouncyCastle 1.78.1 → 1.85 is sequenced after the R8 baseline and needs an on-device
+*inference* check, not just a build (CI runs no R8, so it catches none of this).
+
+### The transferable finding — where prose review stops paying
+
+Eight rounds, 29 findings, and the curve flattened exactly the way PR-A's six rounds did. The
+executor's own account of why is the useful part:
+
+> My decline was cheap to get right because the mechanism was three greps deep and entirely local.
+> The findings that were hardest for both of us needed two threads or a rendered mockup — resolutions
+> neither of us reaches by reading one function.
+
+**Local mechanisms are cheap to verify by reading and expensive to get wrong by guessing. Cross-thread
+interleavings and re-wrapped text in diagrams are the opposite** — and those are precisely what a
+compiler, a test run and a device answer in seconds. Eight rounds approximating that is the honest
+cost. It bought real defects (the CAS return value above is one), and it is also the argument for
+stopping at round 8 rather than round 12.
+
+Also earned, and already in agent memory: a reviewer's finding gets re-derived like anyone else's.
+Round 7's P1 claimed `recordRequest` re-normalizes through a second `endpointLabel`; the executor
+traced it, found `RelaisMetrics.kt:147` stores the label as handed, and **declined**. Applying it
+would have added dead code contradicting that function's documented cardinality-guard invariant. I
+had relayed that finding as verified after running a `sed` whose output contained the falsifying fact.
+
+---
+
+## 2026-09-12 (earlier) — feature-09 PR-A implemented on `feat/dashboard-auth-refresh`. (superseded above — it was pushed, reviewed and MERGED as #323 / `62050b83`; `BasicAuthGateProbe.kt`, called out below as never run, has since been run on rango and passed.)
 
 Branch `feat/dashboard-auth-refresh`, based on `cf316146` (#318). Tasks 1-3 of
 `.claude/PRPs/plans/feature-09-web-dashboard.plan.md` (= PR-A). PR-B (Tasks 4-10, the model selector)
