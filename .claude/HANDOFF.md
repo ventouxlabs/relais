@@ -23,10 +23,9 @@ earlier, and two executor reports crossed with my replies to them. Every one of 
 written in good faith by someone who had actually looked.
 
 **Run `git log --oneline --date=format:'%H:%M:%S' --format='%h %cd %s' -8` and `wc -l` before you
-trust a SHA, a tree state, or a line count written here.** A relocation was authorized at 17:20 and
-may or may not have landed by the time you read this — see the open review item below. Measure, don't
-quote. This is the same rule CLAUDE.md states about `RelaisHttpServer.kt`'s line count, which has now
-been stale six times; the general form is that **any number in a document is a historical note.**
+trust a SHA, a tree state, or a line count written here.** Measure, don't quote. This is the same rule
+CLAUDE.md states about `RelaisHttpServer.kt`'s line count, which has now been stale six times; the
+general form is that **any number in a document is a historical note.**
 
 ### The tree you are inheriting
 
@@ -82,10 +81,16 @@ Flagged rather than buried, which is the right instinct; none contradict the pla
 finished until `reason()` has an arm for it.* That is the rule, stated where the next person adding a
 status will read it, rather than in a retrospective. Keep that habit.
 
-### The fourth item — a real miss, authorized for fix at 17:20
+### The fourth item — a real miss, found and FIXED (`aa57c3cc`)
 
-**`RelaisHttpServer.kt` grew +115 (2713 → 2828) and 78 of that did not have to land there.** Exact
-accounting, from the executor after I asked it to account for the number:
+**Resolved.** `RelaisHttpServer.kt` measures **2750** (`wc -l`), i.e. **+37** over `main` for the whole
+feature, and `RelaisHttpPages.kt` is 241. The fix was a relocation-only commit, and I verified its
+purity rather than taking the claim: sorting the removed and added lines and diffing them shows **the
+only textual deltas are comment lines** — not one code line changed. The history below is kept because
+the *cause* outlasts the fix.
+
+**`RelaisHttpServer.kt` had grown +115 (2713 → 2828) and 78 of that did not have to land there.**
+Exact accounting, from the executor after I asked it to account for the number:
 
 | Net | What | Needs the class's privates? |
 |---|---|---|
@@ -96,10 +101,12 @@ accounting, from the executor after I asked it to account for the number:
 
 **37 justified, 78 not.** The three functions moved from a *private member* to *top-level in the same
 file* — which bought the testability the review rounds wanted and **zero** file-size relief. They are
-`internal` and `RelaisHttpPages.kt` is the same package, so relocating them is pure movement: no
-visibility change, no imports, and `RelaisHttpDashboardTest` is same-package so it needs no edit.
-Target ≈ **2750 (+37)**. Authorized as a separate relocation-only commit with a `--rerun-tasks`
-three-flavor re-run; `RelaisHttpPages.kt`'s own 158 lines are genuinely new code and offset nothing.
+`internal` and `RelaisHttpPages.kt` is the same package, so relocating them was pure movement: no
+visibility change, no imports, and `RelaisHttpDashboardTest` is same-package so it needed no edit.
+`RelaisHttpPages.kt`'s own lines are genuinely new code and offset nothing — that part was never
+avoidable. **The sweep for the bad instruction found it live in five places in the plan, not one**,
+because the executor grepped the shortest fragment (`2197`) rather than the full phrase; two
+disposition rows that repeat the old wording are struck in place rather than rewritten.
 
 **Two things here are worth more than the 78 lines.**
 
