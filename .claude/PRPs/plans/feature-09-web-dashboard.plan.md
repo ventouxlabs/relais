@@ -111,6 +111,17 @@
 > writer set without reading that KDoc: **the rule was written and broken in one pass, about the same
 > field.** Codex separately confirmed the narrowed CAS invariant holds. See Notes → *PR-B round-5
 > disposition*.
+>
+> **Revised an eleventh time 2026-09-12 against a round-6 pass** (2 P1, 1 P2) — **the stop rule did not
+> fire.** Both P1s are *references*, not reasoning: the superseded hint copy was still presented as
+> current in the UX mockup (`:189`, labelled "← NEW") and in a short-form quote, **because both the
+> author's sweep and the reviewer's verification grepped the full phrase and found only legitimate
+> contrasts**; and `DashboardSelectModelProbe` was invoked in the Validation block while nothing
+> created it, so acceptance required running a probe that did not exist. The sweep rule gains its
+> decisive clause — *shortest distinctive fragment, and read rendered text separately* — plus a
+> ghost-name audit. The P2: 8u's rollback row could not fail, since a rolled-back swap publishes the
+> same `A` whether or not `updateModel` was called; split into a value assertion (pins the source fix)
+> and a **logcat** assertion (pins the `swapped` guard). See Notes → *PR-B round-6 disposition*.
 
 ## Summary
 
@@ -149,7 +160,7 @@ the new `handleSelectModel` lives in the new file, and it takes primitives rathe
 - **Complexity:** Medium-High (was Medium — the compat gate, the swap race, and the gate-wide CSRF guard are all correctness work, not rendering work)
 - **Source PRD:** N/A
 - **PRD Phase:** N/A
-- **Estimated Files:** 20 (5 created — `BasicAuthGateProbe.kt` (PR-A, the only cover for the two seams the JVM lane cannot reach), `RelaisHttpAuthTest.kt` (PR-A), `RelaisHttpPages.kt` (PR-B), `RelaisHttpDashboardTest.kt` (PR-B, CRITICAL-1's list half) and `DashboardHeadersProbe.kt` (PR-B, CRITICAL-1's call-site half) — and 15 updated, `RelaisDiscovery.kt` among them: `bug 6` is a **code** change there, not doc-only), plus a `.claude/HANDOFF.md` section **and a correction to its step-4 row**
+- **Estimated Files:** 21 (6 created — `BasicAuthGateProbe.kt` (PR-A, the only cover for the two seams the JVM lane cannot reach), `RelaisHttpAuthTest.kt` (PR-A), `RelaisHttpPages.kt` (PR-B), `RelaisHttpDashboardTest.kt` (PR-B, CRITICAL-1's list half) `DashboardHeadersProbe.kt` (PR-B, CRITICAL-1's call-site half) and `DashboardSelectModelProbe.kt` (PR-B, `bug 6`'s end-to-end cover) — and 15 updated, `RelaisDiscovery.kt` among them: `bug 6` is a **code** change there, not doc-only), plus a `.claude/HANDOFF.md` section **and a correction to its step-4 row**
 - **Ships as two PRs** (O4, adopted): **PR-A** = Tasks 1-3 (auth + refresh + log hygiene + the 403 vocabulary); **PR-B** = Tasks 4-10 (the selector). PR-A is the security-sensitive half and gets a minimal blast radius for the security reviewer — which is also why the `Referrer-Policy` narrowing HIGH-3 requires is **defined** in PR-A and **shipped** in PR-B, in the commit that adds the form.
 - **Blocked on:** ~~all of `feature-18-trusted-lan-cert` landing first~~ — **satisfied.** #318 merged as `cf316146`; this plan is re-based onto it. See *Dependencies & Cross-plan Sequencing* for what remains (ordering against `feature-17`/`-19`/`-20`/`-22` only).
 
@@ -186,8 +197,8 @@ the new `handleSelectModel` lives in the new file, and it takes primitives rathe
 │ │ switch model                         │ │  ← NEW
 │ │ [ litert-community/gemma-4-E2B  ▾ ]  │ │
 │ │ [       SET MODEL       ]            │ │
-│ │ model set: …E2B — swapping, node     │ │  ← NEW, pending hint;
-│ │ restarts itself                      │ │     only while config ≠ resident
+│ │ model set: …E2B — not serving it yet │ │  ← NEW, pending hint;
+│ │                                      │ │     only while config ≠ resident
 │ └──────────────────────────────────────┘ │
 │ ┌─ Recent Requests ────────────────────┐ │
 │ │ endpoint           status      age   │ │
@@ -480,6 +491,7 @@ class ClientConfigEndpointProbe {
 | `.../main/java/cc/grepon/relais/RelaisDashboard.kt` | A + B | UPDATE | **PR-A:** the meta-refresh tag after the viewport meta (`:293`). **PR-B:** extend `DashboardStatus` (+3 fields, `:34`), render the form + pending hint, add the pure form parser and validator, delete the READ-ONLY claim at `:176` |
 | `.../main/java/cc/grepon/relais/RelaisHttpPages.kt` | B | **CREATE** | Home for **`handleSelectModel` only**, written against primitives (no `RequestContext`) — CLAUDE.md's under-800 target, against a server file now at **2713** lines (measured 2026-09-12; re-measure). The shipped handlers stay put; see Task 8 and H2 in Notes |
 | `.../main/java/cc/grepon/relais/RelaisEngine.kt` | B | UPDATE | `ensureModelSwapInBackground` (`:433`) returns `Boolean` (won the `swapDispatching` CAS at `:434`) — H3. **Plus `bug 6`:** one `RelaisDiscovery.updateModel(context)` call after the `synchronized(lock)` block closes at `:490` — see Task 7 |
+| `.../androidTest/java/cc/grepon/relais/DashboardSelectModelProbe.kt` | B | **CREATE** | **`bug 6`'s only end-to-end cover (test 8u).** Real swap on a real node, `dumpsys nsd` and logcat before/after, plus the rollback and missing-file rows. The Validation block has invoked this name since the first draft while nothing created it — a ghost until now (round-6 P1). Mirrors `ClientConfigEndpointProbe.kt`'s `assumeTrue`-gated shape. **Not CI** |
 | `.../androidTest/java/cc/grepon/relais/DashboardHeadersProbe.kt` | B | **CREATE** | **CRITICAL-1's call-site half (test 8v).** Loopback `RelaisHttpServer`, authenticated `GET /`, asserts the real response headers. Tests 12/13 pass if `handleDashboard` stops calling the helper; only this row fails. Mirrors `ClientConfigEndpointProbe.kt`'s `assumeTrue`-gated shape. **Not CI** |
 | `.../main/java/cc/grepon/relais/RelaisDiscovery.kt` | B | UPDATE | **`bug 6` — a code change, not doc-only (round-2 P1).** `buildServiceInfo` (`:54-57`) must source the advertised id from `RelaisEngine.residentModelId` before config, via a new pure top-level `internal fun advertisedModelId(resident, configured)`; sourcing it from config alone makes the swap-thread publish race Task 8's persist. Plus the stale KDoc at `:100-109` — it still claims *"an in-app model switch currently requires a process restart … so the TXT is always fresh after a switch"*, falsified by #180's in-process `ensureModelSwapInBackground`. `updateModel` (`:110`) has **zero callers** today (grep-confirmed); Task 7 gives it its first. Do **not** change its `httpPort`/`httpsPort` defaults — they match the only real `register` call site (`RelaisNodeService.kt:256`) |
 | `.../main/java/cc/grepon/relais/ModelSwitch.kt` | B | UPDATE | KDoc only: name the dashboard as the third surface that persists through here — H4 |
@@ -915,7 +927,7 @@ constraint is discharged; what follows records what that changed and what orderi
   | 2 | While B is still loading, `residentModelId` is **still A** — it is not written until `ensureInitialized` reaches `:374` |
   | 3 | The dashboard POST selects **A**. The handler-side check reads `resident == A`, matches, **skips the dispatch, persists A**, answers `303` |
   | 4 | The swap thread finishes, `residentModelId` becomes **B**, and `swapDispatching` clears only in the `finally` at `:495` |
-  | 5 | **config = A, resident = B**, with nothing scheduled to reconcile them. Task 5's pending hint renders "model set: A — swapping" against a node that is not swapping and never will |
+  | 5 | **config = A, resident = B**, with nothing scheduled to reconcile them. Task 5's pending hint renders `model set: A — not serving it yet` against a node that will never serve it, with nothing running to change that |
 
   The check straddles a window in which another thread invalidates the value it read. **The fix is to delete it, not to guard it.** With the short-circuit gone, the property that holds is:
 
@@ -978,7 +990,7 @@ constraint is discharged; what follows records what that changed and what orderi
 | **12** | **`Referrer-Policy` gate (CRITICAL-1)** | `dashboardSecurityHeaders()` | contains **exactly** `Referrer-Policy: same-origin`, and does **not** contain `no-referrer`; assertion message names the CSRF dependency so a revert fails with a readable reason. **Prove RED against the shipped `no-referrer` value.** Covers the list only — that `handleDashboard` still calls it is manual check 9 | **Yes** |
 | **13** | **`form-action 'self'` is present (CRITICAL-1)** | `dashboardSecurityHeaders()` | the CSP entry contains `form-action 'self'`, not `'none'` and not absent. Same file, same reachability argument | **Yes** |
 | **14** | **The TXT advertises reality, not intent (`bug 6`)** | `advertisedModelId(resident, configured)` over `("B", "A")`, `(null, "A")`, `("A", "A")` | **`"B"`, `"A"`, `"A"`** — resident wins when present; config is the **boot** fallback only. **Prove RED by inverting the precedence** (`configured` first), which is the shipped behaviour and the one that made the publish race the persist. Pins the *rule*; says nothing about whether `buildServiceInfo` calls it — that is 8u | **Yes** |
-| **8u** | **`bug 6` end to end, incl. the dispatch/persist interleaving (on-device)** | a real swap on hardware: read `dumpsys nsd` before, `SET MODEL` to B, wait for LIVE, read after | TXT `model` = **B**. Then the two paths no unit test reaches: a swap that **rolls back** must leave the TXT at **A** (not B), and a swap whose target file is missing must not re-register at all. **This is the only cover for the interleaving** — the publish happens on the swap thread while `applyManualId` runs on the request thread, and a config-sourced `buildServiceInfo` publishes the stale id whenever the swap wins. **Not CI** | **Yes** |
+| **8u** | **`bug 6` end to end, incl. the dispatch/persist interleaving (on-device)** | a real swap on hardware: read `dumpsys nsd` before, `SET MODEL` to B, wait for LIVE, read after | TXT `model` = **B**. Then the two paths no unit test reaches — **and each needs the right instrument, because the TXT VALUE alone cannot distinguish them (round-6 P2):** after a rollback, resident is restored to **A** (`RelaisEngine.kt:478-481`), so `advertisedModelId` publishes **A** whether `updateModel` was wrongly called or correctly skipped — the same value either way. **Split the claims and make invocation observable from logcat**, which needs no production change: `RelaisDiscovery` logs `"mDNS unregistered"` (`:86`) and `"mDNS registered"` (`:78`) on every re-registration. So — (a) **TXT value = A after a rollback** pins the *source* fix, and genuinely discriminates: a config-sourced `buildServiceInfo` would publish **B** there; (b) **no `mDNS unregistered`/`mDNS registered` pair in logcat** after a rolled-back or file-missing swap pins the `swapped` **guard**, which the value assertion cannot see. Assert both, and label which is which. **This is the only cover for the interleaving** — the publish happens on the swap thread while `applyManualId` runs on the request thread, and a config-sourced `buildServiceInfo` publishes the stale id whenever the swap wins. **Not CI** | **Yes** |
 | **8v** | **The dashboard's headers on a real response (CRITICAL-1's call-site half)** | `DashboardHeadersProbe`: loopback `RelaisHttpServer(tls = false)`, authenticated `GET /` | the response carries `Referrer-Policy: same-origin` and a CSP containing `form-action 'self'`. **Prove RED by deleting the `dashboardSecurityHeaders()` call from `handleDashboard`** — tests 12 and 13 both still pass under that deletion, which is the whole reason this row exists. **Not CI**; a probe fails only when run | **Yes** |
 | 11 | Swap dispatch is exclusive | two `ensureModelSwapInBackground` calls, second while the first holds the CAS | first `true`, second `false` — **on-device probe, not JVM** (`RelaisModelSwapTest.kt:26` records that this function needs a device) | **Yes** |
 | 2 | Locked while starting | `switchLocked = true` | `disabled` on select + button; literal `model locked while starting` | No |
@@ -1089,7 +1101,8 @@ or the next reviewer cannot tell whether the counting discipline was preserved:
 | 1, 2, 2b, 3, 4, 5, 10b, the inverted row | `RelaisDashboardTest.kt` | Renderer-level, in that file's existing idiom |
 | 6a-6d, 7a-7c | `RelaisDashboardTest.kt` | Pure parser/validator, per Task 6 |
 | **14** | **`RelaisDiscoveryTxtTest.kt`** | `advertisedModelId` is the precedence rule behind the TXT this file already pins; its existing rows need no change, since `buildDiscoveryTxt` takes the id as a parameter |
-| **8u, 8v** | **`androidTest/.../BasicAuthGateProbe.kt` (8u alongside) and `.../DashboardHeadersProbe.kt` (**new**)** | The call-site/interleaving halves of `bug 6` and CRITICAL-1. **Not CI** — a probe fails only when run, which is the bar, stated |
+| **8u** | **`androidTest/.../DashboardSelectModelProbe.kt`** (**new**) | `bug 6`'s wiring + interleaving. **Not** `BasicAuthGateProbe.kt` — that is PR-A's shipped auth probe (it exists in the tree) and this is a swap/discovery check; the Validation block already invokes this name (round-6 P1) |
+| **8v** | **`androidTest/.../DashboardHeadersProbe.kt`** (**new**) | CRITICAL-1's call-site half. Separate file from 8u deliberately: 8v drives a **loopback** `RelaisHttpServer`, 8u drives the **real node** through a real swap — different fixtures, not one probe |
 | **`reason(303)`, the `endpointLabel` arm** | **manual checks 4 and 11 only** | **Both are `private` members and this plan forbids widening them** — the same argument as 8r, and it applies to exactly three things in PR-B. Naming them here is what stops an implementer discovering the constraint mid-task and reaching for `internal` |
 
 ### Test-file migration (`RelaisHttpGateTest.kt`) — read before editing it
@@ -1332,6 +1345,11 @@ curl -sk -i -u ":$KEY" https://$IP:8443/experiments | grep -i 'referrer-policy\|
 #     Before: note the `model` attribute. Then SET MODEL, wait for LIVE, and re-read.
 adb shell dumpsys nsd | grep -i relais
 #   expect the TXT model attribute to follow the swap — and watch for an unregister/register race
+# Invocation is observable in logcat, which the TXT value alone cannot show (round-6 P2): after a
+# ROLLED-BACK swap the published id is A either way, so only these lines distinguish called vs skipped.
+adb logcat -s RelaisDiscovery | grep -i 'mDNS registered\|mDNS unregistered'
+#   expect exactly ONE unregister+register pair per SUCCESSFUL swap, and NONE after a swap that
+#   rolled back or whose target file was missing
 #   (RelaisDiscovery.kt:114-120 re-registers immediately; NSD unregistration is asynchronous).
 #   Cross-check from a second device browsing _relais._tcp; do not paper over a race with a sleep.
 
@@ -1411,7 +1429,8 @@ curl -sk -u ":$KEY" https://$IP:8443/ | grep -A1 'select-model'
 - [ ] Both issues filed: R1 (`/experiments` 401) and the eight `dashboard-copy.md` Appendix deltas
 - [ ] Caller audit for Task 7 re-run on the branch (`grep -rn '::ensureModelSwapInBackground'` returns nothing)
 - [ ] **Before reusing ANY precedent — a helper, a guard, a check, an ordering — all three clauses run:** (1) grep for an existing implementation of the same shape; (2) **re-derive the policy** rather than inheriting it (*mirror the shape, not the policy*); (3) **confirm the destination preserves whatever made the precedent safe** — the precedent's own context is not carried across by copying its code. Clause 3 is what `handleSelectModel`'s deleted `id == residentModelId` short-circuit failed: the right precedent, the right shape, a destination where a concurrent swap can change the value between the read and the act. **Scoped to precedents, not just helpers** — the defect that produced clause 3 was a two-line comparison, not a function
-- [ ] **After every review round, grep the document for the claim just falsified and confirm EVERY copy is marked** — not only the one being edited. This plan preserves superseded reasoning on purpose, which makes a struck-in-spirit paragraph a standing hazard: three times now, text corrected in one place stayed readable as an instruction in another (the gotcha-3 mirror, the "correct by construction" overclaim, the CAS-ownership optimization)
+- [ ] **After every review round, sweep the document for the claim just falsified — and sweep it PROPERLY.** Three clauses, the third added because the first two passed a sweep that missed two live copies: (1) grep for the **shortest distinctive fragment**, never the full string — the full phrase matched only the legitimate contrasts while `swapping` alone found both survivors; (2) confirm **every** copy is marked, not only the one being edited; (3) **read the rendered text separately** — ASCII mockups, tables and diagrams wrap, truncate and re-space, so they can never match a prose pattern, and `:189`'s mockup showed a dead string labelled *"← NEW"* through four rounds of sweeping. The repo already recorded clause 1 (*"a sweep is only as good as its pattern; grepping `one hour` missed `for an hour`"*) — **a rule satisfiable by a grep that finds nothing is not a check**, and this one was satisfied twice that way, once by the author and once by the reviewer verifying the author
+- [ ] **No named artifact is a ghost.** Grep every `*Probe`/`*Test`/file name the plan *invokes* against what it *creates* — a name appearing exactly once is the tell. `DashboardSelectModelProbe` was invoked in the Validation block from the first draft with nothing creating it, so acceptance required running a probe that did not exist. Third instance of "the plan specifies a test that cannot run", after CRITICAL-1 and Task 8's private-member call
 - [ ] **Audit the same commit that introduces a rule against that rule.** A new rule is at its weakest in the revision that writes it, because the author holds it as a conclusion just reached rather than a check still owed. Twice on this branch a rule was written and broken in one pass — the interleaving rule (round 3) and the read-the-KDoc rule (round 5, about the very field it was written for)
 - [ ] **Before asserting that a value cannot change underneath you, read the KDoc of the thing you are asserting it about.** Four of this plan's defects had the disconfirming fact written one clause from where someone was looking (`RelaisHttpIo`'s Base64 comment, `RelaisHttpGate`'s supplier thesis, `WebhookGuard`'s control flow, `ensureModelSwapInBackground`'s *"the two can legitimately race independently"*, and `residentModelId`'s own *"idle-reload, an ordinary request, or [ensureModelSwapInBackground] — never assumed"*)
 - [ ] **Before writing any new helper, the assertability rule also runs:** write the parameter list first and confirm every parameter is reachable without a `RelaisHttpServer` instance. Between these, the rules above account for eight of this plan's review defects across seven rounds — see *The rule that falls out*
@@ -1911,6 +1930,26 @@ on a second, independent axis. **The practical consequence for these rounds: a n
 at its weakest in the revision that writes it**, because the author is holding the rule as a
 *conclusion* they have just reached rather than as a *check* they still owe. Audit the same commit
 that introduces a rule against that rule.
+
+### PR-B round-6 disposition (2026-09-12, against revision `c4daba51`)
+
+Two P1, one P2 — **the stop rule did not fire.** All three confirmed against the tree.
+**Findings by round: 12 (+3 self-caught), 4, 3, 3, 3, 3.**
+
+| # | Finding | Disposition |
+|---|---|---|
+| **P1** | The superseded hint copy is **still presented as current in two places** | **Fixed, and the sweep rule was the actual defect.** `:189`'s UX mockup rendered `model set: …E2B — swapping, node` labelled **"← NEW, pending hint"** — not a contrast, the shipping design; and `:918` quoted the short form. Both are now the decided string. **What matters more than the fix:** round 5 added *"grep the document for the claim you just falsified"*, I ran it, reported the remaining hits were legitimate, and **the reviewer verifying that finding ran the same full-phrase grep and confirmed the all-clear.** Codex found both by *reading*. The repo's memory already records the mechanism — *a sweep is only as good as its pattern; grepping "one hour" missed "for an hour"* — and both of us walked into it while handling a finding about a failed sweep. The rule now carries three clauses, the decisive one being **shortest distinctive fragment, and read rendered text separately**: `swapping` alone finds both survivors, and an ASCII mockup wraps and re-spaces so it can never match a prose pattern |
+| **P1** | `DashboardSelectModelProbe` **does not exist and is not planned** | **Fixed by making the ghost real.** Confirmed by the count the finding suggests — the name appears **exactly once** (`:1239`, an `adb` invocation carried since the first draft) while every real reference is `DashboardHeadersProbe`. Acceptance requires 8v *and* 8u to run, so as written one required probe could not be executed. **Resolved by creating it rather than deleting the line**, because 8u needed a home and `BasicAuthGateProbe.kt` is the wrong one — that is PR-A's **already-shipped** auth probe (it is in the tree), while 8u drives a real swap and reads `dumpsys nsd`. 8u and 8v stay **separate files** deliberately: 8v drives a loopback `RelaisHttpServer`, 8u drives the real node — different fixtures, not one probe. **Ghost-name audit run across the whole plan** (every `*Probe`/`*Test` name invoked vs created): this was the only one; `DashboardHeadersProbe.kt` and `RelaisHttpDashboardTest.kt` are missing from the tree but correctly carry CREATE rows, and `RelaisHttpServerTest` appears only inside an "expect NOTHING" grep. Added as a Completion Checklist line, since **a name appearing exactly once is the tell** |
+| **P2** | 8u's rollback row's assertion is **vacuous** | **Fixed by splitting the claim and adding an instrument.** Confirmed: rollback restores resident to **A** (`:478-481`), so `advertisedModelId` publishes **A** whether `updateModel` was wrongly called or correctly skipped — the value cannot discriminate. **Invocation is observable from logcat with no production change**: `RelaisDiscovery` logs `"mDNS unregistered"` (`:86`) and `"mDNS registered"` (`:78`) on every re-registration. So the row becomes two labelled assertions — the **TXT value = A** pins the *source* fix (a config-sourced `buildServiceInfo` would publish **B** there, so it does discriminate that), and **no unregister/register pair in logcat** pins the `swapped` **guard**. Manual check 10 gains the same `adb logcat -s RelaisDiscovery` line |
+
+**What this round says about the floor.** The last four rounds' findings were all in *assertions*;
+these two P1s are in **references** — a stale rendering and a name invoked but never created. That is
+a narrower and more mechanical class, and both were found by **reading** after two independent greps
+returned clean. The lesson generalizes past this plan: **a verification step that can be satisfied by
+a search returning nothing is not a verification step.** The author ran it, the reviewer re-ran it to
+check the author, and the pattern was wrong both times — so the failure was not diligence, it was that
+the rule as written named the *action* (grep) instead of the *evidence* (every copy accounted for).
+Rules that specify a motion are passed by going through the motion.
 
 ### The rule that falls out
 
