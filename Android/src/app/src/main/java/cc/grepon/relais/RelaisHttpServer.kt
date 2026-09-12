@@ -2222,19 +2222,28 @@ internal enum class AuthScheme { BEARER, BASIC }
  *     the same change as an advertised tightening. Nothing in this repo or its docs sends a
  *     lowercase scheme. Revisit only with a reason, not as a tidy-up.
  *
- * The `.trim()` on both branches is pre-existing Bearer behaviour; dropping it would be a second
- * silent tightening.
+ * **Trimming is asymmetric between the branches, deliberately.** The Bearer branch trims its token
+ * and the Basic branch trims its base64 blob: both are *header syntax*, where surrounding whitespace
+ * is insignificant. The decoded Basic password is *data* and is taken literally.
+ *
+ * An earlier draft trimmed the decoded password too, justified as "pre-existing Bearer behaviour;
+ * dropping it would be a second silent tightening". That argument is sound for Bearer and does not
+ * transfer: Basic ships for the first time in this change, so there is no pre-existing behaviour to
+ * tighten and nothing to be silent about. Trimming it would make `base64(":KEY ")` and
+ * `base64(":KEY")` the same credential — a second spelling of the key that no client sends and no
+ * document mentions. Do not "harmonize" the two branches; [RelaisHttpAuthTest] `8n` pins both halves.
  */
 internal fun extractApiKey(header: String?): Pair<AuthScheme, String>? {
   val h = header ?: return null
   if (h.startsWith("Bearer ")) return AuthScheme.BEARER to h.removePrefix("Bearer ").trim()
   if (h.startsWith("Basic ")) {
-    val raw = h.removePrefix("Basic ").trim()
+    val raw = h.removePrefix("Basic ").trim() // syntax: whitespace around the blob is insignificant
     val decoded = runCatching { String(JvmBase64.getDecoder().decode(raw), Charsets.UTF_8) }
       .getOrNull() ?: return null
     // No colon at all => no username field => not a Basic credential. See note 1 above.
     if (!decoded.contains(':')) return null
-    return AuthScheme.BASIC to decoded.substringAfter(':', "").trim()
+    // No .trim() here: this is the password, and it is data. See the KDoc above.
+    return AuthScheme.BASIC to decoded.substringAfter(':', "")
   }
   return null
 }
@@ -2272,11 +2281,42 @@ internal fun authenticate(header: String?, apiKey: String): AuthScheme? {
  * challenging would tell the browser to re-prompt for a key that is already correct.
  */
 internal fun challengeHeaders(status: Int, accept: String?): List<String> =
-  if (status == 401 && accept?.contains("text/html") == true) {
+  if (status == 401 && acceptsHtml(accept)) {
     listOf("""WWW-Authenticate: Basic realm="Relais", charset="UTF-8"""")
   } else {
     emptyList()
   }
+
+/**
+ * Does [accept] name `text/html` as something the client will take?
+ *
+ * `Accept` is a comma-separated list of media ranges with parameters, so `contains("text/html")`
+ * answers a different question — "do these nine characters occur anywhere in the header" — and the
+ * two disagree in **both** directions: `application/json; profile="text/html"` matches the substring
+ * without accepting HTML, and `text/html;q=0` is an explicit *refusal* that also matches it.
+ *
+ * **The `&#42;/&#42;` wildcard deliberately does NOT count.** RFC 7231 says it accepts everything, but
+ * the question here is not "may I send HTML" — it is "is this a browser that can answer an auth
+ * prompt". That wildcard is what curl and most SDKs send, and honouring it would put a
+ * `WWW-Authenticate` on exactly the error paths [challengeHeaders]'s contract promises to leave bare.
+ * Same reasoning for `text/&#42;`, which nothing in practice sends. Only an explicit `text/html`
+ * range with non-zero `q` qualifies.
+ */
+private fun acceptsHtml(accept: String?): Boolean {
+  val header = accept ?: return false
+  return header.split(',').any { range ->
+    val parts = range.split(';').map { it.trim() }
+    val type = parts.firstOrNull()?.lowercase() ?: return@any false
+    if (type != "text/html") return@any false
+    // q is the only parameter that can turn acceptance into refusal; q=0 (and 0.0, 0.000) does.
+    val q = parts.drop(1)
+      .firstOrNull { it.startsWith("q=", ignoreCase = true) }
+      ?.substringAfter('=')
+      ?.trim()
+      ?.toDoubleOrNull()
+    q == null || q > 0.0
+  }
+}
 
 /**
  * Canonical authority (`host:port`, lowercased) of [url], or null if it does not parse or names no

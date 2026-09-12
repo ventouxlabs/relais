@@ -117,6 +117,46 @@ class RelaisHttpAuthTest {
   }
 
   /**
+   * **The decoded password is DATA and is taken literally; the base64 blob is SYNTAX and is trimmed.**
+   * That asymmetry is the whole content of this test, and it is the one a tidy-up will try to remove.
+   *
+   * The plan justified trimming both branches as "pre-existing Bearer behaviour; dropping it would be
+   * a second silent tightening". True of Bearer, and it does not transfer: Basic ships for the first
+   * time in this change, so there is no pre-existing behaviour to tighten and nothing to be silent
+   * about. Trimming the password means `base64(":KEY ")` and `base64(":KEY")` are the same credential
+   * — a second spelling of the key that no client sends and no documentation mentions.
+   */
+  @Test
+  fun `8n the decoded Basic password is taken literally, not trimmed`() {
+    assertNull(
+      "a trailing space inside the credential is part of the password and must not authenticate",
+      authenticate(basic(":$key "), key),
+    )
+    assertNull(
+      "a leading space likewise",
+      authenticate(basic(": $key"), key),
+    )
+    assertEquals(
+      "the exact credential still authenticates",
+      AuthScheme.BASIC,
+      authenticate(basic(":$key"), key),
+    )
+    // The base64 blob itself is header syntax; surrounding whitespace there is still tolerated.
+    assertEquals(
+      "whitespace around the base64 blob is syntax, not data, and stays tolerated",
+      AuthScheme.BASIC,
+      authenticate(basic(":$key").replaceFirst("Basic ", "Basic   "), key),
+    )
+    // Bearer is untouched: trimming there IS pre-existing behaviour and dropping it would be the
+    // silent tightening the plan warned about.
+    assertEquals(
+      "Bearer keeps its pre-existing trim",
+      AuthScheme.BEARER,
+      authenticate("Bearer $key  ", key),
+    )
+  }
+
+  /**
    * Deliberately narrower than RFC 7235, which makes the auth-scheme token case-INSENSITIVE.
    * Accepting `bearer`/`basic` would be a widening shipped in the same change as an advertised
    * tightening, and nothing in this repo or its docs sends a lowercase scheme. Decided, not
@@ -189,6 +229,56 @@ class RelaisHttpAuthTest {
     // An unconditional challenge would put a browser auth prompt in front of every SDK's error path.
     assertEquals("a non-HTML 401 stays bare", emptyList<String>(), challengeHeaders(401, "application/json"))
     assertEquals("a 401 with no Accept stays bare", emptyList<String>(), challengeHeaders(401, null))
+  }
+
+  /**
+   * `Accept` is a list of media RANGES with parameters, not a string to search. Substring matching
+   * answers a question nobody asked — "do these nine characters appear anywhere in the header" —
+   * which is a different question from "does this client accept HTML", and the two disagree in both
+   * directions.
+   *
+   * The effect of getting it wrong is cosmetic (a challenge header on a JSON 401 that no SDK reads),
+   * so this is not a security fix. It is here because the KDoc above promises "an HTML client and
+   * nothing else", and a promise the code does not keep is what the next person will build on.
+   */
+  @Test
+  fun `8o Accept is parsed as media ranges, not substring-matched`() {
+    // False positive: text/html appears only inside a parameter value of a JSON range.
+    assertEquals(
+      "text/html inside a parameter value does not make this an HTML client",
+      emptyList<String>(),
+      challengeHeaders(401, """application/json; profile="text/html""""),
+    )
+    // False positive: a client explicitly REFUSING html still matched `contains`.
+    assertEquals(
+      "q=0 is an explicit refusal and must not draw a challenge",
+      emptyList<String>(),
+      challengeHeaders(401, "application/json, text/html;q=0"),
+    )
+    // The ordinary browser string still works, parameters and all.
+    assertEquals(
+      "the real Chrome/Firefox Accept must still be served a challenge",
+      listOf(challenge),
+      challengeHeaders(401, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,*/*;q=0.8"),
+    )
+    // A weighted but non-zero preference is still acceptance.
+    assertEquals(
+      "q=0.1 is a weak preference, not a refusal",
+      listOf(challenge),
+      challengeHeaders(401, "application/json, text/html;q=0.1"),
+    )
+    // Whitespace and case are insignificant in a media range.
+    assertEquals(
+      "media ranges are case-insensitive and space-tolerant",
+      listOf(challenge),
+      challengeHeaders(401, "  TEXT/HTML ;  Q=1 "),
+    )
+    // A wildcard is not a request for HTML; curl sends `*/*` and must not get a browser prompt.
+    assertEquals(
+      "*/* is what curl sends, and it must stay bare",
+      emptyList<String>(),
+      challengeHeaders(401, "*/*"),
+    )
   }
 
   // ---------------------------------------------------------------------------
