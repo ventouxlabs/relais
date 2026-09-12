@@ -15,10 +15,23 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 | [#318](https://github.com/ventouxlabs/relais/pull/318) | `cf316146` | per-node EC P-256 CA (10 y) signing an RSA-2048 SAN'd leaf (90 d) — LAN clients can drop `curl -k` |
 | [#323](https://github.com/ventouxlabs/relais/pull/323) | `62050b83` | HTTP Basic + cross-site guard + dashboard auto-refresh + request-log hygiene (feature-09 Tasks 1-3) |
 
+### ⚠ Before believing any status claim in this section — including this one
+
+**This worktree's state and the messages describing it went out of sync three separate times today**,
+in both directions: my `d4a26f67` described an uncommitted tree that had been committed minutes
+earlier, and two executor reports crossed with my replies to them. Every one of those claims was
+written in good faith by someone who had actually looked.
+
+**Run `git log --oneline --date=format:'%H:%M:%S' --format='%h %cd %s' -8` and `wc -l` before you
+trust a SHA, a tree state, or a line count written here.** A relocation was authorized at 17:20 and
+may or may not have landed by the time you read this — see the open review item below. Measure, don't
+quote. This is the same rule CLAUDE.md states about `RelaisHttpServer.kt`'s line count, which has now
+been stale six times; the general form is that **any number in a document is a historical note.**
+
 ### The tree you are inheriting
 
-Branch `feat/dashboard-model-selector`, **unpushed**, tree clean. Below the eight plan-revision
-commits sit four implementation commits — feature-09 **PR-B (Tasks 4-10, the model selector)**:
+Branch `feat/dashboard-model-selector`, **unpushed**. Below the eight plan-revision commits sit four
+implementation commits — feature-09 **PR-B (Tasks 4-10, the model selector)**:
 
 | SHA | |
 |---|---|
@@ -69,15 +82,44 @@ Flagged rather than buried, which is the right instinct; none contradict the pla
 finished until `reason()` has an arm for it.* That is the rule, stated where the next person adding a
 status will read it, rather than in a retrospective. Keep that habit.
 
-### The fourth item, and the one I'd look at first
+### The fourth item — a real miss, authorized for fix at 17:20
 
-**`RelaisHttpServer.kt` went 2713 → 2828 even though the executor created `RelaisHttpPages.kt`.** The
-extraction happened *and* the server still gained +133, net **+115** on the exact file CLAUDE.md tells
-the next change to shrink. `RelaisHttpPages.kt`'s own header argues the case — new code extracted,
-shipped handlers deliberately left alone because relocating them would force `RequestContext`,
-`readBody`, `respondText` and `provisionedOnDisk` to widen, which it calls feature-17's change to make.
-That reasoning is defensible; the number still moved the wrong way. **Ask about it; don't assume it is
-either fine or a defect.** (2713 is `main`; 2828 is the uncommitted tree. `wc -l`, never quote.)
+**`RelaisHttpServer.kt` grew +115 (2713 → 2828) and 78 of that did not have to land there.** Exact
+accounting, from the executor after I asked it to account for the number:
+
+| Net | What | Needs the class's privates? |
+|---|---|---|
+| **+78** | the three extracted pure functions + their KDoc | **No** |
+| +26 | the `/select-model` router arm | Yes — `readBody`, `provisionedOnDisk`, `respondText`, `ctx.*` |
+| +4 / +3 | `endpointLabel` arm, `reason(303)` arm | Yes — private members |
+| +4 | single-read locals; inline header list deleted | Yes |
+
+**37 justified, 78 not.** The three functions moved from a *private member* to *top-level in the same
+file* — which bought the testability the review rounds wanted and **zero** file-size relief. They are
+`internal` and `RelaisHttpPages.kt` is the same package, so relocating them is pure movement: no
+visibility change, no imports, and `RelaisHttpDashboardTest` is same-package so it needs no edit.
+Target ≈ **2750 (+37)**. Authorized as a separate relocation-only commit with a `--rerun-tasks`
+three-flavor re-run; `RelaisHttpPages.kt`'s own 158 lines are genuinely new code and offset nothing.
+
+**Two things here are worth more than the 78 lines.**
+
+**The plan named a location when it meant a property.** It said "top-level after the class closes at
+`:2197`". The load-bearing half was *top-level, not a member* — an `internal` member needs an
+instance, which needs a `Context`. The **file was never the constraint**; any file in the package
+satisfies it. The plan over-specified, the executor followed it literally, and **eight review rounds
+missed it because every round checked whether those functions were _reachable_, never where the lines
+_landed_.** This is the motion-versus-evidence failure one level up: a plan specifying a *coordinate*
+is satisfied at that coordinate even when the coordinate was incidental, and every reviewer checking
+the real property will correctly pass it. The check wasn't skipped — it was aimed right and still
+blind. **When a plan states a location, make it state the property and the reason.**
+
+**I offered a justification and it was declined on evidence.** I told the executor that if the answer
+was "route arm, form render, CSP, and they genuinely need the class's privates" I'd record that and
+move on. Wrong on the facts: form render is in `RelaisDashboard.kt` (+121/−3, not the server at all),
+and the CSP sits *inside* the unconstrained +78. **Offering a pre-written justification invites it to
+be taken** — it converts a review question into a multiple-choice with an exit. Ask for the
+accounting; don't draft the excuse. The executor refusing the exoneration is the same disagree-upward
+move as its round-7 `endpointLabel` decline, pointed at the lead this time.
 
 ### What PR-B closes, and what it changes on the wire
 
