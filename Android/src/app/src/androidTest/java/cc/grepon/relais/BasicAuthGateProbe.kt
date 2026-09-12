@@ -99,6 +99,14 @@ class BasicAuthGateProbe {
     // Host carries the port, as a real browser sends it for a non-default port. The authority
     // comparison is against THIS value, so getting it wrong here would make row 4 fail for a reason
     // that has nothing to do with the code under test.
+    //
+    // **HAZARD — read before "fixing" a row-4 failure.** The plan specified row 4's `Origin` but not
+    // its `Host`, and the probe this file mirrors (ClientConfigEndpointProbe) sends a portless
+    // `Host: 127.0.0.1`. Written that way, row 4 fails against a CORRECT implementation, and the
+    // obvious remedy — loosen the port half of the authority comparison — deletes the protection the
+    // row exists to prove. That is worse than having no row at all: a missing test is silent, while
+    // a test that fails for the wrong reason actively recruits the next person into the defect.
+    // If row 4 ever fails, suspect THIS line before suspecting `rejectsAsCrossSite`.
     val host = "127.0.0.1:$port"
 
     // 1. Basic + cross-site -> 403. Proves the whole chain: header parsed, scheme preserved through
