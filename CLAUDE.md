@@ -72,12 +72,16 @@ under `src/full`/`src/degoogled`/`src/playsafe`.
   CI. Keep new probes runnable via a single `adb shell am instrument -e class …` line documented in
   the probe's own file header, matching `ToolCallingProbe.kt`/`RelaisBackendBenchmarkTest.kt`.
 - Files in this codebase run long by Android convention — `RelaisHttpServer.kt` is the largest at
-  **2432 lines** (measured 2026-09-12). **Re-measure with `wc -l` rather than quoting this number:**
-  it has now been stale four times — here at "~1700", in the codemaps at "~1900", here again at
-  "2202" (found 2026-09-08 during feature-18, by which point the file had grown another 124 lines),
-  and again at "2326" (found 2026-09-12 while planning feature-09, after #318 added another 106).
-  Every time, a figure was copied forward instead of checked — including twice by this very sentence,
-  which is itself an argument for `wc -l` over any number written down here. The repo's own target is well under 800 —
+  **2713 lines** (measured 2026-09-12, after #323). **Re-measure with `wc -l` rather than quoting
+  this number:** it has now been stale five times — "~1700" here, "~1900" in the codemaps, "2202"
+  (found 2026-09-08 during feature-18), "2326" (found 2026-09-12 while planning feature-09), and
+  "2432" — which was written on 2026-09-12 *by the same session that then merged #323 and made it
+  wrong within hours*. Five figures, five staleness events, three of them recorded by this very
+  sentence while it was busy warning about exactly that. Treat any line count written in a document
+  as a historical note, never as a fact about the file. **The file is now 3.4× the repo's own
+  under-800 target and grew +281 lines in a single PR**, so the next change to it should extract
+  rather than append — the do-not-relocate reasoning that justified growing it was about keeping
+  feature-18's line references valid, and feature-18 has long since merged. The repo's own target is well under 800 —
   prefer extracting a new file (as `RelaisHttpIo.kt` was extracted from `RelaisHttpServer.kt`) over
   growing an existing large file further.
 - Room schema changes are **additive-only with an explicit migration** — there is no destructive
