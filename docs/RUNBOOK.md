@@ -65,6 +65,42 @@ Three things that surprise operators:
 - **`x_relais_ttft_ms`** on a response body is the same measurement per-request, and is absent — not
   zero — on those same paths.
 
+### Opening the dashboard in a browser
+
+`GET /` serves a status page. Browsers never send `Authorization: Bearer` on a navigation, so the
+node also accepts **HTTP Basic**:
+
+1. Browse to `https://<phone-ip>:8443/`.
+2. Accept the self-signed-certificate interstitial — it appears **before** the auth prompt. (Install
+   the node CA from `GET /ca.crt` to stop seeing it; see `SECURITY.md`.)
+3. At the Basic prompt, leave **username blank** and paste the **node key** as the password.
+
+The page auto-refreshes every 10 s. Each refresh spends one of the 30 req / 60 s per-IP budget, so an
+idle tab costs ~20% of it — and if the budget is exhausted the refresh answers JSON, which carries no
+refresh tag, so **the page stops refreshing until you reload it by hand**. Close idle dashboard tabs
+on a node that is also serving inference.
+
+### `403` on a scripted POST is expected, not a fault
+
+Accepting Basic means the browser re-attaches credentials to *any* page's request, so every
+**Basic**-authenticated request passes a cross-site check. A plain command-line POST has no
+provenance and is rejected:
+
+```bash
+curl -sk -u ":$KEY" -X POST https://$IP:8443/...              # 403 Forbidden (permission_error)
+curl -sk -u ":$KEY" -H 'Sec-Fetch-Site: same-origin' -X POST https://$IP:8443/...   # works
+curl -sk -u ":$KEY" -H "Origin: https://$IP:8443" -X POST https://$IP:8443/...      # also works
+```
+
+`Bearer` is unaffected — scripts and SDKs that send `Authorization: Bearer` need no change, and that
+remains the recommended carrier for automation. GET requests are unaffected under either scheme.
+
+A `403` here means the **key was accepted** and the request context was refused; the envelope says
+`permission_error`, not `authentication_error`. Retrying with a new key will not help.
+
+**Also wire-visible:** `Authorization: <rawkey>` with no scheme used to be accepted and is now
+rejected. Add the `Bearer ` prefix. The scheme token is case-sensitive.
+
 ## Common issues
 | Symptom | Cause | Action |
 |---|---|---|

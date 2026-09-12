@@ -6,7 +6,61 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-07 — ⏩ START HERE. **Eight PRP plans critic-reviewed and REVISED. Committed, PR #310 open. Decisions below are JD's.**
+## 2026-09-12 — ⏩ START HERE. **feature-09 PR-A implemented on `feat/dashboard-auth-refresh`. Not pushed, no PR. Six plan-review rounds preceded it.**
+
+Branch `feat/dashboard-auth-refresh`, based on `cf316146` (#318). Tasks 1-3 of
+`.claude/PRPs/plans/feature-09-web-dashboard.plan.md` (= PR-A). PR-B (Tasks 4-10, the model selector)
+is **not** started.
+
+### Wire-visible changes an operator can notice
+
+1. **`Authorization: <rawkey>` with no scheme is now REJECTED.** It used to be accepted — an artefact
+   of `removePrefix("Bearer ")` returning the receiver when the prefix is absent, never a documented
+   contract. `Basic base64(<key>)` with no colon is rejected for the same reason. Recorded in
+   `SECURITY.md` and `docs/RUNBOOK.md`.
+2. **`Authorization: Basic base64(:<key>)` is now ACCEPTED**, so the dashboard opens in a browser.
+3. **Every *Basic*-authenticated request now passes a cross-site check** and can answer `403`. Bearer
+   is untouched — no SDK regresses. Consequence: plain `curl -u ":$KEY" -X POST` now returns 403;
+   add `-H 'Sec-Fetch-Site: same-origin'` or a matching `Origin`. Reads unaffected.
+4. **The node can now answer `403`** — the first in the tree. `403 Forbidden` (it would have been
+   `403 ERR`) with the new `RelaisError.PERMISSION` = `permission_error`, deliberately distinct from
+   `authentication_error` because the credential *was* valid.
+5. **`GET /` auto-refreshes every 10 s**, and no longer writes its own `200`s to the 20-slot recent-
+   request log. It still spends budget: one idle tab ≈ 20% of the 30/60s per-IP budget, and a 429
+   answers JSON, which has no refresh tag, so **the refresh chain stops permanently** until a manual
+   reload.
+
+### What is verified, and what is not
+
+- Three-flavor JVM lane green. **13 mutations run against the new assertions**; every one killed by
+  the intended test. Full table in the session report.
+- **`BasicAuthGateProbe.kt` has NOT been run** — it needs hardware and `-e RELAIS_PROBE 1`. It is the
+  **only** cover for two seams: that `handle()` parses all four new headers into the right slots, and
+  that `challengeHeaders()` is actually called at the reply. CI covers neither. **Run it before
+  merging**, or those seams ship unverified.
+
+### The transferable finding — six review rounds, and the pattern never changed
+
+Rounds found **13 → 4 → 3 → 3 → 2 → 1** issues. Four of the six defects had their **correct answer
+already written in this repo**: `RelaisHttpGate.kt:61` (supplier thesis), `RelaisHttpIo.kt:270` ("NOT
+`android.util.Base64`"), the twelve top-level `internal fun`s after `RelaisHttpServer.kt:2151`, and
+`WebhookGuard.kt:54-58`. Reviews found them by reading the tree; fixes kept being proposed without.
+
+> **Grep before writing any helper — and mirror the SHAPE, never the POLICY.** The caveat was earned:
+> reusing `WebhookGuard` wholesale for an inbound origin check would have DNS-resolved per request and
+> blocked RFC1918 — every legitimate LAN request — while looking exactly like the guard working. A
+> security function copied into a different threat model is its own failure mode, because it arrives
+> with the authority of shipped reviewed code. Ask *"what is this function deciding, and is that my
+> question?"* before *"does this function exist?"*
+
+Also recorded, from the `rejectsAsCrossSite` test table: **row count is not a proxy for axis count.**
+Individually every reject row also passes an "always reject" implementation and every allow row passes
+an "always allow" one — only the combination discriminates. The table was extended four times by four
+different axes, each of which passed every row that existed before it.
+
+---
+
+## 2026-09-07 — **Eight PRP plans critic-reviewed and REVISED. Committed, PR #310 open. Decisions below are JD's.**
 
 **PR:** [#310](https://github.com/ventouxlabs/relais/pull/310) `docs/prp-plans-critic-revised` → `main`.
 `/codex review --base main` ran and **GATE: FAIL** (2 P1 / 1 P2) — both P1s and the P2 are now **fixed

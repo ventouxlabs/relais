@@ -16,12 +16,13 @@ Please do not open a public issue for an unpatched vulnerability.
   `127.0.0.1:8080` and is reachable only from the device itself (the in-app
   control panel and on-device tooling). The bearer API key therefore never
   crosses the network in cleartext.
-- **Bearer-token auth on everything except `/health`.** A 32-hex-char key is
+- **Bearer- or Basic-token auth on everything except `/health`.** A 32-hex-char key is
   generated per install, stored in `EncryptedSharedPreferences` (Keystore-wrapped),
   shown in the Relais Node control screen, and compared in constant time.
   (`/ca.crt` is also exempt — it serves the node's **public** CA certificate, which
   a client needs *before* it can verify the node at all. See "Verifying the node's
-  certificate" below.)
+  certificate" below.) See **Browser access: HTTP Basic and the cross-site guard**
+  below for why Basic is accepted and what it costs.
 - **Per-IP rate limiting**, with bounded, self-evicting state, in **two separate budgets** per HTTP
   listener:
   - **30 req / 60 s** for the authenticated routes (inference and everything else).
@@ -73,6 +74,78 @@ In-app chat is unaffected: it probes loopback `/health` once per send, via
 budget while the chat completion is charged to the authenticated one, so the two
 never compete — which is what makes this safe regardless of how fast a turn
 fails or how quickly a user sends.
+
+## Browser access: HTTP Basic and the cross-site guard
+
+The status dashboard (`GET /`) and the experiments page are HTML, but no browser
+sends `Authorization: Bearer` on a navigation — so until feature-09 they could not
+be opened in a browser at all. The node now also accepts
+**`Authorization: Basic base64(<anything>:<key>)`**. Leave the username blank at the
+prompt and paste the node key as the password.
+
+**Basic is safe on the wire here** for the same reason Bearer is: the LAN listener is
+TLS-only on `:8443`, and the plaintext listener is bound to `127.0.0.1`. Base64 is
+encoding, not encryption, but the key never crosses the network in cleartext.
+
+**Basic is not free, and the cost is CSRF.** A `Bearer` header has to be set by
+script, and a cross-origin request carrying one triggers a CORS preflight this
+server fails — there is not one `Access-Control-*` header in the tree, and there
+must never be. That made the API CSRF-immune *by accident of the carrier*. Browser-
+cached **Basic** credentials are re-attached by the user agent itself, with no script
+and no preflight. So Basic ships together with a guard, applied at the shared gate to
+**every Basic-authenticated request** rather than to one route:
+
+- **`Sec-Fetch-Site: cross-site` or `same-site` ⇒ `403`.** This header is browser-set
+  and cannot be forged by page script.
+- **`none` and `same-origin` are allowed.** `none` is what a typed URL or a bookmark
+  sends, and an attacker's page cannot cause a request to be labelled `none` — so
+  rejecting it would `403` the operator's very first page load, which is the feature.
+- **Absent header, non-GET method ⇒ fall back to an `Origin`/`Referer` same-origin
+  check** (scheme *and* host *and* port must match the node's own), because Fetch
+  Metadata is not universal — older Safari, some embedded WebViews, and some proxies
+  strip it. Absent `Origin` and `Referer` both ⇒ `403`.
+- **Absent header, GET ⇒ allowed.** A GET is not the state change this guard exists to
+  stop, and a typed URL has no `Origin` to check either.
+- **`Bearer` requests are not affected at all.** No SDK or existing client regresses.
+
+**Operator-visible consequence:** a scripted state change now needs provenance. Plain
+`curl -u ":$KEY" -X POST …` returns `403`; add `-H 'Sec-Fetch-Site: same-origin'` or a
+matching `-H "Origin: https://<phone-ip>:8443"`. Reads are unaffected.
+
+**A 403 here is not an auth failure.** It answers `403 Forbidden` with
+`{"error":{...,"type":"permission_error"}}`, deliberately distinct from
+`authentication_error`: the key was correct and the request *context* was rejected, so
+a client that retries with a refreshed credential can never succeed.
+
+**Residual risk:** a browser too old to send `Sec-Fetch-Site` *and* making a GET gets
+no protection from this guard. That is acceptable on a trusted LAN and is why the
+fallback is scoped to state-changing methods.
+
+### Wire-visible change: a scheme-less `Authorization` header is now rejected
+
+Previously `Authorization: <rawkey>`, with no scheme at all, was **accepted**. That was
+never documented or intended — it was an artefact of `removePrefix("Bearer ")`, which
+returns the string unchanged when the prefix is absent. The README, this file, every
+`*-api.md`, and every example specify `Bearer`. It is now rejected, as is
+`Basic base64(<key>)` with no colon, which would otherwise have reintroduced the same
+hole through the new carrier.
+
+If you have a client sending a bare key, add the `Bearer ` prefix.
+
+The scheme token is matched **case-sensitively** (`Bearer `, `Basic `), which is
+deliberately narrower than RFC 7235's case-insensitive `auth-scheme`. Accepting
+`bearer`/`basic` would be a widening shipped alongside a tightening; nothing in this
+repo or its documentation has ever sent a lowercase scheme.
+
+### The dashboard's 10s auto-refresh spends rate-limit budget
+
+`GET /` refreshes itself every 10 s via `<meta http-equiv="refresh">`. `/` is **not**
+auth-exempt, so each reload is charged the standard **30 req / 60 s** budget: one idle
+dashboard tab costs roughly **20%** of it, two tabs 40%, shared with any SDK traffic
+from the same address. If the budget is exhausted the refresh answers `429` as JSON,
+which carries no refresh tag — so **the refresh chain stops permanently** until the
+operator reloads by hand. Close idle dashboard tabs on a node that is also serving
+inference.
 
 ## What Relais assumes
 
