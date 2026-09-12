@@ -90,10 +90,14 @@ Section heading literal: `MODEL` (same heading treatment).
 |---|---|---|
 | Current-model row label | `SERVING` | value = current model id, verbatim, HTML-escaped, e.g. `litert-community/gemma-4-E4B-it-litert-lm` |
 | Selector `<label for="model">` | `SWITCH MODEL` | muted caps, same as row labels |
-| `<select name="model" id="model">` options | the allowlisted model ids, verbatim, catalog order | current id gets `selected`; option text = the id itself, nothing prettified |
+| `<select name="model" id="model">` options | the provisioned model ids ∪ the configured id, minus any the runtime-compat table rejects, verbatim, **sorted by id** | current id gets `selected`; option text = the id itself, nothing prettified. **Not catalog order:** the only catalog-order source is blocking and network-backed behind a 5-minute TTL, and a page that auto-refreshes every 10s must not depend on a fetch or stall on a cold cache offline |
 | Submit button | `SET MODEL` | caps, bold, letter-spacing 2px — amber primary (§2.4) |
-| Pending hint (selected id ≠ serving id) | `model set: <id> — restart to apply` | 11px muted, under the form; `<id>` HTML-escaped |
+| Pending hint (configured id ≠ resident id) | `model set: <id> — not serving it yet` | 11px muted, under the form; `<id>` HTML-escaped. **Not "restart to apply"** — the swap is in-process and needs no restart. **And not "— swapping"**: this state also arises from a swap that already bailed (target file missing) or rolled back (engine-create failed), and the page carries no swap-liveness signal to tell those apart, so the string states the fact and predicts nothing |
 | Locked state (node `STARTING`) | `model locked while starting` | 11px muted; render the `<select>` + button `disabled` (§2.4) — same race guard as the control screen |
+| No models to offer | *(the whole form is omitted)* | An empty `<select>` beside a live `SET MODEL` reads as broken rather than as "nothing else provisioned" |
+| `400` unknown id page | `unknown model id — no change applied` | Own page, dashboard palette, with a `‹ BACK` link. Nothing is persisted |
+| `400` incompatible page | `<id> cannot be loaded — <reason>` | `<reason>` comes from the runtime-compat table verbatim; both halves HTML-escaped. Nothing is persisted |
+| `503` swap-busy page | `a model swap is already running — retry shortly` | Carries `Retry-After: 25`, matching the request path's answer for the same state. Nothing is persisted |
 
 ### 1.5 Recent requests — `RECENT REQUESTS`
 

@@ -17,14 +17,20 @@ import cc.grepon.relais.data.RelaisModelRef
 import kotlinx.coroutines.delay
 
 /**
- * The single source of truth for "the operator picked a model". Both surfaces that let the user
- * change the served model — the in-chat selector sheet ([RelaisChatActivity]) and the MODELS shell
- * destination ([ModelsScreen]) — MUST persist through here so they can't drift.
+ * The single source of truth for "the operator picked a model". Every surface that lets the user
+ * change the served model — the in-chat selector sheet ([RelaisChatActivity]), the MODELS shell
+ * destination ([ModelsScreen]), and the web dashboard's `POST /select-model` — MUST persist through
+ * here so they can't drift.
  *
  * The divergence this consolidates: the chat sheet used to route a curated ref through
  * `switchModel(ref.modelId)`, which persisted only the id and silently dropped the ref, while
  * ModelsScreen persisted the ref. Now both call [applyRef]/[applyManualId], and both observe the
  * lazy engine reload via [awaitReload].
+ *
+ * The dashboard is the third surface and the one with the tightest ordering constraint: it
+ * DISPATCHES the swap before calling [applyManualId], and persists only if the dispatch won
+ * [RelaisEngine.ensureModelSwapInBackground]'s CAS. Persisting first would let a second submit
+ * mid-swap write config while the swap no-ops, leaving config naming a model nothing is loading.
  */
 object ModelSwitch {
   const val RELOAD_POLL_INTERVAL_MS = 500L
