@@ -73,7 +73,10 @@ node also accepts **HTTP Basic**:
 1. Browse to `https://<phone-ip>:8443/`.
 2. Accept the self-signed-certificate interstitial — it appears **before** the auth prompt. (Install
    the node CA from `GET /ca.crt` to stop seeing it; see `SECURITY.md`.)
-3. At the Basic prompt, leave **username blank** and paste the **node key** as the password.
+3. At the Basic prompt, leave **username blank** and paste the **node key** as the password. Paste it
+   exactly: the password is compared literally, so a trailing space picked up from a notes app or a
+   password manager is part of the key and the prompt will simply reappear. (The `Bearer ` header
+   still tolerates surrounding whitespace — that is long-standing behaviour and unchanged.)
 
 The page auto-refreshes every 10 s. Each refresh spends one of the 30 req / 60 s per-IP budget, so an
 idle tab costs ~20% of it — and if the budget is exhausted the refresh answers JSON, which carries no
