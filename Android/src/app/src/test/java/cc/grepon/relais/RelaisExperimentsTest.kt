@@ -20,6 +20,7 @@ package cc.grepon.relais
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -33,10 +34,11 @@ class RelaisExperimentsTest {
 
   private fun status(
     engineReady: Boolean = true,
+    listenersUp: Boolean = true,
     startupInProgress: Boolean = false,
     modelId: String = "gemma-3n-e4b",
     capabilities: String = "multimodal,tools,reasoning",
-  ) = assembleExperimentsStatus(engineReady, startupInProgress, modelId, capabilities)
+  ) = assembleExperimentsStatus(engineReady, listenersUp, startupInProgress, modelId, capabilities)
 
   // ---- assembler: status mapping mirrors the dashboard (DESIGN.md) ----
 
@@ -58,6 +60,25 @@ class RelaisExperimentsTest {
   fun `assembleExperimentsStatus maps idle to OFFLINE`() {
     val s = status(engineReady = false, startupInProgress = false)
     assertEquals("OFFLINE", s.statusLabel)
+    assertFalse(s.live)
+  }
+
+  @Test
+  fun `assembleExperimentsStatus does not report LIVE when the listeners are down`() {
+    // A bind failure leaves the engine resident and both listeners torn down, so engineReady alone
+    // labelled a node LIVE that nothing could reach — the same defect fixed in the control panel and
+    // the QS tile. The beacon dot keys off `live`, so it must go quiet too, not just the label.
+    val s = status(engineReady = true, listenersUp = false, startupInProgress = false)
+    assertNotEquals("LIVE", s.statusLabel)
+    assertFalse(s.live)
+  }
+
+  @Test
+  fun `assembleExperimentsStatus still reads STARTING while the listeners are binding`() {
+    // The engine is initialised before either listener binds, so ready-without-listeners is an
+    // ordinary window of every healthy start — it must not read OFFLINE.
+    val s = status(engineReady = true, listenersUp = false, startupInProgress = true)
+    assertEquals("STARTING", s.statusLabel)
     assertFalse(s.live)
   }
 

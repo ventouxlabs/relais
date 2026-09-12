@@ -20,6 +20,7 @@ package cc.grepon.relais
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -46,6 +47,7 @@ class RelaisDashboardTest {
 
   private fun liveStatus() = assembleDashboardStatus(
     engineReady = true,
+    listenersUp = true,
     startupInProgress = false,
     thermalStatus = 0,
     decodeTokensPerSec = 5.63,
@@ -62,6 +64,7 @@ class RelaisDashboardTest {
 
   private fun startingStatus() = assembleDashboardStatus(
     engineReady = false,
+    listenersUp = false,
     startupInProgress = true,
     thermalStatus = 0,
     decodeTokensPerSec = 0.0,
@@ -78,6 +81,7 @@ class RelaisDashboardTest {
 
   private fun offlineStatus() = assembleDashboardStatus(
     engineReady = false,
+    listenersUp = false,
     startupInProgress = false,
     thermalStatus = 0,
     decodeTokensPerSec = 0.0,
@@ -118,10 +122,59 @@ class RelaisDashboardTest {
   }
 
   @Test
+  fun `engineReady true with listeners down is not LIVE`() {
+    // The dashboard was the fourth surface keying LIVE on engine readiness alone. A bind failure
+    // leaves the engine resident with both listeners torn down, so this page would report a healthy
+    // node while the endpoints it prints refuse connections. Reachability, not residency.
+    val s = assembleDashboardStatus(
+      engineReady = true,
+      listenersUp = false,
+      startupInProgress = false,
+      thermalStatus = 0,
+      decodeTokensPerSec = 0.0,
+      currentModelId = "litert-community/gemma-4-E4B-it-litert-lm",
+      uptimeSeconds = 120.0,
+      queueDepth = 0,
+      errorsTotal = 0L,
+      shedTotal = 0L,
+      recentRequests = emptyList(),
+      baseUrl = "https://192.168.1.42:8443/v1",
+      apiKeyMasked = "abcd…wxyz",
+      capabilities = "tools,reasoning",
+    )
+    assertNotEquals("LIVE", s.statusLabel)
+    assertFalse("the beacon must not pulse for an unreachable node", s.live)
+  }
+
+  @Test
+  fun `engineReady true with listeners still binding reads STARTING`() {
+    // The engine initialises before either listener binds — an ordinary window of a healthy start.
+    val s = assembleDashboardStatus(
+      engineReady = true,
+      listenersUp = false,
+      startupInProgress = true,
+      thermalStatus = 0,
+      decodeTokensPerSec = 0.0,
+      currentModelId = "litert-community/gemma-4-E4B-it-litert-lm",
+      uptimeSeconds = 5.0,
+      queueDepth = 0,
+      errorsTotal = 0L,
+      shedTotal = 0L,
+      recentRequests = emptyList(),
+      baseUrl = "https://192.168.1.42:8443/v1",
+      apiKeyMasked = "abcd…wxyz",
+      capabilities = "tools,reasoning",
+    )
+    assertEquals("STARTING", s.statusLabel)
+    assertFalse(s.live)
+  }
+
+  @Test
   fun `engineReady true wins over startupInProgress true (impossible state, but robust)`() {
     // If somehow both are true, engineReady wins → LIVE.
     val s = assembleDashboardStatus(
       engineReady = true,
+      listenersUp = true,
       startupInProgress = true,
       thermalStatus = 0,
       decodeTokensPerSec = 0.0,
@@ -170,6 +223,7 @@ class RelaisDashboardTest {
   fun `assembler passes all scalar fields through unmodified`() {
     val s = assembleDashboardStatus(
       engineReady = true,
+      listenersUp = true,
       startupInProgress = false,
       thermalStatus = 3,
       decodeTokensPerSec = 7.77,
@@ -203,7 +257,7 @@ class RelaisDashboardTest {
   @Test
   fun `thermalLabel derived from thermalStatus in assembled status`() {
     val s = assembleDashboardStatus(
-      engineReady = true, startupInProgress = false, thermalStatus = 2,
+      engineReady = true, listenersUp = true, startupInProgress = false, thermalStatus = 2,
       decodeTokensPerSec = 0.0, currentModelId = "x", uptimeSeconds = 0.0,
       queueDepth = 0, errorsTotal = 0L, shedTotal = 0L, recentRequests = emptyList(),
       baseUrl = "https://192.168.1.42:8443/v1", apiKeyMasked = "abcd…wxyz", capabilities = "tools,reasoning",
@@ -312,6 +366,7 @@ class RelaisDashboardTest {
   fun `renderDashboardHtml with injected model id does not contain raw script tag`() {
     val maliciousStatus = assembleDashboardStatus(
       engineReady = true,
+      listenersUp = true,
       startupInProgress = false,
       thermalStatus = 0,
       decodeTokensPerSec = 1.0,
@@ -357,6 +412,7 @@ class RelaisDashboardTest {
   fun `renderDashboardHtml mutes 2xx and keeps 4xx and 5xx request log entries paper-bright with no off-palette hues`() {
     val status = assembleDashboardStatus(
       engineReady = true,
+      listenersUp = true,
       startupInProgress = false,
       thermalStatus = 0,
       decodeTokensPerSec = 1.0,
@@ -417,6 +473,7 @@ class RelaisDashboardTest {
     val rawSentinel = "deadbeefcafef00d1234567890abcdef"
     val status = assembleDashboardStatus(
       engineReady = true,
+      listenersUp = true,
       startupInProgress = false,
       thermalStatus = 0,
       decodeTokensPerSec = 1.0,

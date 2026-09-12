@@ -32,7 +32,7 @@ data class RequestLogEntry(val endpoint: String, val status: Int, val ageSeconds
  * Immutable value type — pure data, no Android types.
  */
 data class DashboardStatus(
-  /** True when the engine is initialized and the service is running. */
+  /** True only when the engine is initialized AND the node's listeners are up — i.e. reachable. */
   val live: Boolean,
   /** Human label for the node state: "LIVE" | "STARTING" | "OFFLINE" (DESIGN.md status mapping). */
   val statusLabel: String,
@@ -74,14 +74,15 @@ fun maskApiKey(key: String): String {
  * Pure assembler: maps raw status inputs to the [DashboardStatus] render model.
  *
  * Status label follows DESIGN.md:
- *  - LIVE     = engineReady (engine fully initialized and running)
- *  - STARTING = !engineReady && startupInProgress (first-run provision/download in progress)
+ *  - LIVE     = engineReady && listenersUp (initialized AND actually reachable)
+ *  - STARTING = otherwise, while startupInProgress (provision/download, or listeners still binding)
  *  - OFFLINE  = neither
  *
  * No I/O, no Context, no Android — fully unit-testable on the JVM.
  */
 fun assembleDashboardStatus(
   engineReady: Boolean,
+  listenersUp: Boolean,
   startupInProgress: Boolean,
   thermalStatus: Int,
   decodeTokensPerSec: Double,
@@ -97,9 +98,14 @@ fun assembleDashboardStatus(
   /** The node's certificate identity (feature-18), or null before the node has ever minted. */
   cert: RelaisCertInfo? = null,
 ): DashboardStatus {
-  val live = engineReady
+  // [engineReady] answers "did the model load?"; only [listenersUp] answers "can anyone reach this
+  // node?". A bind failure leaves the engine deliberately resident with both listeners torn down, so
+  // keying LIVE on readiness alone made this page report a healthy node while printing a base URL
+  // that refuses connections. Same predicate as [cc.grepon.relais.core.computeNodeState] and the
+  // control panel — one meaning of LIVE across every surface.
+  val live = engineReady && listenersUp
   val statusLabel = when {
-    engineReady -> "LIVE"
+    engineReady && listenersUp -> "LIVE"
     startupInProgress -> "STARTING"
     else -> "OFFLINE"
   }

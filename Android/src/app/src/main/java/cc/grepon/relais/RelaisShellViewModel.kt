@@ -136,8 +136,10 @@ class RelaisShellViewModel(app: Application) : AndroidViewModel(app) {
       phase = RelaisNodeProgress.phase,
       downloadReceivedBytes = RelaisNodeProgress.downloadReceivedBytes,
       downloadTotalBytes = RelaisNodeProgress.downloadTotalBytes,
+      listenersUp = RelaisListenerState.listenersUp,
       initFailed = RelaisEngine.lastInitFailed,
       stalledStart = isStalledStart(stalledTicks),
+      startupInProgress = RelaisEngine.startupInProgress,
     )
   }
 }

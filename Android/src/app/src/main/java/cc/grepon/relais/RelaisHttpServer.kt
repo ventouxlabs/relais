@@ -868,6 +868,7 @@ class RelaisHttpServer(
     val dashCaps = RelaisClientConfig.Capabilities(multimodal = RelaisEngine.isMultimodal, tools = true, reasoning = true)
     val dashStatus = assembleDashboardStatus(
       engineReady = RelaisEngine.isReady,
+      listenersUp = RelaisListenerState.listenersUp,
       startupInProgress = RelaisEngine.startupInProgress,
       thermalStatus = ThermalGovernor.statusValue,
       decodeTokensPerSec = metricsJson.optDouble("decode_tokens_per_second", 0.0),
@@ -905,6 +906,7 @@ class RelaisHttpServer(
     val expCaps = RelaisClientConfig.Capabilities(multimodal = RelaisEngine.isMultimodal, tools = true, reasoning = true)
     val expStatus = assembleExperimentsStatus(
       engineReady = RelaisEngine.isReady,
+      listenersUp = RelaisListenerState.listenersUp,
       startupInProgress = RelaisEngine.startupInProgress,
       currentModelId = RelaisConfig.modelId(context),
       capabilities = expCaps.toCapsString(),
