@@ -378,8 +378,19 @@ class RelaisHttpServer(
             path = path,
             authorized = { authorized(authorization) },
             // Lazy, and consulted only for BASIC: Bearer traffic never pays for this.
+            // Named, not positional, and that is load-bearing: parameters 2-5 are four consecutive
+            // `String?`, so ANY permutation of them compiles. The probe would catch a
+            // secFetchSite/origin or referer/host swap, but origin/referer swapped is a silent
+            // weakening no test in the tree observes. Naming them makes that a compile error.
             rejectsAsCrossSite = {
-              rejectsAsCrossSite(method, secFetchSite, origin, referer, hostHeader, tls)
+              rejectsAsCrossSite(
+                method = method,
+                secFetchSite = secFetchSite,
+                origin = origin,
+                referer = referer,
+                host = hostHeader,
+                tls = tls,
+              )
             },
             rateLimitOk = { rateLimiter.allow(ip) },
             exemptRateLimitOk = { exemptRateLimiter.allow(ip) },

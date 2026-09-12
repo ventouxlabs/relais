@@ -212,6 +212,13 @@ class RelaisHttpAuthTest {
 
   // ---------------------------------------------------------------------------
   // 3. challengeHeaders — 401 + HTML only
+  //
+  // Every `emptyList()` row below shares a @Test with a positive row, deliberately. An
+  // `assertEquals(emptyList(), ...)` passes against an implementation that returns empty for
+  // EVERYTHING, so on its own it asserts nothing. Its positive twin is what makes it discriminating
+  // — and the twin has to be in the same test method: split across two tests, an always-empty
+  // implementation fails only one of them, which reads as a single unrelated failure rather than as
+  // the contract being gone. Do not "tidy" these into one-assertion-per-test.
   // ---------------------------------------------------------------------------
 
   private val challenge = """WWW-Authenticate: Basic realm="Relais", charset="UTF-8""""
@@ -298,7 +305,11 @@ class RelaisHttpAuthTest {
     referer: String? = null,
     host: String? = "node:8443",
     tls: Boolean = true,
-  ) = rejectsAsCrossSite(method, sfs, origin, referer, host, tls)
+  ) = rejectsAsCrossSite(
+    // Named for the same reason the production call site is: parameters 2-5 are four consecutive
+    // `String?` and any permutation of them compiles.
+    method = method, secFetchSite = sfs, origin = origin, referer = referer, host = host, tls = tls,
+  )
 
   @Test
   fun `8i Sec-Fetch-Site values, with none and same-origin allowed`() {
@@ -366,6 +377,20 @@ class RelaisHttpAuthTest {
       false,
       cross(origin = "http://node", host = "node", tls = false),
     )
+    // (xv) and (xvi) are METHOD rows in a table about the non-GET fallback, and that is the point:
+    // they pin the boundary between the two checks rather than anything inside either one. Every
+    // other row here runs at the default POST, and 8i's only GET row passes `sfs = null`, so before
+    // these two nothing in the suite paired an explicit Sec-Fetch-Site with a non-POST method.
+    //
+    // (xv) A cross-site GET must STILL be rejected. Hoisting the GET short-circuit above the
+    // Sec-Fetch-Site check — "test the cheap predicate first", an ordinary tidy-up that reads as a
+    // no-op reordering — deletes cross-site-GET protection outright, and passed every row that
+    // existed before this one.
+    assertEquals("xv: a cross-site GET is still rejected", true, cross(method = "GET", sfs = "cross-site"))
+    // (xvi) HEAD is not GET, so it takes the fallback and fails closed. Pins the KDoc's documented
+    // "403 rather than 404" claim, which `!= "POST"` in place of `== "GET"` would otherwise break
+    // silently.
+    assertEquals("xvi: HEAD is not GET and fails closed", true, cross(method = "HEAD"))
   }
 
   /**
