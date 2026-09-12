@@ -217,4 +217,53 @@ class RelaisMetricsIncrementsTest {
     assertEquals("other", RelaisMetrics.endpointLabel("/ca.crtXYZ"))
     assertEquals("other", RelaisMetrics.endpointLabel("/ca.crt?x=1"))
   }
+
+  // --- 5. Ring-buffer opt-out (feature-09 Task 1) -------------------------------------------------
+
+  /**
+   * The dashboard opts its own `200` page-loads out of the recent-request ring buffer, because at a
+   * 10s auto-refresh they would crowd out the 20 slots the panel exists to show.
+   *
+   * Both halves matter and they pull in opposite directions, which is why they are asserted
+   * together: the ring buffer must NOT grow, and the aggregate counter MUST still increment. A
+   * `return` placed one line too early — before `requestCounts` rather than before the append —
+   * passes the first assertion and fails the second, and would silently stop `/metrics` counting
+   * the route.
+   *
+   * **Asserts on CONTENT, not size, and that is deliberate.** The buffer is capped at
+   * `REQUEST_LOG_CAPACITY` = 20 and is process-global across the whole lane, so once it is full its
+   * size is 20 whether or not an append happened — a size-delta assertion would pass vacuously
+   * exactly when the suite is busiest. Each test uses a label unique to itself and asks whether that
+   * label is present.
+   */
+  @Test
+  fun `recordRequest with inRecentLog false skips the ring buffer but still counts`() {
+    val label = "/__optout_probe"
+    RelaisMetrics.recordRequest(label, 200, inRecentLog = false)
+
+    assertTrue(
+      "an opted-out request must not enter the recent-request ring buffer",
+      RelaisMetrics.recentRequests().none { it.endpoint == label },
+    )
+    // The counter half pulls the opposite way: a `return` placed one line too early — before
+    // `requestCounts` rather than before the append — would pass the assertion above and silently
+    // stop /metrics counting the route.
+    val line = RelaisMetrics.renderProm(context).lines()
+      .firstOrNull { it.startsWith("""relais_requests_total{endpoint="$label",status="200"}""") }
+    assertTrue(
+      "the aggregate counter must still be incremented for an opted-out request (line=$line)",
+      line != null && line.substringAfterLast(' ').trim().toLong() >= 1L,
+    )
+  }
+
+  /** The default is unchanged: every other call site keeps appending to the buffer. */
+  @Test
+  fun `recordRequest still appends to the ring buffer by default`() {
+    val label = "/__default_probe"
+    RelaisMetrics.recordRequest(label, 200)
+    assertTrue(
+      "the default must still append — the opt-out is opt-in, not opt-out-by-default",
+      RelaisMetrics.recentRequests().any { it.endpoint == label },
+    )
+  }
 }

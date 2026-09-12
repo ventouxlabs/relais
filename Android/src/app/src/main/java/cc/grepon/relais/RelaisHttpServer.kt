@@ -860,10 +860,13 @@ class RelaisHttpServer(
   }
 
   private fun handleDashboard(ctx: RequestContext) {
-    // Auth-gated (bearer required — same gate as /metrics; the open routes are /health and /ca.crt,
+    // Auth-gated (Bearer or Basic — same gate as /metrics; the open routes are /health and /ca.crt,
     // and both are still rate-limited). Reads only
     // already-collected metrics; no state change. Scriptless + escaped; strict security headers below.
-    RelaisMetrics.recordRequest(ctx.endpoint, 200)
+    // inRecentLog = false: this page auto-refreshes every 10s, and the RECENT REQUESTS panel it
+    // renders holds only 20 slots — self-loads would crowd out the traffic the panel exists to show.
+    // Aggregate counters still increment, so /metrics is unaffected.
+    RelaisMetrics.recordRequest(ctx.endpoint, 200, inRecentLog = false)
     val metricsJson = RelaisMetrics.renderJson(context)
     val dashCaps = RelaisClientConfig.Capabilities(multimodal = RelaisEngine.isMultimodal, tools = true, reasoning = true)
     val dashStatus = assembleDashboardStatus(
