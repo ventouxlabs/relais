@@ -113,17 +113,36 @@ object RelaisClientConfig {
       "caps" to capTxt(caps.toCapsString()),
     )
 
+  /** The unauthenticated CA-export route. One spelling, shared by the note and the `tls` block. */
+  private const val CA_ROUTE = "/ca.crt"
+
   /**
-   * Lead-with-cert-import TLS guidance (security-critical). The node serves a self-signed LAN cert,
-   * so the preferred path is importing it as a trusted CA on the client. Disabling verification is
-   * only mentioned as a scoped fallback (this LAN base URL only) WITH an explicit MITM caveat — we
-   * never emit guidance that globally disables TLS verification.
+   * Lead-with-cert-import TLS guidance (security-critical).
+   *
+   * Before feature-18 this note told clients to "import the relais self-signed cert as a trusted
+   * CA" — advice that could not be followed: there was no route to fetch a certificate from, and
+   * the certificate carried no `subjectAltName`, so importing it would not have made verification
+   * work anyway. The note now names a route that exists and a certificate that verifies.
+   *
+   * The fallback is still stated, still scoped to this one base URL, and still carries the explicit
+   * MITM caveat — we never emit guidance that globally disables TLS verification.
    */
   private const val TLS_NOTE =
-    "This node serves a self-signed certificate. Preferred: import the relais self-signed cert as a " +
-      "trusted CA on the client. Fallback only: if you cannot import the cert, scope any " +
-      "verify-disable to THIS LAN base URL only — never globally — and understand that doing so " +
-      "removes MITM protection for that connection."
+    "This node serves a certificate issued by its own per-node CA. Import the CA once " +
+      "(GET $CA_ROUTE) and pass it per connection, e.g. curl --cacert relais-ca.crt. " +
+      "TRUST ON FIRST USE: this release has no way to verify the CA out of band. Fetching it over " +
+      "a link an attacker already controls means trusting whatever they serve, and the fingerprint " +
+      "shown on the node's status page does NOT help — it arrives over the same connection, so an " +
+      "interceptor supplies both. Fetch the CA over a network you trust (your own LAN, or a USB " +
+      "tether); out-of-band verification lands in a later release. " +
+      "After that first fetch you get the full property: no more disabled verification, and real " +
+      "MITM protection on every subsequent connection. The imported CA stays valid across " +
+      "re-issues, so you do not re-import when the node's address changes — but the certificate is " +
+      "re-issued at node start, so any address change — including one during boot — is not picked " +
+      "up until the node restarts. " +
+      "Fallback only: if you cannot import the CA, scope any verify-disable to THIS LAN base URL " +
+      "only — never globally — and understand that doing so removes MITM protection for that " +
+      "connection."
 
   /** Open WebUI configuration block: connection env vars plus the cert-import note. */
   fun buildOpenWebUiBlock(baseUrl: String, apiKey: String): JSONObject =
@@ -172,6 +191,8 @@ object RelaisClientConfig {
     apiKey: String,
     modelId: String,
     caps: Capabilities,
+    caFingerprint: String? = null,
+    nodeKeyPin: String? = null,
   ): JSONObject =
     JSONObject()
       .put("base_url", baseUrl)
@@ -193,7 +214,25 @@ object RelaisClientConfig {
       .put(
         "tls",
         JSONObject()
+          // Still true, and still the point: the trust root is the node's own CA, which no public
+          // authority vouches for. What changed is that it can now be imported and will verify.
           .put("self_signed", true)
-          .put("note", TLS_NOTE),
+          .put("note", TLS_NOTE)
+          .put("ca_url", caUrl(baseUrl))
+          .apply {
+            // Absent rather than null when the node has not minted yet — a client must not be able
+            // to read an empty string as a fingerprint and "check" it.
+            caFingerprint?.let { put("ca_fingerprint", it) }
+            nodeKeyPin?.let { put("node_key_pin", it) }
+          },
       )
+
+  /**
+   * The absolute `/ca.crt` URL for a client that already reached [baseUrl].
+   *
+   * Derived from the base URL rather than rebuilt from an IP, so it names the exact host:port the
+   * caller just used — including the loopback case behind `adb forward`, where re-deriving from the
+   * LAN address would hand back a URL that host cannot reach.
+   */
+  private fun caUrl(baseUrl: String): String = baseUrl.removeSuffix("/v1") + CA_ROUTE
 }

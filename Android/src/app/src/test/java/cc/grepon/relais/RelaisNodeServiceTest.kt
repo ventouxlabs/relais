@@ -36,21 +36,41 @@ class RelaisNodeServiceTest {
 
   @Test
   fun `dispatch is needed when not ready and nothing already in flight`() {
-    assertTrue(shouldDispatchStartup(ready = false, dispatchInFlight = false))
+    assertTrue(shouldDispatchStartup(ready = false, dispatchInFlight = false, listenersUp = false))
   }
 
   @Test
   fun `dispatch is skipped when a startup is already in flight`() {
-    assertFalse(shouldDispatchStartup(ready = false, dispatchInFlight = true))
+    assertFalse(shouldDispatchStartup(ready = false, dispatchInFlight = true, listenersUp = false))
   }
 
   @Test
   fun `dispatch is skipped once the engine is already ready`() {
-    assertFalse(shouldDispatchStartup(ready = true, dispatchInFlight = false))
+    assertFalse(shouldDispatchStartup(ready = true, dispatchInFlight = false, listenersUp = true))
+  }
+
+  /**
+   * The case that made a bind failure permanent: engine ready, listeners gone.
+   *
+   * A TLS bind failure on `:8443` leaves `isReady` true, so gating on `ready` alone meant no later
+   * START retried and the node reported LIVE with no HTTPS listener — forever, even after the port
+   * conflict cleared. Making the failure *visible* (round 5) did not make it *recoverable*; this is
+   * what does.
+   */
+  @Test
+  fun `dispatch is needed when the engine is ready but the listeners are gone`() {
+    assertTrue(shouldDispatchStartup(ready = true, dispatchInFlight = false, listenersUp = false))
+  }
+
+  @Test
+  fun `a retry is still refused while one is already in flight, listeners or not`() {
+    // The in-flight guard outranks the new condition — otherwise every START during a slow retry
+    // would launch another init thread.
+    assertFalse(shouldDispatchStartup(ready = true, dispatchInFlight = true, listenersUp = false))
   }
 
   @Test
   fun `dispatch is skipped when ready even if dispatchInFlight is stale-true`() {
-    assertFalse(shouldDispatchStartup(ready = true, dispatchInFlight = true))
+    assertFalse(shouldDispatchStartup(ready = true, dispatchInFlight = true, listenersUp = true))
   }
 }

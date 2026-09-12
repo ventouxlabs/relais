@@ -136,6 +136,15 @@ class RelaisShellViewModel(app: Application) : AndroidViewModel(app) {
       phase = RelaisNodeProgress.phase,
       downloadReceivedBytes = RelaisNodeProgress.downloadReceivedBytes,
       downloadTotalBytes = RelaisNodeProgress.downloadTotalBytes,
+      // Read BEFORE listenersUp — the order of these two reads is load-bearing. They are separate
+      // volatile fields, so a poll descheduled between them composes a state that never existed at
+      // any instant. The invariant that makes THIS order the safe one: startup is never published
+      // as finished before the listeners it started are published. Under it, a stale read here can
+      // only over-report STARTING, which the next tick corrects; the opposite order could take
+      // "listeners down" and "startup finished" from either side of that publish and render
+      // OFFLINE — a START button on a node that just came up healthy.
+      startupInProgress = RelaisEngine.startupInProgress,
+      listenersUp = RelaisListenerState.listenersUp,
       initFailed = RelaisEngine.lastInitFailed,
       stalledStart = isStalledStart(stalledTicks),
     )

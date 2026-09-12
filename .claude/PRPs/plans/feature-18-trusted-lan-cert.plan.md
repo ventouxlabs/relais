@@ -577,14 +577,15 @@ private fun ActionLink(label: String, onClick: () -> Unit) {
   - `buildSanList(addrs: List<InetAddress>): List<GeneralName>` — always prepend `127.0.0.1` (iPAddress),
     `::1` (iPAddress), `localhost` (dNSName); append `relais-node.local` (dNSName); then T1's addresses
     as `iPAddress`. Dedupe, stable sort, then **cap the final list at 32 — the single cap in the whole
-    pipeline** (T1 does not cap). The four fixed entries are prepended *before* the cap and are never
+    pipeline** (T1 does not cap). **As-built the fixed set is two, not four** — `::1` and
+    `relais-node.local` were both removed as certified-but-unreachable; see assumption A2 and the
+    `.local` risk row. The text above is the original spec, kept for the record.
+    The fixed entries are prepended *before* the cap and are never
     the ones dropped, so a multi-homed device loses only surplus real addresses, never loopback.
   - `mintCa(): KeyStore` — EC P-256 (`KeyPairGenerator.getInstance("EC")` + `ECGenParameterSpec("secp256r1")`),
     `SHA256withECDSA`, `CN=Relais Node CA (<8 hex chars of the SPKI hash>)`, 10 years,
-    `BasicConstraints(0)` critical, `KeyUsage(keyCertSign or cRLSign)` critical. **NameConstraints are
-    gated on open question 5 — do not add them by default.** If JD keeps them, every SAN from
-    `buildSanList` (loopback IPs, `localhost`, `.local`, LAN/overlay CIDRs) must fall inside a permitted
-    subtree or the leaf is rejected by Java's PKIX validator (research R3).
+    `BasicConstraints(0)` critical, `KeyUsage(keyCertSign or cRLSign)` critical. **No NameConstraints — see open question 5, decided
+    then reversed.** They were implemented and removed; do not re-add them.
   - `mintLeaf(caKey, caCert, leafPublicKey, sans): X509Certificate` — `SHA256withECDSA` (the **CA's**
     key signs), 90 days, backdated 60s for skew (mirroring `RelaisTls.kt:80`), `BasicConstraints(false)`,
     `KeyUsage(digitalSignature or keyEncipherment)`, `ExtendedKeyUsage(id_kp_serverAuth)`,
@@ -1029,6 +1030,24 @@ adb shell 'logcat -d -s RelaisTls:* | tail -20'   # expect a re-mint + rebind af
 curl --cacert relais-ca.crt https://<phone-ip>:8443/health   # must verify, not just answer
 #    Re-run with Wi-Fi disabled at boot and enabled 60s later — same expectation.
 
+# 9a. EVERY SAN MUST HAVE SOMETHING LISTENING ON IT — the only check of cert-vs-listener.
+openssl s_client -connect <phone-ip>:8443 </dev/null 2>/dev/null \
+  | openssl x509 -noout -text | grep -A2 "Subject Alternative Name"
+#     then for EVERY address listed:
+curl --cacert relais-ca.crt --max-time 5 https://<that-address>:8443/health   # must answer
+#     The GET / SAN row reports what the CERT carries and can be correct while nothing serves the
+#     address — that is how IPv6 was certified against an IPv4-only listener, invisibly to an
+#     IPv4-only hardware run.
+
+# 9b. STOP MUST ACTUALLY STOP (security review H2) — RELEASE-BLOCKING, no test covers it.
+#     Run from a SECOND machine. Start the node, then stop it from the app:
+curl -k --max-time 5 https://<phone-ip>:8443/health   # after STOP: must FAIL to connect
+nmap -Pn -p 8443 <phone-ip>                           # after STOP: 8443 must NOT be open
+#     Repeat with a network change between start and stop — a queued NetworkCallback post is what
+#     resurrects the listener. A listener still answering here means every user-visible surface
+#     (notification, QS tile, control panel, mDNS) says "off" while :8443 serves the LAN, with no
+#     in-app way to stop it.
+
 # 10. RELEASE BUILD (M5) — R8 is on (build.gradle.kts:146) and CI runs none of it.
 #     Install the release APK on rango, start the node cold (forces a fresh mint), then repeat step 3.
 #     A NoClassDefFoundError / NoSuchAlgorithmException from BouncyCastle here means proguard-rules.pro
@@ -1098,7 +1117,7 @@ curl --cacert relais-ca.crt https://<phone-ip>:8443/health   # must verify, not 
 | A QR dependency drags in a GMS-tainted transitive | Low | Medium — breaks the degoogled gate | Verify the real closure against `build_android.yaml:73-86`; hand-rolled encoder sidesteps it |
 | Multi-interface device (VPN + Wi-Fi + tethering) churns the SAN set and re-mints every start | Low | Low | Stable sort + set equality + the 32 cap; re-mint is cheap |
 | A node up >90 days serves an expired leaf | Low | Medium | Re-mint at 15 days remaining, checked on start. **Accepted gap** — a periodic timer is a follow-up |
-| `.local` SAN implies a name that does not resolve | Low | Low | Present in the cert, absent from every doc and UI string (assumption A2) |
+| ~~`.local` SAN implies a name that does not resolve~~ **HAPPENED** | ~~Low~~ | ~~Low~~ | **Mitigation was false.** "Absent from every UI string" was untrue the moment T6 shipped the certificate panel: `RelaisDashboard.kt` renders the whole SAN set, so the unresolvable name was displayed as covered. Fixed by removing it (A2), not by hiding it |
 | QR is a new visual element with no DESIGN.md precedent | Medium | Low | Needs JD's explicit sign-off; amber-on-charcoal, no new color, no motion |
 
 ## Notes
@@ -1117,7 +1136,15 @@ curl --cacert relais-ca.crt https://<phone-ip>:8443/health   # must verify, not 
 - **A1.** The Android Tailscale client exposes **no** third-party API for `tailscale cert` — no CLI, no
   documented intent/AIDL surface. Not verified this pass; it collapses option (b) to documentation.
 - **A2.** `NsdManager` gives the app no control over the mDNS **host** A record, so the `.local` name
-  the device answers to is neither knowable nor stable from app code.
+  the device answers to is neither knowable nor stable from app code. **VERIFIED 2026-09-10, and it
+  holds.** `NsdServiceInfo` exposes `getHostname()` and no `setHostname()` in android-36 (the
+  compileSdk) or android-37, so the host record is the platform's to choose. `serviceName =
+  "relais-node"` registers the DNS-SD *service instance* `relais-node._relais._tcp.local`, which is
+  a different namespace from the *host* A record `relais-node.local`. On the device, the platform's
+  name derived from `device_name` (`portage-e2e-comet`), and `relais-node.local` did not resolve.
+  Consequence: `relais-node.local` was **removed** from the fixed SAN set, which is now two entries
+  (`127.0.0.1`, `localhost`). The risk row below was accepted on a premise this implementation
+  invalidated — see it.
 - **A3.** An EC P-256 self-signed CA is ~400-550 bytes DER. **A claim to test, not to trust** — T7's
   capacity assertion runs against the real minted DER.
 
@@ -1220,10 +1247,27 @@ the *client*, this authenticates the *server*. Would compose cleanly on top of t
    this is narrowly about the element. Approve, or is share-sheet + fingerprint text enough for v1?
 4. **`com.google.zxing:core` vs a ~200-line hand-rolled encoder** (T7) — dependency footprint and
    GMS-gate confidence vs code to own.
-5. ~~Keep NameConstraints or drop them?~~ **DECIDED (JD, 2026-09-07): keep them**, scoped to the node's
-   own SAN set. Defense in depth against a key-extraction scenario, not against a routine bug — enumerate
-   carefully so they don't break the loopback path (research R3), and cover the loopback-still-works
-   case explicitly in `RelaisCertMintTest`.
+5. ~~Keep NameConstraints or drop them?~~ **DECIDED (JD, 2026-09-07): keep them, scoped to the node's
+   own SAN set. REVERSED (JD, 2026-09-08): drop them entirely.** The reversal was driven by evidence
+   found while implementing, not by a change of mind:
+   - **Inert where it mattered most.** Java's PKIX validator cannot enforce a trust anchor's own name
+     constraints (it reads them from the `TrustAnchor` object, never the anchor certificate, and
+     refuses them if supplied); BouncyCastle's accepts the parameter and ignores it — measured, it
+     validated a leaf for `8.8.8.8` under a CA that prohibited it. Every Java/Android/JSSE client got
+     zero benefit.
+   - **Actively harmful on the documented path.** `allLanAddresses()` admits globally routable IPv4,
+     so on a cellular hotspot or a public-IP ISP the leaf carries a prohibited SAN and
+     `curl --cacert` — the flow SECURITY.md recommends — rejects the entire chain.
+   - **Critical means fail-closed for unknown verifiers** (RFC 5280 requires criticality; a verifier
+     that processes but does not understand it must reject).
+   - **Untestable in CI**, as a consequence of the first point. An early version of the tests passed
+     `TrustAnchor(ca, null)`, which applies no constraints, so three tests were green while asserting
+     nothing.
+   The benefit was partial regardless: constraints never limited issuance for LAN addresses, which is
+   where an attacker on the LAN already sits. `RelaisCertMintTest` now pins the **absence** of the
+   extension so it is not re-added as a presumed oversight. The loopback/cross-range concern from
+   research R3 is retained as a test of the CA/leaf split itself (`a CA minted on one network still
+   validates a leaf minted on another`), which is what acceptance criterion 3 rests on.
 6. **Document the system-store CA install at all, or `--cacert`-only?** Documenting it is more useful
    and more dangerous.
 7. **Is A1 right — does Android Tailscale really expose no cert issuance to third-party apps?** If it

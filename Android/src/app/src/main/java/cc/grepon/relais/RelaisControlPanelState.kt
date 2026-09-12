@@ -59,7 +59,17 @@ data class RelaisControlPanelState(
  * Assembles [RelaisControlPanelState] from raw engine/provisioner signals. [ready]/[running] mirror
  * [RelaisEngine.isReady] / [RelaisConfig.shouldRun]; [thermalShedding] mirrors
  * [ThermalGovernor.shouldShed]; [phase] and the download byte counts mirror [RelaisNodeProgress];
- * [initFailed] mirrors [RelaisEngine.lastInitFailed] (already consumed by the QS tile).
+ * [initFailed] mirrors [RelaisEngine.lastInitFailed] (already consumed by the QS tile);
+ * [listenersUp] mirrors [RelaisListenerState.listenersUp]; [startupInProgress] mirrors
+ * [RelaisEngine.startupInProgress].
+ *
+ * [listenersUp] is deliberately **required** while every other added signal is defaulted, and the
+ * asymmetry is the safety property: omitting [startupInProgress] can only under-report (STARTING
+ * degrades to OFFLINE, an honest state that still offers the retry), whereas omitting [listenersUp]
+ * would fabricate reachability — a false LIVE for a node nothing can reach, which is exactly the
+ * defect this parameter exists to prevent. A new surface must not be able to opt into that by
+ * saying nothing. (Better still, a new surface should read [RelaisNodeController.state] instead of
+ * re-deriving this at all.)
  *
  * [initFailed] only produces the failed-init message while [running] is still true (review M1):
  * `RelaisNodeService` sets `lastInitFailed=true` on a failed attempt (e.g. a first-run gated-repo
@@ -76,8 +86,10 @@ fun computeControlPanelState(
   phase: ProvisionPhase,
   downloadReceivedBytes: Long,
   downloadTotalBytes: Long,
+  listenersUp: Boolean,
   initFailed: Boolean = false,
   stalledStart: Boolean = false,
+  startupInProgress: Boolean = false,
 ): RelaisControlPanelState {
   // Still "running" (shouldRun=true) but the engine never came up and won't on its own: an honest
   // failed state, not a perpetual "STARTING · resolving model…" with nothing happening behind it.
@@ -87,7 +99,18 @@ fun computeControlPanelState(
   //  - no init attempt is running at all: the service was killed   -> stalledStart
   //    (OS kill, crash, or an APK reinstall under a persisted shouldRun=true). Nothing sets
   //    lastInitFailed in that case, so the panel used to show indefinite fake progress.
-  val failed = running && !ready && (initFailed || stalledStart)
+  // Engine readiness answers "did the model load?"; only [listenersUp] answers "can anyone reach
+  // this node?" — and the panel's whole job is the second question. A bind failure leaves the engine
+  // deliberately resident with both listeners torn down, so keying LIVE on [ready] advertised two
+  // endpoints that refuse connections. Mirrors [cc.grepon.relais.core.computeNodeState] and
+  // [RelaisWatchdogReceiver], which is the point: one predicate, not four that drift.
+  val reachable = ready && listenersUp
+  // A THIRD way to be running-but-dead, alongside [initFailed] and [stalledStart]: the engine came
+  // up, nothing is listening, and no attempt is in flight that would change that. [startupInProgress]
+  // is what keeps the ordinary startup window out of here — the engine is initialised before either
+  // listener binds, so ready-without-listeners is a normal sub-second state of every healthy start.
+  val unreachable = running && ready && !listenersUp && !startupInProgress
+  val failed = running && !reachable && (initFailed || stalledStart || unreachable)
   // The two signals are NOT mutually exclusive, and treating them as such was a real regression:
   // after ANY failed init, RelaisNodeService's `finally` clears startupInProgress while
   // lastInitFailed stays true, so the stall debounce fires ~3 polls later and BOTH are set. The init
@@ -96,7 +119,10 @@ fun computeControlPanelState(
   // generic "node not running" copy replace it three seconds after every failure would bury it.
   val stalledOnly = stalledStart && !initFailed
   val status = when {
-    ready -> NodeStatus.LIVE
+    reachable -> NodeStatus.LIVE
+    // Before the failed arm: the engine is up and the listeners are still binding. Rendering this
+    // OFFLINE would flash a START button through the tail of every healthy start.
+    ready && startupInProgress -> NodeStatus.STARTING
     failed -> NodeStatus.OFFLINE // OFFLINE-rendered on purpose (§ review M1): retry via START, never CANCEL-locked.
     running -> NodeStatus.STARTING
     else -> NodeStatus.OFFLINE
@@ -111,7 +137,7 @@ fun computeControlPanelState(
   return RelaisControlPanelState(
     status = status,
     statusWord = status.name,
-    detailLine = controlPanelDetailLine(status, failed, stalledOnly, modelDisplayName, thermalShedding, phase, downloadReceivedBytes, downloadTotalBytes),
+    detailLine = controlPanelDetailLine(status, failed, stalledOnly, unreachable, modelDisplayName, thermalShedding, phase, downloadReceivedBytes, downloadTotalBytes),
     detailLineBright = thermalShed || failed,
     primaryAction = when (status) {
       NodeStatus.LIVE -> PrimaryAction.STOP
@@ -133,6 +159,8 @@ internal fun controlPanelDetailLine(
   failed: Boolean,
   /** Stalled AND not a failed init — see [computeControlPanelState]'s `stalledOnly`. */
   stalledOnly: Boolean,
+  /** Engine resident, nothing listening, no attempt in flight — see [computeControlPanelState]. */
+  unreachable: Boolean,
   modelDisplayName: String,
   thermalShedding: Boolean,
   phase: ProvisionPhase,
@@ -140,6 +168,12 @@ internal fun controlPanelDetailLine(
   downloadTotalBytes: Long,
 ): String =
   when {
+    // FIRST, ahead of the failed-init arm, because the real bind failure sets BOTH: the catch that
+    // tears the listeners down also sets lastInitFailed. "check model/token" is then actively wrong
+    // — the model loaded, the socket is what failed — and this is the same mistake #217 split the
+    // stalled copy out to avoid. [unreachable] is the strictly more specific diagnosis: we know
+    // nothing is listening, rather than inferring that something went wrong.
+    status == NodeStatus.OFFLINE && unreachable -> "endpoints down · press START to retry"
     // A stalled start and a failed init are both "OFFLINE + press START", but they are NOT the same
     // problem and must not share copy: "check model/token" is actively misleading advice when the
     // node simply isn't running. Checked before the generic failed arm (#217) — safe to put first

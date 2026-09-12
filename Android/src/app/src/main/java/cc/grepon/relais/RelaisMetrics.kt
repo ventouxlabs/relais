@@ -306,6 +306,11 @@ object RelaisMetrics {
       raw == "/automation" -> "/automation" // Tasker/Automate intent ABI (#8)
       raw == "/metrics" -> "/metrics"
       raw == "/health" -> "/health"
+      // feature-18's CA export. Exact `==` like every arm here — deliberately NOT routed through
+      // RelaisHttpGate.isCaCertPath, even though that predicate is also exact: see the NOTE above.
+      // This function guards label cardinality over an already-normalized value; the gate answers a
+      // different question about a raw path.
+      raw == "/ca.crt" -> "/ca.crt"
       raw == "/" -> "/"
       else -> "other"
     }

@@ -105,7 +105,7 @@ and `resetIncrementsForTest` — #19 rebases. Each plan's `Cross-plan` section n
 **Five decisions RESOLVED (JD, 2026-09-07) — plans updated, ready to build against:**
 - ✅ #18 Q2 — exempt-route rate-limit budget: **the existing 30/60s (`RATE_LIMIT`/`RATE_WINDOW_MS`),
   unchanged.** No new constant. Unmetered-failed-auth (Decision 10) accepted as-is, no follow-up scheduled.
-- ✅ #18 Q5 — NameConstraints: **keep them**, scoped to the node's own SAN set.
+- ✅ #18 Q5 — NameConstraints: ~~keep them~~ **REVERSED 2026-09-08: drop them entirely.** Unenforceable by any JVM/Android verifier, and they break `curl --cacert` on a node holding a public IP. See the plan's Q5 entry for the full reasoning; `RelaisCertMintTest` pins the absence.
 - ✅ #18 Q8 — RFC1918/overlay SANs: **no opt-out, keep all LAN addresses.** Documented as a pre-auth
   disclosure in Δ10 and SECURITY.md; not worth a config surface.
 - ✅ #22 stepper ladder: **non-linear 1/5/15/30/60**, keeps the 1-minute floor. `RelaisIdleTtl.kt` is
@@ -195,6 +195,112 @@ alone) → #09 delta → #22 gap-closure → #17 → #18 rest → #19/#21 → #2
 5. ~~Stale G5/E4B claim~~ **FIXED directly** (no issue needed) — `SPIKE-FINDINGS.md` and `CLAUDE.md` both
    updated 2026-09-07 with the 0.12.0-fixed / 0.11.0-and-0.13.1-broken reconciliation.
 6. [#313](https://github.com/ventouxlabs/relais/issues/313) — mDNS TXT `model=` goes stale after every #180 hot-swap.
+
+### feature-18 PR A — follow-ups for the PR body
+
+Two, both filed, both to be listed under "Follow-ups" when PR A is opened:
+
+- **[#320](https://github.com/ventouxlabs/relais/issues/320)** — bind dual-stack AND restore IPv6
+  SANs (one change, not two).
+- **[#321](https://github.com/ventouxlabs/relais/issues/321)** — restore the boot-race LAN rebind
+  (T5b), cut from PR A after eight review rounds.
+
+Also for the PR body: **an IPv6-only client cannot reach the node**, and **a network change needs a
+node restart**. Both are true of this release regardless of the certificate work — the listener is
+IPv4-only and re-issue is computed at start — so state them as documented limitations rather than
+regressions.
+
+### Follow-up from feature-18 PR A — FILED as [#320](https://github.com/ventouxlabs/relais/issues/320)
+
+**"Bind dual-stack AND restore IPv6 SANs" — one issue, one change, not two.**
+
+PR A stopped putting IPv6 addresses in the leaf certificate (including `::1`), because both
+listeners are IPv4-only (`0.0.0.0:8443`, `127.0.0.1:8080`) and certifying an address nothing serves
+is a false promise — a status page reports it as covered, truthfully about the certificate and
+wrongly about the node. Decided by the team lead 2026-09-09, within JD's Q8 call rather than against
+it: Q8 was about *disclosure* (don't hide addresses from a pre-auth scanner), this is about not
+certifying the unreachable. Nothing is hidden for privacy.
+
+**Consequence to state plainly wherever this is discussed: an IPv6-only client cannot reach the
+node.** That is true of this release regardless of the certificate — the listener is IPv4-only — so
+this is a documentation gap being closed, not a capability removed.
+
+The two halves must land **together**. Binding dual-stack without restoring the SANs leaves a
+reachable address the certificate does not cover; restoring the SANs without binding reproduces
+exactly the defect PR A just fixed. Either alone recreates the mismatch from the other side.
+
+Care needed when it is done: dual-stack behaviour varies across Android versions and with
+`java.net.preferIPv4Stack`, and the listener lifecycle is the mechanism that needed five separate
+corrections during PR A — so it wants its own PR and its own device session, not a fold-in.
+
+### Follow-up from feature-18 PR A — FILED as [#321](https://github.com/ventouxlabs/relais/issues/321)
+
+**"Restore the boot-race LAN rebind (feature-18 T5b), cut from PR A."** The issue body is the text
+below, posted verbatim; kept here because the ten-defect history is the part worth finding from
+either direction.
+
+---
+
+**Restore the boot-race LAN rebind (feature-18 T5b), cut from PR A**
+
+`RelaisBootReceiver` starts the node on `BOOT_COMPLETED`, before DHCP completes, so the leaf is
+minted **loopback-only** and every LAN client fails hostname verification until someone restarts the
+node — in exactly the unattended-appliance mode the README advertises. T5b was a one-shot
+`ConnectivityManager.NetworkCallback` that re-minted and rebound `:8443` when the LAN appeared.
+
+**It was built, reviewed eight times, and cut (JD, 2026-09-10).** The goal is right and the boot race
+is real; the mechanism could not be stabilised inside a PR that was otherwise ready.
+
+**Why it was cut — the history is the most valuable part of this issue.** Across eight `codex review`
+rounds, nearly every P1 lived in T5b; the CA, SAN set, EKU, `/ca.crt`, the handshake test and the
+TOFU docs went quiet after round 4. Distinct defects found in this one mechanism:
+
+1. Plan's version was inert — `RelaisTls` has no reference to the running listener and cannot rebind.
+2. Arming predicate inverted — gated on `needsLanReissue`, which is false in the boot race itself.
+3. Self-disarming — a callback arriving before DHCP consumed the one-shot.
+4. Keyed on callback identity, not observed addresses — `onAvailable` does not re-fire on address
+   assignment, so the one callback received was spent on a moment with nothing to do.
+5. Orphaned socket — `stop()` racing startup read a stale null and closed nothing.
+6. Destroyed-flag TOCTOU — the guard was separated from the construction by a re-issue.
+7. Listener outliving the service — a queued task built a listener on `applicationContext` after
+   `onDestroy`; every user-visible surface said "stopped" while `0.0.0.0:8443` served the LAN.
+8. Mint-vs-rebind — two threads could each mint a *different* leaf key, breaking the SPKI pin.
+9. Publish-gap bind race — a replacement losing the bind exited silently, leaving no listener.
+10. Failed rebind left a stale reference to a *stopped* server that liveness checks read as healthy.
+
+**Two of the last round's findings were created by the previous round's fixes.** That is the shape
+that ended it: each fix correct, each opening the adjacent hole. Notably the SAN-narrowing guard
+(added to stop a transient drop downgrading a good certificate) turned out to permanently reject a
+*legitimate* network change — initial mint sees A, DHCP switches to B, the forced re-issue snapshots
+only B, the guard rejects it as narrowing, and every retry repeats the rejection. The rule could not
+distinguish "lost an interface transiently" from "moved networks".
+
+**What PR A kept**, because each is an improvement to the listener in its own right and several fix
+real bugs on the plain startup path:
+- `RelaisHttpServer.start()` binds **synchronously** and propagates failure; `stop()` joins the
+  accept thread. This removed a whole class of race rather than guarding it.
+- `RelaisHttpServer.isListening` — asks the socket, not a field. A stopped server is still non-null.
+- `startHttpsListener()` as the single owner of listener construction and its failure contract.
+  **Whoever restores the rebind should call it rather than repeat it.**
+- `shouldDispatchStartup(..., listenersUp)` so a failed bind is recoverable, not just visible.
+- `@Synchronized loadOrMint` — the mint is one transaction, so two callers cannot mint different
+  leaf keys.
+- IPv4-only SAN set (see #320 for the IPv6 half).
+
+**Requirements when restoring:**
+- Its own PR and its own device session. **Nothing in the JVM lane can reach a `Service`**, so every
+  defect above was found by reading or by review, never by a test. Treat hardware verification as
+  the gate, not CI.
+- Re-run the manual checks in `CertReissueProbe`'s header — especially **stop-must-actually-stop**,
+  from a second machine, repeated after a network change.
+- Expect the SAN-narrowing question to return: a forced re-issue must not downgrade on a transient
+  drop, *and* must not refuse a genuine move. Those need distinguishing by something other than the
+  SAN set alone.
+
+**Current behaviour without it:** the leaf is minted at node start; a network change (including one
+during boot) needs a restart. `SECURITY.md` documents exactly this.
+
+---
 
 ### Process notes from this session
 

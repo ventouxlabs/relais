@@ -53,9 +53,23 @@ private const val IDLE_TTL_POLL_INTERVAL_MS = 60_000L
  * without a Context/Service. The real concurrency guard is an `AtomicBoolean.compareAndSet` in
  * [RelaisNodeService] itself — this predicate is a readable pre-check, not the sole source of
  * atomicity (this file can't observe a CAS race in a plain JVM test).
+ *
+ * [listenersUp] is why `ready` alone is not enough. A TLS bind failure on `:8443` after loopback
+ * `:8080` has already started leaves the engine resident and `isReady` true — so gating only on
+ * `ready` meant no later START would retry, and the node reported **LIVE** with no HTTPS listener,
+ * permanently, even once the port conflict cleared.
+ *
+ * That was introduced by making bind failure *propagate* rather than be swallowed. The lesson is
+ * worth stating where the fix lives: **making a failure visible is not the same as making it
+ * recoverable.** The old code hid the error and left no listener; the new code surfaced it and left
+ * a node that claimed to be up. Both leave the user unable to connect; the second is more confident
+ * about it.
  */
-internal fun shouldDispatchStartup(ready: Boolean, dispatchInFlight: Boolean): Boolean =
-  !ready && !dispatchInFlight
+internal fun shouldDispatchStartup(
+  ready: Boolean,
+  dispatchInFlight: Boolean,
+  listenersUp: Boolean,
+): Boolean = (!ready || !listenersUp) && !dispatchInFlight
 
 /**
  * Headless foreground service that hosts the resident multimodal engine (Gate 1) and the LAN
@@ -151,8 +165,52 @@ class RelaisNodeService : Service() {
    * [shouldDispatchStartup] is a readable pre-check; [startupDispatchInFlight]'s `compareAndSet` is
    * what actually makes concurrent calls (onCreate racing onStartCommand, repeated START taps) safe.
    */
+  /**
+   * Stops and releases both listeners, leaving the fields null and the shared state false.
+   *
+   * **The rule: never clear or replace a listener reference without stopping what it points at.**
+   * A dropped reference to a *live* server is unreachable and still owns its port, so the next bind
+   * collides with an orphan nothing can stop — and every retry after that fails identically while
+   * the service reports no listeners. That is an unrecoverable node produced by the recovery path
+   * itself.
+   *
+   * This must be unconditional at the start of a retry, not a branch. [RelaisListenerState] is an
+   * AND of two independent listeners, so "one down, one up" is not a rare case — it is half the
+   * state space, and it is exactly the case a retry meets. Making that state *visible* did not make
+   * its transitions safe.
+   *
+   * `stop()` is safe to call on an already-stopped server (it closes a closed socket under
+   * `runCatching`, joins a null thread, and shuts down an idle pool), so the double-stop a caught
+   * failure can produce is a no-op rather than something to guard.
+   */
+  private fun stopListeners() {
+    runCatching { httpServer?.stop() }
+    runCatching { httpsServer?.stop() }
+    httpServer = null
+    httpsServer = null
+    refreshListenerState()
+  }
+
+  /**
+   * Recomputes [RelaisListenerState.listenersUp] from the live sockets and returns it.
+   *
+   * The single place the predicate is written. `isListening`, not `!= null`: a stopped server is
+   * still a non-null field, so a null check answered "did someone assign this?" rather than "is a
+   * listener up?" — which is how a failed rebind once became permanent, and how a bind failure came
+   * to report LIVE. Ask the artefact.
+   */
+  private fun refreshListenerState(): Boolean {
+    val up = httpServer?.isListening == true && httpsServer?.isListening == true
+    RelaisListenerState.listenersUp = up
+    return up
+  }
+
   private fun dispatchStartupIfNeeded() {
-    if (!shouldDispatchStartup(RelaisEngine.isReady, startupDispatchInFlight.get())) return
+    // One expression for "are the listeners up", shared with every user-visible surface via
+    // RelaisListenerState — two copies of this predicate is exactly how the display and the retry
+    // gate would drift back apart.
+    val listenersUp = refreshListenerState()
+    if (!shouldDispatchStartup(RelaisEngine.isReady, startupDispatchInFlight.get(), listenersUp)) return
     if (!startupDispatchInFlight.compareAndSet(false, true)) return // lost the race; another dispatch is already running
 
     // Provision the model (download if missing) then initialize the resident engine off the main
@@ -184,10 +242,17 @@ class RelaisNodeService : Service() {
         // so `/v1/audio/speech` works on degoogled too. Cheap (no load); the route gates on availability
         // and provisions the Piper voice on demand via 503.
         cc.grepon.relais.tts.TtsRegistration.register(applicationContext)
+        // A retry can arrive with one listener still live — `listenersUp` is an AND, so "HTTP died,
+        // HTTPS still bound" is an ordinary state, and assigning over a live server would orphan it
+        // holding its port. Release both before rebuilding either.
+        stopListeners()
         // Security C1: plaintext HTTP is loopback-only (in-device app/dev); the LAN is served only
         // over HTTPS, so the bearer key never crosses the network in cleartext.
         httpServer = RelaisHttpServer(applicationContext, port = 8080, bindAddr = "127.0.0.1").also { it.start() }
-        httpsServer = RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0").also { it.start() }
+        // Through the single owner, so its failure contract is inherited rather than restated.
+        // A false here throws into the catch below, which tears the partial startup down so a
+        // later START can retry.
+        check(startHttpsListener()) { "HTTPS listener failed to bind :8443" }
         RelaisDiscovery.register(applicationContext) // advertise _relais._tcp for zero-config LAN discovery
         // Periodic TTL prune for the optional session memory (Feature #5). Idempotent + no-ops when
         // session memory is disabled, so scheduling it unconditionally is a true no-op by default.
@@ -196,10 +261,33 @@ class RelaisNodeService : Service() {
         cc.grepon.relais.worker.BatchWorker.kick(applicationContext)
         updateNotification("Resident engine ready · http 127.0.0.1:8080 · https :8443 (LAN)")
         Log.i(TAG, "Node up: engine resident; http loopback :8080, https LAN :8443")
+        // Now reachable — surfaces may read LIVE. This must stay ahead of the `finally` that clears
+        // startupInProgress: the invariant every polling surface reads against is that startup is
+        // never published as finished before the listeners it started are published. Publishing
+        // them in the other order lets a poll compose "listeners down" with "startup finished" and
+        // render a node that just came up healthy as OFFLINE, offering START. See the read-order
+        // comment in RelaisShellViewModel.snapshotPanelState.
+        refreshListenerState()
         // Security H3: never log the API key — it is shown in the Relais Node control screen.
       } catch (e: Exception) {
         Log.e(TAG, "Node init failed", e)
         RelaisEngine.lastInitFailed = true // surfaced as NodeState.ERROR (e.g. QS tile)
+        // Tear the listeners down rather than leaving whichever one started. A TLS bind failure on
+        // :8443 lands here with loopback :8080 already up and the engine resident, and a half-open
+        // node is the worst of the three states: it answers on loopback, reports LIVE, and serves
+        // no LAN. Clearing both is also what makes `listenersUp` false, which is what lets a later
+        // START actually retry — without it the failure was visible and permanent.
+        //
+        // The engine deliberately stays resident: it initialised fine, reloading it costs seconds
+        // of model load, and the init body is `ensure`-shaped so a retry no-ops through it and
+        // rebuilds only what is missing.
+        // Through the shared teardown, so the stop-before-clear rule is inherited rather than
+        // restated — and so this path cannot drift from the retry path that must obey the same rule.
+        // It also clears RelaisListenerState: the engine stays resident, so `isReady` remains true,
+        // and without that every surface would read LIVE for a node nothing can reach while the
+        // false LIVE suppressed the retry that would fix it.
+        stopListeners()
+        runCatching { RelaisDiscovery.unregister() } // stop advertising a node that is not serving
         updateNotification("Init failed: ${e.message}")
       } finally {
         RelaisEngine.startupInProgress = false
@@ -207,6 +295,42 @@ class RelaisNodeService : Service() {
         startupDispatchInFlight.set(false) // release the guard — a future retry (fresh START) may dispatch again
       }
     }
+  }
+
+  /**
+   * The **only** place an HTTPS listener is constructed, and the single owner of what happens when
+   * one fails to come up.
+   *
+ * Kept as a single owner even though there is currently one caller, because there were two and
+   * will be again: the dynamic LAN rebind (cut from this release, tracked as a follow-up) did
+   * stop-then-start-then-publish exactly as startup does, and both grew the identical hole —
+   * `it.start()` throwing meant the assignment never ran, so the field kept pointing at a *stopped*
+   * server that every liveness check read as healthy. It was fixed on one path and not the other.
+   * **Whoever restores the rebind should call this rather than repeat it.**
+   *
+   * The rule: clear the reference *before* constructing, so a throw can never leave a stale one;
+   * report success as a value the caller must handle; and leave state honest — no listener, nothing
+   * claiming otherwise — so a retry is possible.
+   *
+   * @return true when a listener is bound and accepting.
+   */
+  private fun startHttpsListener(): Boolean {
+    // Stop, THEN clear. Clearing alone drops a reference that may point at a live listener still
+    // owning :8443 — the replacement bind would then collide with an orphan nothing can reach. The
+    // ordering matters as much as the clearing: between here and a successful assignment there must
+    // be no window in which the field names something that is not listening.
+    runCatching { httpsServer?.stop() }
+    httpsServer = null
+    return runCatching {
+        httpsServer =
+          RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0")
+            .also { it.start() }
+      }
+      .onFailure {
+        Log.e(TAG, "HTTPS listener failed to bind :8443", it)
+        httpsServer = null
+      }
+      .isSuccess
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -232,6 +356,10 @@ class RelaisNodeService : Service() {
     RelaisDiscovery.unregister()
     httpServer?.stop()
     httpsServer?.stop()
+    // After the stops, so it reads the closed sockets rather than the intent to close them. A
+    // destroyed service that left this true would have the next process read LIVE before any
+    // listener existed.
+    refreshListenerState()
     RelaisEngine.shutdown()
     runCatching { wakeLock?.release() }
     super.onDestroy()

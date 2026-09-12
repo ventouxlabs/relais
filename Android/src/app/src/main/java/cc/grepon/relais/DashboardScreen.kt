@@ -68,8 +68,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import kotlinx.coroutines.delay
 
 @Composable
@@ -81,7 +79,7 @@ fun DashboardScreen(
   onOpenModelSheet: () -> Unit,
 ) {
   val ctx = LocalContext.current
-  val ip = remember { lanIpv4() }
+  val ip = remember { RelaisLanIp.lanIpv4() }
   val statusColor =
     when (state.status) {
       NodeStatus.LIVE -> Amber
@@ -422,18 +420,4 @@ private fun AccessKeyChip(apiKey: String, baseUrl: String) {
       Text("SHARE CONNECTION ›", color = Amber, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp)
     }
   }
-}
-
-/** Best-effort LAN IPv4 (prefers wlan), for showing the real endpoint URLs. */
-private fun lanIpv4(): String {
-  return runCatching {
-    val nis = NetworkInterface.getNetworkInterfaces().toList().filter { it.isUp && !it.isLoopback }
-    val ordered = nis.sortedByDescending { it.name.startsWith("wlan") }
-    for (ni in ordered) {
-      for (addr in ni.inetAddresses) {
-        if (addr is Inet4Address && !addr.isLoopbackAddress) return addr.hostAddress ?: continue
-      }
-    }
-    "0.0.0.0"
-  }.getOrDefault("0.0.0.0")
 }

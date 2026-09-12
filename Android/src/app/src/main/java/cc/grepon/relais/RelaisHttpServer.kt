@@ -68,6 +68,11 @@ import org.json.JSONObject
 private const val TAG = "RelaisHttpServer"
 private const val SOCKET_TIMEOUT_MS = 15_000 // read timeout: bounds slow/idle clients (slowloris)
 private const val MAX_CONNECTIONS = 16 // cap worker threads (single-engine node serializes anyway)
+
+// How long stop() waits for the accept thread to exit before giving up. Normally microseconds —
+// closing the socket makes the blocked accept() throw immediately — so this only bounds a wedged
+// thread, which must not hang service teardown.
+private const val STOP_JOIN_TIMEOUT_MS = 2_000L
 // Shared body cap. `internal` so the byte-oriented [HttpRequestReader.readBodyBytes] enforces the
 // same ceiling as the server's front-door 413 check (single source of truth across the module).
 internal const val MAX_BODY_BYTES = 32 * 1024 * 1024 // 32 MB cap (base64 image/audio)
@@ -195,7 +200,27 @@ class RelaisHttpServer(
   private val tls: Boolean = false,
   private val bindAddr: String = "127.0.0.1", // safe default; callers opt into 0.0.0.0 for TLS (C1)
 ) {
-  private var serverSocket: ServerSocket? = null
+  // Volatile: written on the accept thread, read by stop() on whatever thread called it. Without
+  // it a stop() racing startup can read a stale null and close nothing.
+  @Volatile private var serverSocket: ServerSocket? = null
+
+  /**
+   * The accept loop, held so [stop] can join it. Only ever touched by [start] and [stop], which the
+   * callers already sequence — the listener is never started or stopped concurrently with itself.
+   */
+  @Volatile private var acceptThread: Thread? = null
+
+  /**
+   * Is this server **actually listening** right now?
+   *
+   * Callers used to answer that question with `server != null`, and a stopped server is still
+   * non-null — so a failed rebind left a reference to a dead listener that every liveness check
+   * read as healthy. This reads the artefact (a bound, open socket) rather than the intent
+   * (someone assigned a field), which is the distinction the `liveSans` and SAN-row bugs turned on
+   * as well.
+   */
+  val isListening: Boolean
+    get() = running && serverSocket?.isClosed == false
   private val pool = Executors.newFixedThreadPool(MAX_CONNECTIONS)
   @Volatile private var running = false
   private val apiKey by lazy { RelaisConfig.apiKey(context) }
@@ -208,26 +233,61 @@ class RelaisHttpServer(
   // image gen, which must run with no concurrent decode. tryAcquireShared() is the embodiment of admit().
   private val admissionGate = RelaisAdmissionGate(QUEUE_CAPACITY)
 
+  /**
+   * Binds **synchronously**, then runs only the accept loop in the background. Throws if the bind
+   * fails.
+   *
+   * **This shape is the fix for a whole class of bug, not a style choice.** Binding used to happen
+   * on the spawned thread, so `start()` returned before the socket existed — and every listener
+   * race this feature produced was a symptom of that one fact: `stop()` finding a still-null socket
+   * and closing nothing; two listeners under construction at once; a replacement losing the bind
+   * race and exiting silently while the node believed it had rebound. Four separate guards were
+   * added to make those overlaps safe. Removing the asynchrony removes the overlaps instead.
+   *
+   * The invariant this buys, stateable without naming any lock: **`start()` returns only when its
+   * socket is bound (or throws), and `stop()` returns only when its socket is closed and its accept
+   * thread has exited — so a caller that stops before starting cannot overlap two listeners.** It is
+   * ordinary sequential composition rather than mutual exclusion.
+   *
+   * Binding on the caller is safe because neither caller is the main thread: node startup runs on
+   * `relais-init`. It does mean startup now waits for
+   * the certificate mint, which is correct — the node is not up until the listener is.
+   *
+   * A bind failure now propagates instead of being swallowed by a background thread, which is what
+   * makes a lost race observable to the caller that must decide whether to retry.
+   */
   fun start() {
     if (running) return
+    // bindOrClose, not apply: a bind that throws must not leave the socket it created open. The
+    // retry below makes that leak unbounded — see the function's KDoc.
+    val bound =
+      bindOrClose(RelaisTls.buildServerSocket(context, tls)) {
+        it.reuseAddress = true
+        it.bind(InetSocketAddress(bindAddr, port))
+      }
+    serverSocket = bound
+    // After the bind, before the thread: a failed bind must not leave `running` true, and the
+    // accept loop must not observe false on its first iteration.
     running = true
-    Thread(
+    Log.i(TAG, "Listening on ${if (tls) "https" else "http"} $bindAddr:$port")
+    acceptThread =
+      Thread(
         {
           try {
-            val socket = RelaisTls.buildServerSocket(context, tls).apply { reuseAddress = true; bind(InetSocketAddress(bindAddr, port)) }
-            serverSocket = socket
-            Log.i(TAG, "Listening on ${if (tls) "https" else "http"} $bindAddr:$port")
             while (running) {
-              val client = socket.accept()
+              val client = bound.accept()
               pool.execute { handle(client) }
             }
           } catch (e: Exception) {
             if (running) Log.e(TAG, "Server loop error", e)
+          } finally {
+            // The socket is this thread's to release, on every exit path.
+            runCatching { bound.close() }
           }
         },
         "relais-http",
       )
-      .start()
+        .also { it.start() }
   }
 
   // TLS keystore/cert minting moved to [RelaisTls] (#173); LAN-IP discovery to [RelaisLanIp].
@@ -336,6 +396,9 @@ class RelaisHttpServer(
         when {
           // Same predicate as the auth exemption and the metrics label — see [RelaisHttpGate.isHealthPath].
           method == "GET" && RelaisHttpGate.isHealthPath(path) -> handleHealth(ctx)
+
+          // Same predicate as the auth exemption and the metrics label — see [RelaisHttpGate.isCaCertPath].
+          method == "GET" && RelaisHttpGate.isCaCertPath(path) -> handleCaCert(ctx)
 
           method == "GET" && path == "/" -> handleDashboard(ctx)
 
@@ -751,6 +814,44 @@ class RelaisHttpServer(
 
   // --- Status pages / metrics ---
 
+  /**
+   * `GET /ca.crt` — the node's **public CA certificate**, PEM, unauthenticated (feature-18 T6).
+   *
+   * Unauthenticated on purpose: the CA is what a client needs *before* it can safely talk to the
+   * node at all, so gating it behind the bearer token would be circular. Nothing secret is
+   * disclosed — this is a public certificate, never the leaf and never a private key.
+   *
+   * The real hazard is not disclosure but trust: a user who fetches this over an already-MITM'd
+   * link and skips the fingerprint check is worse off than with `curl -k`, because it *feels*
+   * verified. That is why the QR on the CONFIGURE screen is the primary path and this route is
+   * documented as a convenience. Rate limiting still applies, on the auth-exempt budget.
+   *
+   * Serves nothing rather than a half-answer when the node has never minted: [certInfoOrNull] is
+   * load-only, so this route can never be the thing that creates key material.
+   */
+  private fun handleCaCert(ctx: RequestContext) {
+    val info = RelaisTls.certInfoOrNull(context)
+    if (info == null) {
+      ctx.reply(503, RelaisError.json("certificate not ready", RelaisError.INVALID_REQUEST), emptyList())
+      return
+    }
+    // respondText does not record a metric (unlike reply), so record it explicitly.
+    RelaisMetrics.recordRequest(ctx.endpoint, 200)
+    respondText(
+      ctx.sock,
+      200,
+      info.caPem,
+      "application/x-x509-ca-cert",
+      listOf(
+        "Content-Disposition: attachment; filename=\"relais-ca.crt\"",
+        "X-Content-Type-Options: nosniff",
+        // The CA is re-minted only on a fresh install, but a stale cached copy is a
+        // failed-handshake support ticket, so never let an intermediary hold one.
+        "Cache-Control: no-store",
+      ),
+    )
+  }
+
   private fun handleHealth(ctx: RequestContext) {
     ctx.send(
       200,
@@ -767,6 +868,7 @@ class RelaisHttpServer(
     val dashCaps = RelaisClientConfig.Capabilities(multimodal = RelaisEngine.isMultimodal, tools = true, reasoning = true)
     val dashStatus = assembleDashboardStatus(
       engineReady = RelaisEngine.isReady,
+      listenersUp = RelaisListenerState.listenersUp,
       startupInProgress = RelaisEngine.startupInProgress,
       thermalStatus = ThermalGovernor.statusValue,
       decodeTokensPerSec = metricsJson.optDouble("decode_tokens_per_second", 0.0),
@@ -781,6 +883,8 @@ class RelaisHttpServer(
       baseUrl = "https://${RelaisLanIp.localLanIp(ctx.sock)}:8443/v1",
       apiKeyMasked = maskApiKey(RelaisConfig.apiKey(context)),
       capabilities = dashCaps.toCapsString(),
+      // Load-only (feature-18): rendering a status page must never mint key material.
+      cert = RelaisTls.certInfoOrNull(context),
     )
     respondText(
       ctx.sock, 200, renderDashboardHtml(dashStatus), "text/html; charset=utf-8",
@@ -802,6 +906,7 @@ class RelaisHttpServer(
     val expCaps = RelaisClientConfig.Capabilities(multimodal = RelaisEngine.isMultimodal, tools = true, reasoning = true)
     val expStatus = assembleExperimentsStatus(
       engineReady = RelaisEngine.isReady,
+      listenersUp = RelaisListenerState.listenersUp,
       startupInProgress = RelaisEngine.startupInProgress,
       currentModelId = RelaisConfig.modelId(context),
       capabilities = expCaps.toCapsString(),
@@ -972,12 +1077,18 @@ class RelaisHttpServer(
     )
     ctx.send(
       200,
-      RelaisClientConfig.buildClientConfigJson(
-        baseUrl = baseUrl,
-        apiKey = RelaisConfig.apiKey(context),
-        modelId = RelaisConfig.modelId(context),
-        caps = caps,
-      ),
+      // Load-only: this endpoint must never be the thing that mints a CA. Both values are omitted
+      // from the payload when the node has not minted yet, rather than sent empty.
+      RelaisTls.certInfoOrNull(context).let { cert ->
+        RelaisClientConfig.buildClientConfigJson(
+          baseUrl = baseUrl,
+          apiKey = RelaisConfig.apiKey(context),
+          modelId = RelaisConfig.modelId(context),
+          caps = caps,
+          caFingerprint = cert?.caFingerprint,
+          nodeKeyPin = cert?.nodeKeyPin,
+        )
+      },
     )
   }
 
@@ -1932,6 +2043,8 @@ class RelaisHttpServer(
     when {
       // Same predicate as the auth exemption and the dispatch branch — see [RelaisHttpGate.isHealthPath].
       RelaisHttpGate.isHealthPath(path) -> "/health"
+      // Same predicate as the auth exemption and the dispatch branch — see [RelaisHttpGate.isCaCertPath].
+      RelaisHttpGate.isCaCertPath(path) -> "/ca.crt"
       path == "/" -> "/"
       path.startsWith("/experiments") -> "/experiments"
       path.startsWith("/metrics") -> "/metrics"
@@ -2015,9 +2128,23 @@ class RelaisHttpServer(
     out.flush()
   }
 
+  /**
+   * Closes the socket and **waits for the accept thread to exit** before returning.
+   *
+   * The join is the half of the invariant that makes a rebind safe: without it `stop()` could
+   * return while the old thread still held the port, and the replacement's bind would race it —
+   * with the loser exiting silently. Now `stop(); start()` is simply sequential, and the port is
+   * free by the time the second call needs it.
+   *
+   * Bounded rather than indefinite: a wedged accept thread must not hang service teardown. The wait
+   * is normally microseconds, because closing the socket makes the blocked `accept()` throw at once.
+   */
   fun stop() {
     running = false
     runCatching { serverSocket?.close() }
+    runCatching { acceptThread?.join(STOP_JOIN_TIMEOUT_MS) }
+    acceptThread = null
+    serverSocket = null
     pool.shutdownNow()
     Log.i(TAG, "Stopped")
   }
@@ -2273,3 +2400,33 @@ internal fun buildEmbeddingsResponse(vectors: List<FloatArray>, model: String, p
  * call sites read `buildEmbeddingsError(msg, type)` rather than the more generic `RelaisError.json`.
  */
 internal fun buildEmbeddingsError(message: String, type: String): JSONObject = RelaisError.json(message, type)
+
+/**
+ * Runs [bind] on [socket], closing it if that throws, and returns it bound.
+ *
+ * **A socket created and not bound is owned by nobody.** The bind used to run inside an `apply`
+ * block, so a failure threw before any field held the socket: nothing closed it, and the descriptor
+ * survived until finalization, which is not a schedule anything can depend on.
+ *
+ * What makes that matter is a *different* fix. Making a bind failure propagate and the node retry
+ * was correct, and it is what turns one leaked descriptor into an unbounded series — every START
+ * burns another until the process cannot open a socket at all, and the recovery path is itself
+ * unrecoverable. The leak is old; the repetition that promotes it to fatal is new.
+ *
+ * Worth carrying forward: **a fix that adds repetition should be followed by asking what the
+ * repeated path leaks.** This is the third time on this branch that a correct fix supplied the
+ * pressure making an adjacent defect reachable.
+ *
+ * The close is best-effort and never replaces the cause — the caller decides whether to retry, and
+ * it must see the bind failure, not a secondary error raised while tidying up.
+ */
+internal fun <T : java.net.ServerSocket> bindOrClose(socket: T, bind: (T) -> Unit): T {
+  try {
+    bind(socket)
+  } catch (e: Throwable) {
+    runCatching { socket.close() }
+    throw e
+  }
+  return socket
+}
+

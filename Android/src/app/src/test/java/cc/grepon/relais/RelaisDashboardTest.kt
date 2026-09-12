@@ -20,6 +20,7 @@ package cc.grepon.relais
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -46,6 +47,7 @@ class RelaisDashboardTest {
 
   private fun liveStatus() = assembleDashboardStatus(
     engineReady = true,
+    listenersUp = true,
     startupInProgress = false,
     thermalStatus = 0,
     decodeTokensPerSec = 5.63,
@@ -62,6 +64,7 @@ class RelaisDashboardTest {
 
   private fun startingStatus() = assembleDashboardStatus(
     engineReady = false,
+    listenersUp = false,
     startupInProgress = true,
     thermalStatus = 0,
     decodeTokensPerSec = 0.0,
@@ -78,6 +81,7 @@ class RelaisDashboardTest {
 
   private fun offlineStatus() = assembleDashboardStatus(
     engineReady = false,
+    listenersUp = false,
     startupInProgress = false,
     thermalStatus = 0,
     decodeTokensPerSec = 0.0,
@@ -118,10 +122,59 @@ class RelaisDashboardTest {
   }
 
   @Test
+  fun `engineReady true with listeners down is not LIVE`() {
+    // The dashboard was the fourth surface keying LIVE on engine readiness alone. A bind failure
+    // leaves the engine resident with both listeners torn down, so this page would report a healthy
+    // node while the endpoints it prints refuse connections. Reachability, not residency.
+    val s = assembleDashboardStatus(
+      engineReady = true,
+      listenersUp = false,
+      startupInProgress = false,
+      thermalStatus = 0,
+      decodeTokensPerSec = 0.0,
+      currentModelId = "litert-community/gemma-4-E4B-it-litert-lm",
+      uptimeSeconds = 120.0,
+      queueDepth = 0,
+      errorsTotal = 0L,
+      shedTotal = 0L,
+      recentRequests = emptyList(),
+      baseUrl = "https://192.168.1.42:8443/v1",
+      apiKeyMasked = "abcd…wxyz",
+      capabilities = "tools,reasoning",
+    )
+    assertNotEquals("LIVE", s.statusLabel)
+    assertFalse("the beacon must not pulse for an unreachable node", s.live)
+  }
+
+  @Test
+  fun `engineReady true with listeners still binding reads STARTING`() {
+    // The engine initialises before either listener binds — an ordinary window of a healthy start.
+    val s = assembleDashboardStatus(
+      engineReady = true,
+      listenersUp = false,
+      startupInProgress = true,
+      thermalStatus = 0,
+      decodeTokensPerSec = 0.0,
+      currentModelId = "litert-community/gemma-4-E4B-it-litert-lm",
+      uptimeSeconds = 5.0,
+      queueDepth = 0,
+      errorsTotal = 0L,
+      shedTotal = 0L,
+      recentRequests = emptyList(),
+      baseUrl = "https://192.168.1.42:8443/v1",
+      apiKeyMasked = "abcd…wxyz",
+      capabilities = "tools,reasoning",
+    )
+    assertEquals("STARTING", s.statusLabel)
+    assertFalse(s.live)
+  }
+
+  @Test
   fun `engineReady true wins over startupInProgress true (impossible state, but robust)`() {
     // If somehow both are true, engineReady wins → LIVE.
     val s = assembleDashboardStatus(
       engineReady = true,
+      listenersUp = true,
       startupInProgress = true,
       thermalStatus = 0,
       decodeTokensPerSec = 0.0,
@@ -170,6 +223,7 @@ class RelaisDashboardTest {
   fun `assembler passes all scalar fields through unmodified`() {
     val s = assembleDashboardStatus(
       engineReady = true,
+      listenersUp = true,
       startupInProgress = false,
       thermalStatus = 3,
       decodeTokensPerSec = 7.77,
@@ -203,7 +257,7 @@ class RelaisDashboardTest {
   @Test
   fun `thermalLabel derived from thermalStatus in assembled status`() {
     val s = assembleDashboardStatus(
-      engineReady = true, startupInProgress = false, thermalStatus = 2,
+      engineReady = true, listenersUp = true, startupInProgress = false, thermalStatus = 2,
       decodeTokensPerSec = 0.0, currentModelId = "x", uptimeSeconds = 0.0,
       queueDepth = 0, errorsTotal = 0L, shedTotal = 0L, recentRequests = emptyList(),
       baseUrl = "https://192.168.1.42:8443/v1", apiKeyMasked = "abcd…wxyz", capabilities = "tools,reasoning",
@@ -312,6 +366,7 @@ class RelaisDashboardTest {
   fun `renderDashboardHtml with injected model id does not contain raw script tag`() {
     val maliciousStatus = assembleDashboardStatus(
       engineReady = true,
+      listenersUp = true,
       startupInProgress = false,
       thermalStatus = 0,
       decodeTokensPerSec = 1.0,
@@ -357,6 +412,7 @@ class RelaisDashboardTest {
   fun `renderDashboardHtml mutes 2xx and keeps 4xx and 5xx request log entries paper-bright with no off-palette hues`() {
     val status = assembleDashboardStatus(
       engineReady = true,
+      listenersUp = true,
       startupInProgress = false,
       thermalStatus = 0,
       decodeTokensPerSec = 1.0,
@@ -417,6 +473,7 @@ class RelaisDashboardTest {
     val rawSentinel = "deadbeefcafef00d1234567890abcdef"
     val status = assembleDashboardStatus(
       engineReady = true,
+      listenersUp = true,
       startupInProgress = false,
       thermalStatus = 0,
       decodeTokensPerSec = 1.0,
@@ -449,5 +506,98 @@ class RelaisDashboardTest {
     assertEquals("********", maskApiKey("12345678"))
     assertEquals("***", maskApiKey("abc"))
     assertEquals("", maskApiKey(""))
+  }
+
+  // ---------------------------------------------------------------------------
+  // Certificate panel (feature-18)
+  // ---------------------------------------------------------------------------
+
+  private fun certInfo(
+    caFingerprint: String = "sha256/CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=",
+    nodeKeyPin: String = "sha256//LEAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=",
+    sanList: List<String> = listOf("127.0.0.1", "192.168.1.42"),
+  ) = RelaisCertInfo(
+    caFingerprint = caFingerprint,
+    nodeKeyPin = nodeKeyPin,
+    sanList = sanList,
+    leafNotAfter = System.currentTimeMillis() + 80L * 86_400_000L,
+    caPem = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n",
+  )
+
+  @Test
+  fun `certificate panel renders both fingerprints under distinguishing labels`() {
+    val html = renderDashboardHtml(liveStatus().copy(cert = certInfo()))
+
+    assertTrue("panel must be present", html.contains("Certificate"))
+    assertTrue("CA fingerprint must render", html.contains("sha256/CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx="))
+    assertTrue("node key pin must render", html.contains("sha256//LEAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx="))
+    // The two values look identical in shape; only the labels tell a user which goes in
+    // --pinnedpubkey. Rendering them unlabelled would be worse than not rendering them.
+    assertTrue("must label the CA fingerprint", html.contains("ca fingerprint"))
+    assertTrue("must label the node key pin", html.contains("node key pin"))
+    assertTrue("SANs must render", html.contains("192.168.1.42"))
+  }
+
+  /**
+   * The served page must not tell a user to verify the CA against a fingerprint it serves itself.
+   *
+   * This is the **third** surface the claim appeared on — it was removed from `TLS_NOTE` and
+   * `SECURITY.md` a round earlier and survived here, which is why the retraction is now pinned by
+   * test on every surface rather than fixed where it was spotted. And this was the worst place to
+   * leave it: an attacker who can substitute the certificate can substitute this page, so their CA
+   * *will* match the fingerprint shown. The instruction manufactures confidence exactly when it is
+   * unwarranted and can talk a user into permanently trusting an attacker's CA.
+   *
+   * `--pinnedpubkey` guidance is fine and stays — that is a real, usable check.
+   */
+  @Test
+  fun `the certificate panel does not claim its own fingerprint verifies the download`() {
+    val html = renderDashboardHtml(liveStatus().copy(cert = certInfo())).lowercase()
+
+    assertFalse(
+      "must not tell users to check the CA against a fingerprint served over the same connection",
+      html.contains("check the downloaded ca against"),
+    )
+    assertFalse("must not imply the served fingerprint confers trust", html.contains("before trusting it"))
+    // The honest replacement, so this cannot be satisfied by deleting the sentence and saying
+    // nothing — silence would leave the fingerprint on the page looking like a check.
+    assertTrue(
+      "must say the served fingerprint does not verify the download",
+      html.contains("does not verify"),
+    )
+    assertTrue("must point at a trusted network instead", html.contains("network you already trust"))
+    // The genuinely useful guidance survives.
+    assertTrue("--pinnedpubkey guidance must remain", html.contains("pinnedpubkey"))
+  }
+
+  @Test
+  fun `certificate panel is absent entirely before the node has minted`() {
+    val html = renderDashboardHtml(liveStatus())
+
+    // A panel of blanks would read as a broken certificate rather than an absent one.
+    assertFalse("no certificate panel before the first mint", html.contains("ca fingerprint"))
+    assertFalse(html.contains("node key pin"))
+  }
+
+  @Test
+  fun `certificate values are HTML-escaped`() {
+    val html =
+      renderDashboardHtml(
+        liveStatus().copy(cert = certInfo(caFingerprint = "<script>alert(1)</script>", sanList = listOf("<img src=x>")))
+      )
+
+    assertFalse("raw script tag must never reach the page", html.contains("<script>alert(1)</script>"))
+    assertFalse("raw img tag must never reach the page", html.contains("<img src=x>"))
+    assertTrue("escaped form must be present", html.contains("&lt;script&gt;"))
+  }
+
+  @Test
+  fun `the certificate panel never renders a private key or the PEM body`() {
+    val html = renderDashboardHtml(liveStatus().copy(cert = certInfo()))
+
+    // The panel links to /ca.crt rather than inlining the certificate, and must never be a route
+    // to key material of any kind.
+    assertFalse(html.contains("PRIVATE KEY"))
+    assertFalse("the PEM belongs at /ca.crt, not inlined here", html.contains("BEGIN CERTIFICATE"))
   }
 }

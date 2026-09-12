@@ -23,7 +23,7 @@ package cc.grepon.relais
  * Immutable value type — pure data, no Android types (mirrors [DashboardStatus]).
  */
 data class ExperimentsStatus(
-  /** True when the engine is initialized and the service is running. */
+  /** True only when the engine is initialized AND the node's listeners are up — i.e. reachable. */
   val live: Boolean,
   /** "LIVE" | "STARTING" | "OFFLINE" — same DESIGN.md status mapping as the dashboard. */
   val statusLabel: String,
@@ -39,14 +39,17 @@ data class ExperimentsStatus(
  */
 fun assembleExperimentsStatus(
   engineReady: Boolean,
+  listenersUp: Boolean,
   startupInProgress: Boolean,
   currentModelId: String,
   capabilities: String,
 ): ExperimentsStatus =
   ExperimentsStatus(
-    live = engineReady,
+    // Reachability, not engine residency — see [assembleDashboardStatus], which owns the rationale
+    // this mapping mirrors.
+    live = engineReady && listenersUp,
     statusLabel = when {
-      engineReady -> "LIVE"
+      engineReady && listenersUp -> "LIVE"
       startupInProgress -> "STARTING"
       else -> "OFFLINE"
     },

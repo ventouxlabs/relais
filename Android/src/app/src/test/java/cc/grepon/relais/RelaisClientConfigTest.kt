@@ -21,6 +21,7 @@ package cc.grepon.relais
 import cc.grepon.relais.RelaisClientConfig.Capabilities
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -234,5 +235,119 @@ class RelaisClientConfigTest {
     // also trips a test.
     val serialized = clientConfig().toString()
     assertTrue("client config must carry the api key for paste-readiness", serialized.contains(sentinelKey))
+  }
+
+  // ---------------------------------------------------------------------------
+  // CA export surface (feature-18)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  fun `tls block names the ca route as an absolute URL derived from the base URL`() {
+    val tls = clientConfig().getJSONObject("tls")
+
+    // Derived from the base URL, not rebuilt from a LAN address: behind `adb forward` the caller
+    // reached localhost, and handing back a LAN URL would name a host it cannot reach.
+    assertEquals("https://192.168.1.42:8443/ca.crt", tls.getString("ca_url"))
+  }
+
+  @Test
+  fun `tls note names the ca route and the cacert flag, and still refuses curl -k`() {
+    val note = clientConfig().getJSONObject("tls").getString("note")
+
+    assertTrue("the note must name the route that actually exists", note.contains("/ca.crt"))
+    assertTrue("the note must lead with per-connection --cacert", note.contains("--cacert"))
+    // Pre-existing guarantee, restated here because this test owns the rewritten note.
+    assertFalse("must not recommend the insecure curl -k flag", note.lowercase().contains("curl -k"))
+  }
+
+  /**
+   * The note must not promise capabilities this release does not ship, and must not repeat the
+   * IP-change overclaim that hardware disproved.
+   *
+   * Both failures were live in shipped client-facing copy. The QR and the on-device CERTIFICATE
+   * section are a deferred follow-up, so telling a user to "scan the QR" pointed at nothing; and
+   * "keeps verifying when the node's IP changes" is false for a *running* node, which is exactly
+   * when a user would rely on it. Re-issue happens at node start plus one boot-time shot.
+   *
+   * Restore the QR wording only alongside the QR.
+   */
+  @Test
+  fun `tls note promises nothing this release does not ship`() {
+    val note = clientConfig().getJSONObject("tls").getString("note").lowercase()
+
+    assertFalse("the QR ships in a later release; do not point users at it", note.contains("qr"))
+    assertFalse(
+      "re-issue is at node start, not on a live address change",
+      note.contains("keeps verifying when the node's ip changes"),
+    )
+    // `run-as` cannot read a non-debuggable package and would emit an encrypted PKCS12 the user
+    // has no password for. Two rewrites produced two unperformable instructions; the third
+    // attempt was to stop writing instructions.
+    assertFalse("do not tell users to run an adb command that cannot work", note.contains("adb"))
+
+    // The honest replacements, so this can't be satisfied by simply deleting the claims.
+    assertTrue("must name the trust-on-first-use gap outright", note.contains("trust on first use"))
+    assertTrue(
+      "must say the status-page fingerprint does not close the first-fetch gap",
+      note.contains("does not help") || note.contains("not help"),
+    )
+    assertTrue("must say a running node does not pick up an address change", note.contains("restart"))
+  }
+
+  /**
+   * The note must also say what the feature **does** buy. An honest limitation with no counterweight
+   * reads as "TLS here is not trustworthy", which is a bigger retreat than the truth: the gap is the
+   * first fetch only, and a user who imports over a network they trust has the full property today.
+   */
+  @Test
+  fun `tls note states the protection gained, not only the gap`() {
+    val note = clientConfig().getJSONObject("tls").getString("note").lowercase()
+
+    // NOT a bare "mitm protection" check: the fallback paragraph warns that disabling verification
+    // *removes* MITM protection, so that phrase alone is satisfied by a note that states only the
+    // downside. Proven by mutation — deleting the gained-protection sentence left such a check
+    // green. Pin the claim that protection is gained on connections AFTER the first fetch.
+    assertTrue(
+      "must say protection applies to connections after the first fetch",
+      note.contains("every subsequent connection"),
+    )
+    assertTrue(
+      "must scope the gap to the first fetch rather than to TLS generally",
+      note.contains("first fetch") || note.contains("first use"),
+    )
+    assertTrue(
+      "must tell the user the actionable mitigation",
+      note.contains("network you trust"),
+    )
+  }
+
+  @Test
+  fun `both fingerprints are exposed under distinct keys when the node has minted`() {
+    val tls =
+      RelaisClientConfig.buildClientConfigJson(
+          baseUrl = "https://192.168.1.42:8443/v1",
+          apiKey = sentinelKey,
+          modelId = "litert-community/gemma-4-E4B-it",
+          caps = textOnlyCaps,
+          caFingerprint = "sha256/CA-VALUE",
+          nodeKeyPin = "sha256//LEAF-VALUE",
+        )
+        .getJSONObject("tls")
+
+    assertEquals("sha256/CA-VALUE", tls.getString("ca_fingerprint"))
+    assertEquals("sha256//LEAF-VALUE", tls.getString("node_key_pin"))
+    // Distinct keys for distinct values: --pinnedpubkey wants the leaf, --cacert verification wants
+    // the CA, and conflating them fails with an error that names neither.
+    assertNotEquals(tls.getString("ca_fingerprint"), tls.getString("node_key_pin"))
+  }
+
+  @Test
+  fun `fingerprint keys are absent, not empty, before the node has minted`() {
+    val tls = clientConfig().getJSONObject("tls")
+
+    // An empty string would let a client "check" a fingerprint against nothing and believe it
+    // passed. Absent forces the caller to handle not-yet-minted.
+    assertFalse("ca_fingerprint must be absent", tls.has("ca_fingerprint"))
+    assertFalse("node_key_pin must be absent", tls.has("node_key_pin"))
   }
 }

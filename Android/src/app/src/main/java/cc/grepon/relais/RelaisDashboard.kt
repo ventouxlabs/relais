@@ -32,7 +32,7 @@ data class RequestLogEntry(val endpoint: String, val status: Int, val ageSeconds
  * Immutable value type — pure data, no Android types.
  */
 data class DashboardStatus(
-  /** True when the engine is initialized and the service is running. */
+  /** True only when the engine is initialized AND the node's listeners are up — i.e. reachable. */
   val live: Boolean,
   /** Human label for the node state: "LIVE" | "STARTING" | "OFFLINE" (DESIGN.md status mapping). */
   val statusLabel: String,
@@ -51,6 +51,13 @@ data class DashboardStatus(
   val apiKeyMasked: String,
   /** Comma-joined enabled capability names (e.g. "tools,reasoning" or "multimodal,tools,reasoning"). */
   val capabilities: String,
+  /**
+   * The node's certificate identity (feature-18), or null before the node has ever minted — in
+   * which case the Certificate panel is omitted entirely rather than rendered with blanks.
+   *
+   * Public certificate material only; see [RelaisCertInfo].
+   */
+  val cert: RelaisCertInfo? = null,
 )
 
 /**
@@ -67,14 +74,15 @@ fun maskApiKey(key: String): String {
  * Pure assembler: maps raw status inputs to the [DashboardStatus] render model.
  *
  * Status label follows DESIGN.md:
- *  - LIVE     = engineReady (engine fully initialized and running)
- *  - STARTING = !engineReady && startupInProgress (first-run provision/download in progress)
+ *  - LIVE     = engineReady && listenersUp (initialized AND actually reachable)
+ *  - STARTING = otherwise, while startupInProgress (provision/download, or listeners still binding)
  *  - OFFLINE  = neither
  *
  * No I/O, no Context, no Android — fully unit-testable on the JVM.
  */
 fun assembleDashboardStatus(
   engineReady: Boolean,
+  listenersUp: Boolean,
   startupInProgress: Boolean,
   thermalStatus: Int,
   decodeTokensPerSec: Double,
@@ -87,10 +95,17 @@ fun assembleDashboardStatus(
   baseUrl: String,
   apiKeyMasked: String,
   capabilities: String,
+  /** The node's certificate identity (feature-18), or null before the node has ever minted. */
+  cert: RelaisCertInfo? = null,
 ): DashboardStatus {
-  val live = engineReady
+  // [engineReady] answers "did the model load?"; only [listenersUp] answers "can anyone reach this
+  // node?". A bind failure leaves the engine deliberately resident with both listeners torn down, so
+  // keying LIVE on readiness alone made this page report a healthy node while printing a base URL
+  // that refuses connections. Same predicate as [cc.grepon.relais.core.computeNodeState] and the
+  // control panel — one meaning of LIVE across every surface.
+  val live = engineReady && listenersUp
   val statusLabel = when {
-    engineReady -> "LIVE"
+    engineReady && listenersUp -> "LIVE"
     startupInProgress -> "STARTING"
     else -> "OFFLINE"
   }
@@ -108,6 +123,7 @@ fun assembleDashboardStatus(
     baseUrl = baseUrl,
     apiKeyMasked = apiKeyMasked,
     capabilities = capabilities,
+    cert = cert,
   )
 }
 
@@ -174,6 +190,79 @@ fun renderDashboardHtml(status: DashboardStatus): String {
   val dotPulse = if (status.live) " dot-pulse" else ""
   val uptimeFormatted = formatUptime(status.uptimeSeconds)
   val decodeFmt = if (status.decodeTokensPerSec > 0.0) "%.2f tok/s".format(status.decodeTokensPerSec) else "—"
+
+  // Certificate panel (feature-18). TEXT ONLY, and deliberately so: the QR lives on the in-app
+  // CONFIGURE screen because this page is served under `default-src 'none'` with no `img-src`
+  // (RelaisHttpServer's CSP), and widening a hardened security header to show a picture is a bad
+  // trade. Omitted wholesale when the node has never minted — a panel of blanks would read as a
+  // broken certificate rather than an absent one.
+  val certPanel =
+    status.cert?.let { cert ->
+      val daysLeft = (cert.leafNotAfter - System.currentTimeMillis()) / 86_400_000L
+      val expiry = if (daysLeft >= 0) "in $daysLeft days" else "EXPIRED"
+      // The one certificate event a user cannot diagnose from the client side: their imported CA
+      // stopped working and nothing told them why. Rendered as a row rather than a log line.
+      val replacedRow =
+        if (!cert.caWasReplaced) "" else {
+          """
+    <tr>
+      <td class="label">ca replaced</td>
+      <td class="value">${escapeHtml(
+            "the previous CA could not be read, so a new one was minted — every client must " +
+              "re-import relais-ca.crt"
+          )}</td>
+    </tr>"""
+        }
+      // A moved pin is invisible from the client side: --pinnedpubkey just fails, naming nothing.
+      // Narrower than a CA replacement — the imported CA is still good — so it says so, to stop a
+      // user re-importing a CA that was never the problem.
+      val pinMovedRow =
+        if (!cert.leafKeyWasReplaced) "" else {
+          """
+    <tr>
+      <td class="label">node key pin changed</td>
+      <td class="value">${escapeHtml(
+            "the leaf key could not be recovered, so a new one was minted — anyone using " +
+              "curl --pinnedpubkey must re-pin to the value below. The CA is unchanged; do not " +
+              "re-import it."
+          )}</td>
+    </tr>"""
+        }
+      """
+<div class="panel">
+  <div class="panel-title">Certificate</div>
+  <table>$replacedRow$pinMovedRow
+    <tr>
+      <td class="label">ca fingerprint</td>
+      <td class="value">${escapeHtml(cert.caFingerprint)}</td>
+    </tr>
+    <tr>
+      <td class="label">node key pin</td>
+      <td class="value">${escapeHtml(cert.nodeKeyPin)}</td>
+    </tr>
+    <tr>
+      <td class="label">expires</td>
+      <td class="value muted">${escapeHtml(expiry)}</td>
+    </tr>
+    <tr>
+      <td class="label">covers</td>
+      <td class="value muted">${escapeHtml(cert.sanList.joinToString(", "))}</td>
+    </tr>
+    <tr>
+      <td class="label" colspan="2" style="color:#8A8780;font-size:11px;line-height:1.5">${escapeHtml(
+        "GET /ca.crt (no bearer key needed) to download the CA, then curl --cacert relais-ca.crt. " +
+          "The ca fingerprint above does NOT verify that download: this page and /ca.crt arrive " +
+          "over the same connection, so anyone able to substitute the certificate can substitute " +
+          "this fingerprint too. Fetch the CA over a network you already trust; out-of-band " +
+          "verification lands in a later release. " +
+          "Paste the node key pin — not the ca fingerprint — straight into curl --pinnedpubkey; "  +
+            "it already carries the sha256// prefix.",
+      )}</td>
+    </tr>
+  </table>
+</div>
+"""
+    } ?: ""
 
   val recentRows = buildString {
     if (status.recentRequests.isEmpty()) {
@@ -308,6 +397,7 @@ tr:last-child td { border-bottom: none; }
   </table>
 </div>
 
+$certPanel
 <div class="panel">
   <div class="panel-title">Recent Requests</div>
   <table>

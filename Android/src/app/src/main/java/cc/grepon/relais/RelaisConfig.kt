@@ -43,6 +43,7 @@ object RelaisConfig {
   private const val KEY_IMAGE_MODEL_SHA = "image_model_sha"
   private const val KEY_TTS_VOICE_ID = "tts_voice_id"
   private const val KEY_TLS_PASS = "tls_keystore_pass"
+  private const val KEY_CA_PASS = "ca_keystore_pass"
   private const val KEY_RESTARTS = "restarts_total"
   private const val KEY_SHED_HEADROOM = "shed_headroom"
   private const val KEY_DECODE_FLOOR_TOK_S = "decode_floor_tok_s"
@@ -338,15 +339,73 @@ object RelaisConfig {
   /**
    * Random per-install password protecting the runtime-generated TLS keystore. Generated and
    * persisted (encrypted) on first access, mirroring [apiKey]. Not a shared/committed secret.
+   *
+   * **`@Synchronized` is load-bearing, not decoration.** This is read-then-generate-then-write with
+   * no atomicity of its own, and it now has genuinely concurrent callers: the accept thread minting
+   * in `buildServerSocket` and the LAN re-issue thread. Two callers both reading null would each
+   * generate a different UUID, last write wins — and the keystore written under the loser's
+   * password becomes **permanently unreadable**, which routes straight into regenerating the leaf
+   * key and silently changing the NODE KEY PIN every pinned client depends on.
    */
+  @Synchronized
   fun tlsKeystorePassword(context: Context): String {
     val sp = securePrefs(context)
     sp.getString(KEY_TLS_PASS, null)?.let {
       return it
     }
-    val pass = UUID.randomUUID().toString().replace("-", "")
-    sp.edit().putString(KEY_TLS_PASS, pass).apply()
-    return pass
+    return persistNewSecret(sp, KEY_TLS_PASS)
+  }
+
+  /**
+   * Generates a secret for [key] and persists it **durably before returning**.
+   *
+   * The property: **key material must never be more durable than the secret that opens it.**
+   *
+   * `commit()`, not `apply()`, and the boolean is checked rather than discarded. `apply()` updates
+   * memory and only *schedules* the disk write, while the caller goes straight on to write a PKCS12
+   * file. A process kill or power loss in that window leaves a perfectly readable keystore whose
+   * password was never persisted. On the next start this accessor sees no stored value, generates a
+   * fresh one, the keystore load fails with `UnrecoverableKeyException`, and [RelaisTls]'s recovery
+   * rule — correctly, on the evidence it is given — concludes the material is provably unrecoverable
+   * and rotates it. For the CA that invalidates every client's import; for the leaf it moves the
+   * node key pin. The rule is not wrong in that scenario; it is being handed a false premise by this
+   * write ordering, which is why the ordering is what gets fixed.
+   *
+   * Failing loudly is the point. A password that could not be persisted must not go on to protect
+   * key material that can — that is precisely the state this exists to prevent, and returning it
+   * silently would recreate the bug one layer down.
+   */
+  internal fun persistNewSecret(sp: SharedPreferences, key: String): String {
+    val value = UUID.randomUUID().toString().replace("-", "")
+    check(sp.edit().putString(key, value).commit()) {
+      "could not persist $key durably; refusing to protect key material with an unpersisted password"
+    }
+    return value
+  }
+
+  /**
+   * Random per-install password protecting the per-node **CA** keystore (feature-18), mirroring
+   * [tlsKeystorePassword] exactly.
+   *
+   * A separate password for a separate file: the CA lives in its own PKCS12 so that the
+   * `KeyManagerFactory` serving the TLS listener is never handed two key entries to choose between,
+   * and so the CA private key is never in the store the handshake reads.
+   *
+   * Deliberately **absent** from [migrateSecrets]: that list migrates secrets that once shipped in
+   * plaintext prefs. This key has only ever existed in the encrypted store, so there is nothing to
+   * migrate and adding it would only widen the legacy read.
+   *
+   * `@Synchronized` for the same reason as [tlsKeystorePassword], and the consequence here is worse:
+   * a CA keystore whose key material is provably unrecoverable rotates the **CA**, invalidating
+   * every client's import.
+   */
+  @Synchronized
+  fun caKeystorePassword(context: Context): String {
+    val sp = securePrefs(context)
+    sp.getString(KEY_CA_PASS, null)?.let {
+      return it
+    }
+    return persistNewSecret(sp, KEY_CA_PASS)
   }
 
   /** Process (re)starts observed — survives process death; surfaced via /metrics (Gate 3). */

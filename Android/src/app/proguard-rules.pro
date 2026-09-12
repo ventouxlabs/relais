@@ -86,3 +86,33 @@
 -keep class org.tensorflow.lite.** { *; }
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 -keep class io.aatricks.llmedge.** { *; }
+
+# ---------------------------------------------------------------------------------------------
+# BouncyCastle — the per-node CA and the SAN'd leaf (feature-18).
+# ---------------------------------------------------------------------------------------------
+# There were ZERO BouncyCastle rules here before this feature, and the pre-feature cert path
+# happened to survive minification because it touched only a handful of concrete classes.
+#
+# NOTE ON WHY, because the obvious explanation is wrong and would send you down a blind alley:
+# it is NOT that R8 strips the SHA256withECDSA implementation. That algorithm resolves through the
+# platform's Conscrypt provider, which lives in the framework and which R8 cannot touch. The
+# reflection that actually matters is inside bcpkix's own algorithm-finder machinery —
+# DefaultSignatureAlgorithmIdentifierFinder and the operator helpers — which look classes up by
+# name. That is what a narrow keep would break, and it breaks release-only.
+#
+# `-dontwarn` is necessary but blunt: it equally silences warnings about classes genuinely missing
+# because a keep was narrowed too far, so it is the thing most likely to HIDE an R8 failure at
+# build time. Anyone narrowing must not trust a quiet build.
+#
+# IF YOU NARROW THIS: try org.bouncycastle.jcajce.**, .operator.**, .cert.** and .asn1.x509.**
+# first, and re-run CertTrustProbe on a RELEASE build — exercising the RE-MINT path, not just the
+# first mint, since mintLeaf and mintCa reach different BC code and a stripped class in the re-mint
+# path only surfaces after a network change. A debug build and a JVM test both prove nothing here.
+#
+# Per this repo's history with R8 (every keep rule above was earned from a real on-device failure,
+# and CI runs no R8 whatsoever), these are deliberately broad. The reviewer explicitly did NOT flag
+# the broad keep as a vulnerability — Relais never deserializes untrusted class names — so this is
+# a size/hygiene matter, not a security one. UNVERIFIED as of writing: no release APK has been
+# built with them.
+-keep class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**
