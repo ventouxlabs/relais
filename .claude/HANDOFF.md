@@ -6,7 +6,7 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-12 16:45 EDT — ⏩ START HERE. **#318 and #323 MERGED. feature-09 PR-B is mid-implementation and UNCOMMITTED — read "the tree you are inheriting" before touching anything.**
+## 2026-09-12 17:10 EDT — ⏩ START HERE. **#318 and #323 MERGED. feature-09 PR-B is fully implemented in 4 commits, unpushed, reviewed by nobody.**
 
 `main` = `62050b83`. Two feature-09 PRs shipped this session, both hardware-verified on rango:
 
@@ -15,36 +15,61 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 | [#318](https://github.com/ventouxlabs/relais/pull/318) | `cf316146` | per-node EC P-256 CA (10 y) signing an RSA-2048 SAN'd leaf (90 d) — LAN clients can drop `curl -k` |
 | [#323](https://github.com/ventouxlabs/relais/pull/323) | `62050b83` | HTTP Basic + cross-site guard + dashboard auto-refresh + request-log hygiene (feature-09 Tasks 1-3) |
 
-### ⚠ The tree you are inheriting
+### The tree you are inheriting
 
-Branch `feat/dashboard-model-selector`, HEAD `c94f1441`, **unpushed**. The eight commits on it are
-**plan revisions only** — zero implementation is committed. But the working tree is **not clean**:
+Branch `feat/dashboard-model-selector`, **unpushed**, tree clean. Below the eight plan-revision
+commits sit four implementation commits — feature-09 **PR-B (Tasks 4-10, the model selector)**:
 
-```
- M ModelSwitch.kt  RelaisDashboard.kt  RelaisDiscovery.kt  RelaisEngine.kt  RelaisHttpServer.kt
- M RelaisDashboardTest.kt  RelaisDiscoveryTxtTest.kt  docs/dashboard-copy.md      (+494 / -32)
-?? RelaisHttpPages.kt (158)          RelaisHttpDashboardTest.kt (155)
-?? DashboardHeadersProbe.kt (148)    DashboardSelectModelProbe.kt (180)
-?? Android/src/.kotlin/              <- build detritus, never commit
-```
+| SHA | |
+|---|---|
+| `42d3afb0` | Tasks 4-5 data half — `DashboardStatus` +3 fields; `dashboardSecurityHeaders`, `availableModelIdsFor`, `pendingModelIdFor` as top-level pure functions; single-read of `startupInProgress` and the configured id |
+| `938ef780` | Tasks 5-6 render half — the form, the lock, the pending hint, `parseFormField`, `validateModelChoice` |
+| `a3a40554` | Task 7 — `ensureModelSwapInBackground: Boolean`, `advertisedModelId`, bug 6 |
+| `009912ed` | Tasks 8-9 — `RelaisHttpPages.kt`, the route arm, `reason(303)`, the `endpointLabel` arm, both probes, copy doc |
+| `d4a26f67` | this handoff (not the executor's) |
 
-This is feature-09 **PR-B (Tasks 4-10, the model selector)**, written by the `impl-f09-prb` executor,
-which was **still `running`** when this section was written — so the tree may have advanced past these
-numbers. It has been **reviewed by nobody, codex'd by nobody, run by nothing, and committed nowhere.**
+**Verified by the executor, on the final tree:** three-flavor JVM lane with `--rerun-tasks`, 1349
+tests × 3 flavors = **4047, 0 failures**, every `test*UnitTest` line printed *without* `UP-TO-DATE`.
+`compileFullOpenDebugAndroidTestKotlin` green. **Mutation table 17/17 KILLED, 0 SURVIVED** — and the
+harness asserts the file actually changed before running a row, so no SURVIVED can be a mutation that
+never applied (the trap that nearly got a correct test declared worthless last week). It also dumped
+the rendered page and checked tag balance rather than trusting the assertions alone.
 
-**Do not `git reset --hard`** — that is 641 new lines plus 494 changed with no commit behind them. Do
-not `git add -A` either (`.kotlin/` is sitting right there, and this repo has been bitten before).
-Either finish the review pipeline below, or commit it as WIP first and decide afterwards.
+**Not verified, and not verifiable without hardware:** both probes are instrumented, so CI compiles
+and never runs them. `DashboardHeadersProbe` is the **only** thing that fails if `handleDashboard`
+stops calling `dashboardSecurityHeaders()` — the JVM tests pass unchanged under that rewiring.
+`DashboardSelectModelProbe` is the only observation point for `reason(303)`, the `endpointLabel` arm,
+and the four metered response paths. Bug 6's TXT re-publish and its `swapped` guard need a real swap
+plus `dumpsys nsd` and a cleared logcat window (manual check 10). **Until those run on rango, that
+surface is unverified** — the same shape as PR-A's `BasicAuthGateProbe`, which sat un-run for days.
 
 ### Where PR-B is in the pipeline
 
 `plan → N review rounds → implement → my review → codex the diff → hardware on rango → PR → merge`
 
-Done through **implement (in flight)**. The plan (`.claude/PRPs/plans/feature-09-web-dashboard.plan.md`,
-Tasks 4-10 per its `:371`) took **8 rounds and 29 findings**; round 8 returned `[P1] None. [P2] None.`
-which fired the stop rule. Everything after "implement" is untouched.
+Done through **implement**. The plan (`.claude/PRPs/plans/feature-09-web-dashboard.plan.md`, Tasks
+4-10 per its `:371`) took **8 rounds and 29 findings**; round 8 returned `[P1] None. [P2] None.`,
+which fired the stop rule. **Nothing in the plan proved wrong under implementation.** Everything
+after "implement" is untouched — no review, no codex, no device.
 
-### The one open review item already visible in the diff
+### Open review items — three raised by the executor, one by me
+
+Flagged rather than buried, which is the right instinct; none contradict the plan:
+
+1. **`handleDashboard` now calls `provisionedOnDisk()` every 10 s** via the auto-refresh
+   (`RelaisHttpServer.kt:965`). New repeating I/O the plan never costed: one cached SharedPreferences
+   read plus one `File.exists()` per provisioned model, so microseconds at 1-3 models, and the same
+   call already runs on every model-naming `/v1` request. Judged cheap enough to ship.
+2. **The 303 sends an empty body with `Content-Type: text/html`** — harmless, consistent with
+   `respondText`'s signature, and exactly the kind of thing a reviewer stops on. Decide once.
+3. **Task 9's HANDOFF section was deliberately skipped** because this file had a live concurrent
+   editor. Correct call — and this section is that update, so Task 9 is satisfied, not outstanding.
+
+`reason(303)` landed with a comment generalizing PR-A's `403 ERR` lesson: *a new status literal is not
+finished until `reason()` has an arm for it.* That is the rule, stated where the next person adding a
+status will read it, rather than in a retrospective. Keep that habit.
+
+### The fourth item, and the one I'd look at first
 
 **`RelaisHttpServer.kt` went 2713 → 2828 even though the executor created `RelaisHttpPages.kt`.** The
 extraction happened *and* the server still gained +133, net **+115** on the exact file CLAUDE.md tells
@@ -73,12 +98,12 @@ either fine or a defect.** (2713 is `main`; 2828 is the uncommitted tree. `wc -l
 
 ### Next actions, in order
 
-1. Get `impl-f09-prb`'s report: commit SHAs, RED evidence per new assertion, the mutation table, the
-   three-flavor JVM result, and anything implementation proved wrong in the plan.
-2. My review of the diff → `/codex review` on the diff (`gpt-5.6-terra`; the default `gpt-6-astra`
-   400s on CLI 0.151.0) → **run both new probes on rango** → PR → merge.
-3. The two probes are the *only* cover for the browser-form seams. CI covers neither. Same trap as
-   PR-A's `BasicAuthGateProbe`, which sat un-run until it was run and passed.
+1. Review the four-commit diff (`git diff c94f1441..009912ed`), then `/codex review` on it
+   (`gpt-5.6-terra`; the default `gpt-6-astra` 400s on CLI 0.151.0). Treat the executor's report as
+   evidence to re-derive, not as a pass — its own round-7 decline is the model for that.
+2. **Run both probes on rango**, plus manual check 10 (real swap → `dumpsys nsd` → cleared logcat).
+   Nothing else covers that surface.
+3. PR → merge. Then step 5 below.
 
 ### Filed this session, still open
 
@@ -118,6 +143,18 @@ Round 7's P1 claimed `recordRequest` re-normalizes through a second `endpointLab
 traced it, found `RelaisMetrics.kt:147` stores the label as handed, and **declined**. Applying it
 would have added dead code contradicting that function's documented cardinality-guard invariant. I
 had relayed that finding as verified after running a `sed` whose output contained the falsifying fact.
+
+**And the same failure recurred inside this very section, an hour later.** The first version of it
+described a dirty working tree with "zero implementation committed" — written from a `git status` taken
+several tool calls earlier. By commit time the executor had landed all four commits, and my own
+`git add && git status && git commit` printed `M .claude/HANDOFF.md` **and nothing else**: a clean
+tree, the fact that falsified the section I was committing, rendered in the same output as the commit.
+I read that line as *"my file is staged"* rather than *"everything else is gone from this list."*
+
+> **A snapshot of a tree another agent is writing to expires between the survey and the commit.**
+> Re-read the state in the same breath as the write, and when a status listing is *shorter* than you
+> expected, that absence is the finding. Confirmation-shaped reading doesn't announce itself — both
+> times the disproof was already on screen, and both times it looked like the thing I came to see.
 
 ---
 
