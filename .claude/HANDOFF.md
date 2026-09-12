@@ -29,6 +29,13 @@ is **not** started.
    request log. It still spends budget: one idle tab ≈ 20% of the 30/60s per-IP budget, and a 429
    answers JSON, which has no refresh tag, so **the refresh chain stops permanently** until a manual
    reload.
+6. **`GET /experiments` becomes browser-reachable too**, incidentally — it is auth-gated by the same
+   `authorized()` that now accepts Basic, so a navigation that used to `401` now renders the page and
+   its nonce'd script runs. No credential reaches that script: the key it sends is the one the
+   operator types into the page's own `#api-key` field (`RelaisExperiments.kt:227`), and the Basic
+   password is not readable from JS. Its four `fetch()` calls carry **Bearer**, so they are same-origin
+   and outside the cross-site guard by design. Called out because it is a reachability change PR-A
+   ships without asking for, not because it is a hole.
 
 ### What is verified, and what is not
 

@@ -2366,6 +2366,9 @@ internal fun rejectsAsCrossSite(
 ): Boolean {
   val sfs = secFetchSite?.trim()?.lowercase()
   if (!sfs.isNullOrEmpty()) return sfs == "cross-site" || sfs == "same-site"
+  // "not GET", literally — so a Basic HEAD with no Sec-Fetch-Site and no Origin fails closed at 403
+  // rather than reaching the dispatch `when` and 404ing. Deliberate: HEAD is not routed anywhere in
+  // this server, so the stricter answer costs nothing and needs no second method predicate to drift.
   if (method.uppercase() == "GET") return false
   val expected = host?.let { hostAuthority(it, tls) } ?: return true
   val claimed = origin?.takeIf { it.isNotBlank() } ?: referer?.takeIf { it.isNotBlank() } ?: return true
