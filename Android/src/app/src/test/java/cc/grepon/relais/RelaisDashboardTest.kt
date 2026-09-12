@@ -362,6 +362,31 @@ class RelaisDashboardTest {
     assertFalse("page must be scriptless: no <script tag allowed", html.contains("<script"))
   }
 
+  /**
+   * Auto-refresh (feature-09 Task 2). Asserts the interval, not merely the tag's presence: a bare
+   * `contains("http-equiv=\"refresh\"")` would pass for `content="0"` (a reload storm against a
+   * 30/60s per-IP budget) and for `content="600"` (a status panel that reads as dead).
+   *
+   * `exactly one` is the other half — two refresh tags would have the browser honour the first and
+   * leave the second as a silent contradiction for the next reader.
+   */
+  @Test
+  fun `renderDashboardHtml carries exactly one meta refresh at the 10s interval`() {
+    val html = renderDashboardHtml(liveStatus())
+    assertEquals(
+      "exactly one meta refresh tag must be present",
+      1,
+      Regex("""<meta\s+http-equiv="refresh"""").findAll(html).count(),
+    )
+    assertTrue(
+      "meta refresh must specify the 10s interval (5s doubles the race against STARTING, " +
+        "30s reads as dead)",
+      html.contains("""<meta http-equiv="refresh" content="10">"""),
+    )
+    // The refresh must not have cost the scriptless invariant.
+    assertFalse("meta refresh must not introduce a script", html.contains("<script"))
+  }
+
   @Test
   fun `renderDashboardHtml with injected model id does not contain raw script tag`() {
     val maliciousStatus = assembleDashboardStatus(

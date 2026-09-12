@@ -128,9 +128,26 @@ object RelaisMetrics {
   // Label `level` comes from the fixed [thermalLabel] whitelist (M6: bounded cardinality).
   private val thermalEventCounts = ConcurrentHashMap<String, AtomicLong>()
 
-  fun recordRequest(endpoint: String, status: Int) {
+  /**
+   * Records a request against the aggregate counters and, unless opted out, the recent-request log.
+   *
+   * [inRecentLog] guards **only** the ring-buffer append. The `requestCounts` increment and the
+   * `errorsTotal` bump stay unconditional, so `/metrics` is unaffected by the opt-out and an
+   * opted-out route is still fully counted.
+   *
+   * The opt-out exists for the dashboard's own page loads: `/` auto-refreshes every 10s, and at
+   * [REQUEST_LOG_CAPACITY] = 20 slots those self-loads would crowd out the traffic the panel exists
+   * to show. Filtering inside [recentRequests] instead would also hide a genuine `401`/`429` on `/`,
+   * so the decision belongs at the call site. Note this is a **reduction, not an elimination**: the
+   * shared `reply()` in `RelaisHttpServer.handle()` records unconditionally, so the challenge `401`
+   * a browser takes on its first load of `/` still lands here — deliberately, since an operator
+   * wants to see failed auth attempts. Only the `200` self-loads are suppressed, and `/` is not the
+   * only self-recording route (`/health` and `/ca.crt` record too).
+   */
+  fun recordRequest(endpoint: String, status: Int, inRecentLog: Boolean = true) {
     requestCounts.getOrPut("$endpoint $status") { AtomicLong(0) }.incrementAndGet()
     if (status >= 500) errorsTotal.incrementAndGet()
+    if (!inRecentLog) return
     // Append to bounded recent-request log for the dashboard (security M6: endpoint is already
     // a normalized label — no raw path, IP, key, or FS path ever enters this buffer).
     // ageSeconds stores the unix epoch second at record time; recentRequests() converts to age.

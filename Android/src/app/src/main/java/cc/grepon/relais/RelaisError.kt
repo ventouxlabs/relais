@@ -36,6 +36,16 @@ object RelaisError {
   /** Missing/incorrect credentials (401). */
   const val AUTHENTICATION = "authentication_error"
 
+  /**
+   * Valid credentials, rejected request *context* (403) — today, cross-site use of ambient Basic
+   * credentials.
+   *
+   * Deliberately distinct from [AUTHENTICATION]: the key was correct, so a client that reads this as
+   * an auth failure may enter a credential-refresh/retry loop against a request that can never
+   * succeed no matter which key it presents.
+   */
+  const val PERMISSION = "permission_error"
+
   /** Per-IP rate limit or admission-queue-full backpressure (429). */
   const val RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"
 

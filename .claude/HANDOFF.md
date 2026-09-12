@@ -6,7 +6,68 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-07 — ⏩ START HERE. **Eight PRP plans critic-reviewed and REVISED. Committed, PR #310 open. Decisions below are JD's.**
+## 2026-09-12 — ⏩ START HERE. **feature-09 PR-A implemented on `feat/dashboard-auth-refresh`. Not pushed, no PR. Six plan-review rounds preceded it.**
+
+Branch `feat/dashboard-auth-refresh`, based on `cf316146` (#318). Tasks 1-3 of
+`.claude/PRPs/plans/feature-09-web-dashboard.plan.md` (= PR-A). PR-B (Tasks 4-10, the model selector)
+is **not** started.
+
+### Wire-visible changes an operator can notice
+
+1. **`Authorization: <rawkey>` with no scheme is now REJECTED.** It used to be accepted — an artefact
+   of `removePrefix("Bearer ")` returning the receiver when the prefix is absent, never a documented
+   contract. `Basic base64(<key>)` with no colon is rejected for the same reason. Recorded in
+   `SECURITY.md` and `docs/RUNBOOK.md`.
+2. **`Authorization: Basic base64(:<key>)` is now ACCEPTED**, so the dashboard opens in a browser.
+3. **Every *Basic*-authenticated request now passes a cross-site check** and can answer `403`. Bearer
+   is untouched — no SDK regresses. Consequence: plain `curl -u ":$KEY" -X POST` now returns 403;
+   add `-H 'Sec-Fetch-Site: same-origin'` or a matching `Origin`. Reads unaffected.
+4. **The node can now answer `403`** — the first in the tree. `403 Forbidden` (it would have been
+   `403 ERR`) with the new `RelaisError.PERMISSION` = `permission_error`, deliberately distinct from
+   `authentication_error` because the credential *was* valid.
+5. **`GET /` auto-refreshes every 10 s**, and no longer writes its own `200`s to the 20-slot recent-
+   request log. It still spends budget: one idle tab ≈ 20% of the 30/60s per-IP budget, and a 429
+   answers JSON, which has no refresh tag, so **the refresh chain stops permanently** until a manual
+   reload.
+6. **`GET /experiments` becomes browser-reachable too**, incidentally — it is auth-gated by the same
+   `authorized()` that now accepts Basic, so a navigation that used to `401` now renders the page and
+   its nonce'd script runs. No credential reaches that script: the key it sends is the one the
+   operator types into the page's own `#api-key` field (`RelaisExperiments.kt:227`), and the Basic
+   password is not readable from JS. Its four `fetch()` calls carry **Bearer**, so they are same-origin
+   and outside the cross-site guard by design. Called out because it is a reachability change PR-A
+   ships without asking for, not because it is a hole.
+
+### What is verified, and what is not
+
+- Three-flavor JVM lane green. **13 mutations run against the new assertions**; every one killed by
+  the intended test. Full table in the session report.
+- **`BasicAuthGateProbe.kt` has NOT been run** — it needs hardware and `-e RELAIS_PROBE 1`. It is the
+  **only** cover for two seams: that `handle()` parses all four new headers into the right slots, and
+  that `challengeHeaders()` is actually called at the reply. CI covers neither. **Run it before
+  merging**, or those seams ship unverified.
+
+### The transferable finding — six review rounds, and the pattern never changed
+
+Rounds found **13 → 4 → 3 → 3 → 2 → 1** issues. Four of the six defects had their **correct answer
+already written in this repo**: `RelaisHttpGate.kt:61` (supplier thesis), `RelaisHttpIo.kt:270` ("NOT
+`android.util.Base64`"), the twelve top-level `internal fun`s after `RelaisHttpServer.kt:2151`, and
+`WebhookGuard.kt:54-58`. Reviews found them by reading the tree; fixes kept being proposed without.
+
+> **Grep before writing any helper — and mirror the SHAPE, never the POLICY.** The caveat was earned:
+> reusing `WebhookGuard` wholesale for an inbound origin check would have DNS-resolved per request and
+> blocked RFC1918 — every legitimate LAN request — while looking exactly like the guard working. A
+> security function copied into a different threat model is its own failure mode, because it arrives
+> with the authority of shipped reviewed code. Ask *"what is this function deciding, and is that my
+> question?"* before *"does this function exist?"*
+
+Also recorded, from the `rejectsAsCrossSite` test table: **row count is not a proxy for axis count.**
+Individually every reject row also passes an "always reject" implementation and every allow row passes
+an "always allow" one — only the combination discriminates. The table was extended four times by four
+different axes, each of which passed every row that existed before it.
+
+---
+
+## 2026-09-07 — **Eight PRP plans critic-reviewed and REVISED. Committed, PR #310 open. Decisions below are JD's.**
 
 **PR:** [#310](https://github.com/ventouxlabs/relais/pull/310) `docs/prp-plans-critic-revised` → `main`.
 `/codex review --base main` ran and **GATE: FAIL** (2 P1 / 1 P2) — both P1s and the P2 are now **fixed
@@ -79,11 +140,11 @@ step says so.
 | # | PR | Plan tasks | Needs decided first | Hardware | Unblocks / why here |
 |---|---|---|---|---|---|
 | 0 | ✅ **DONE** `docs: reconcile G5/E4B claim; file bugs 1–6 as issues` | — | — | — | Landed 2026-09-07 — `SPIKE-FINDINGS.md`/`CLAUDE.md` reconciled; issues #311-#315 filed (bug 5 needed no issue, fixed directly). **Process deviation:** committed onto PR #310 rather than its own branch — trying a separate branch off `main` conflicted on `HANDOFF.md`, since this file is one continuously-edited log and #310 already carries the whole day's HANDOFF history. Not worth the branch juggling for a docs-only step; steps 1+ (real code) will get their own branches as planned. |
-| 1 | `feat(metrics): TTFT + decode-start latency` — **#20 B0 + B1-A** | B0 (static gate, needs `:app:assembleFullOpenDebug` once to grep the AAR), B1-A1–A4 | — | rango: B1-A4 measures the `convStartNs`→`sendStartNs` gap and writes it to `docs/litertlm-native-api.md` | Smallest diff, touches the `RelaisEngine.kt:663-706` seam and the response objects that #17 and #19 both edit — landing first means they rebase onto one stable shape |
-| 2a | `fix(security): extract HTTP gate` — **#18 T2 only** | T2 (`RelaisHttpGate.decide` + `RelaisHttpGateTest`, SECURITY.md Δ7 wording) | **Q2** exempt-route rate-limit budget; accept unmetered failed-auth or file follow-up | comet smoke: `/health`, a 401, a 429 | Closes bug 2. Ships alone because #09 and every later HTTP change assume the new `authorized()` shape |
-| 2b | `feat(tls): per-node CA + SAN leaf + QR trust` — **#18 rest** | T1, T3–T12 | **Q5** NameConstraints, **Q8** RFC1918 SAN opt-out | rango: `CertTrustProbe` (conscrypt accepts EC-CA-signed RSA leaf — plan is gated on it), boot-before-DHCP re-mint, then a **release-build inference check** (BouncyCastle may need R8 keep rules — [[relais-r8-minification-ci-blindspot]]) | 43 files, the biggest step. Must precede #09 because #09 edits `authorized()`/`recordRequest` on top of T2 and #18 mirrors `handleDashboard` lines #09 no longer moves |
-| 3 | `feat(dashboard): Basic auth, auto-refresh, log hygiene` — **#09 PR-A** | tasks 2–6 | — | comet browser check: first address-bar visit (`Sec-Fetch-Site: none`) allowed, meta-refresh reload allowed, cross-site POST 403 | Closes bug 1 (`/experiments` 401). Gate-wide `Sec-Fetch-Site` guard depends on 2a's `AuthScheme?` |
-| 4 | `feat(dashboard): model selector` — **#09 PR-B** | tasks 7–10 | amend `docs/dashboard-copy.md:95` (hot-swap, not restart) and §1.4 L93 (lexicographic order — catalog order is a blocking fetch) | rango: select a known-incompatible model → refused; double-submit during swap → second is a no-op *before* persist; swap smoke | Touches the swap path — fold **bug 6** (`RelaisDiscovery.updateModel` re-register after swap) in here, it is the same call site |
+| 1 | ✅ **DONE** — merged `61008dd8` (#316). `feat(metrics): TTFT + decode-start latency` — **#20 B0 + B1-A** | B0 (static gate, needs `:app:assembleFullOpenDebug` once to grep the AAR), B1-A1–A4 | — | rango: B1-A4 measures the `convStartNs`→`sendStartNs` gap and writes it to `docs/litertlm-native-api.md` | Smallest diff, touches the `RelaisEngine.kt:663-706` seam and the response objects that #17 and #19 both edit — landing first means they rebase onto one stable shape |
+| 2a | ✅ **DONE** — merged `5b1d8407` (#317). Shipped `RelaisHttpGate.decide` with **four** suppliers, not the three the plan described: `exemptRateLimitOk` was added, and `Reject` gained `EXEMPT_RATE_LIMITED`. Step 3 must build on that shape, not the plan's. `fix(security): extract HTTP gate` — **#18 T2 only** | T2 (`RelaisHttpGate.decide` + `RelaisHttpGateTest`, SECURITY.md Δ7 wording) | **Q2** exempt-route rate-limit budget; accept unmetered failed-auth or file follow-up | comet smoke: `/health`, a 401, a 429 | Closes bug 2. Ships alone because #09 and every later HTTP change assume the new `authorized()` shape |
+| 2b | ✅ **DONE** — merged `cf316146` (#318), 35 commits, 21 codex rounds. Q5 REVERSED (NameConstraints dropped), `relais-node.local` dropped from the SAN set (`NsdServiceInfo` has no `setHostname()`), and a **pre-existing** LIVE-while-unreachable defect fixed across four surfaces — found by the partial-listener hardware check on its first ever run, after 20 review rounds found nothing there. Follow-ups #320/#321/#322. QR trust (T7) did **not** ship — it is PR-B, still blocked on the QR/zxing decisions. `feat(tls): per-node CA + SAN leaf + QR trust` — **#18 rest** | T1, T3–T12 | **Q5** NameConstraints, **Q8** RFC1918 SAN opt-out | rango: `CertTrustProbe` (conscrypt accepts EC-CA-signed RSA leaf — plan is gated on it), boot-before-DHCP re-mint, then a **release-build inference check** (BouncyCastle may need R8 keep rules — [[relais-r8-minification-ci-blindspot]]) | 43 files, the biggest step. Must precede #09 because #09 edits `authorized()`/`recordRequest` on top of T2 and #18 mirrors `handleDashboard` lines #09 no longer moves |
+| 3 | 🔄 **PR #323 OPEN** — code complete, CI running, **merge gated on two hardware checks** that need an unlocked rango: the key-gated matrix (valid Basic + cross-site → 403, Basic + same-origin → 200, Bearer + cross-site → 200, the dashboard HTML, and bare-key rejection — which is *vacuous without a real key*, since a wrong bare key 401s either way) and the browser meta-refresh check. Four hardware checks already PASS on a release-signed R8 build, including the two no JVM test can reach: the conditional HTML-401 `WWW-Authenticate` challenge (present with `Accept: text/html`, absent without) and auth-before-CSRF (unauthenticated cross-site POST → **401, not 403**). Six plan-review rounds preceded any code — 26 findings, P1s per round many→3→2→1→1→0. `feat(dashboard): Basic auth, auto-refresh, log hygiene` — **#09 PR-A** | **tasks 1–3** (corrected 2026-09-12; this cell read "tasks 2–6", which predated the renumbering when the plan's *original* Task 1 — handler extraction — was cut. The plan itself is authoritative at its `:371`: "PR-A = Tasks 1-3. PR-B = Tasks 4-10." The step *title* was always right: log hygiene = T1, auto-refresh = T2, Basic auth = T3. Following the old numbers would have built the model selector into PR-A and skipped the log hygiene this step is named for.) | — | comet browser check: first address-bar visit (`Sec-Fetch-Site: none`) allowed, meta-refresh reload allowed, cross-site POST 403 | Closes bug 1 (`/experiments` 401). Gate-wide `Sec-Fetch-Site` guard depends on 2a's `AuthScheme?` |
+| 4 | `feat(dashboard): model selector` — **#09 PR-B** | **tasks 4–10** (corrected 2026-09-12, same renumbering as step 3) | amend `docs/dashboard-copy.md:95` (hot-swap, not restart) and §1.4 L93 (lexicographic order — catalog order is a blocking fetch) | rango: select a known-incompatible model → refused; double-submit during swap → second is a no-op *before* persist; swap smoke | Touches the swap path — fold **bug 6** (`RelaisDiscovery.updateModel` re-register after swap) in here, it is the same call site |
 | 5 | `feat(engine): idle-unload gaps` — **#22** | tasks 1–3, 5–8 (4 is cut) | **stepper ladder** (1/5/15/30/60 vs floor→5); **audio transcriptions** bounded-hold or 503 (needs an on-device number — measure it in this step's probe first); whether **gap 6** gets its own plan | rango: `IdleUnloadProbe` incl. forced reload failure → `/health` reads ERROR not IDLE | Rebases on 3/4 (`assembleDashboardStatus`) and 2a/2b (`handleHealth`). Adds `NodeState.IDLE` that #23 keys on |
 | 6 | `feat(api): Ollama-compatible /api/*` — **#17** | tasks 1–12 | **Q6** single-object framing on `format`+`stream:false`; **bug 3** `/v1/models` provisioned-only (affects `/api/tags` parity) | desktop: real `ollama serve` for Task 10's four wire-field checks (`stream` default is *undocumented* — prove it empirically first); comet: `OllamaCompatProbe`, thermal 503 through the Ollama envelope | Rebases on 1 (response objects) and 3 (sole owner of `RequestContext` widening). Largest test count (30) |
 | 7 | `feat(metrics): battery/power/energy` — **#19** | A1–A11 | — | **on battery, unplugged**: A7 perfetto cross-check gates A11's README figure; plugged-in nodes must show `_valid=0` and no per-1k gauge | Closes bug 4. Rebases on 1 (`:706` seam, `resetIncrementsForTest`) and 5 (metrics adjacency). Last engine-touching step |

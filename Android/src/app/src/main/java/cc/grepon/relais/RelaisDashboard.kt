@@ -291,6 +291,12 @@ fun renderDashboardHtml(status: DashboardStatus): String {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- Auto-refresh. Meta refresh, not a script: no CSP directive governs it, so the page keeps
+     `default-src 'none'` with no `script-src` at all. 10s, not 3s — it resets scroll and discards a
+     typed <select>, and each reload spends 1/30th of the per-IP budget (RATE_LIMIT = 30/60s), so an
+     idle tab costs ~20% of it. A 429 answers JSON, which carries no refresh tag: the chain then
+     stops until the operator reloads by hand. -->
+<meta http-equiv="refresh" content="10">
 <title>RELAIS — Node Status</title>
 <style>
 /* DESIGN.md tokens */

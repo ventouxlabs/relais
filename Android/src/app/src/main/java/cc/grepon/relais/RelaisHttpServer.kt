@@ -19,6 +19,10 @@ package cc.grepon.relais
 import android.content.Context
 import android.util.Base64
 import android.util.Log
+// Aliased because android.util.Base64 above is already unaliased. The auth helpers MUST use the JVM
+// one: android.* returns defaults under isReturnDefaultValues in the unit lane, which would make
+// their negative assertions pass for the wrong reason. Same rule as RelaisHttpIo.kt:270.
+import java.util.Base64 as JvmBase64
 import cc.grepon.relais.data.RelaisModelRef
 import cc.grepon.relais.embed.EmbeddingGemmaEmbedder
 import cc.grepon.relais.embed.EmbeddingTask
@@ -322,6 +326,14 @@ class RelaisHttpServer(
         var accept: String? = null
         var contentType: String? = null
         var sessionHeader: String? = null
+        // Fetch Metadata + the Origin/Referer fallback for the Basic CSRF guard (feature-09).
+        // `host` has no arm today and is the one the Origin comparison is AGAINST — omitting it does
+        // not fail to compile, it just makes every non-GET request with an Origin reject, which
+        // looks like the guard working.
+        var secFetchSite: String? = null
+        var origin: String? = null
+        var referer: String? = null
+        var hostHeader: String? = null
         var headerLines = 0
         var headerBytes = 0
         // Session memory (Feature #5) is DEFAULT-OFF: only capture the session header when enabled, so
@@ -341,6 +353,11 @@ class RelaisHttpServer(
             lower.startsWith("content-length:") -> contentLength = line.substringAfter(":").trim().toIntOrNull() ?: 0
             lower.startsWith("authorization:") -> authorization = line.substringAfter(":").trim()
             lower.startsWith("accept:") -> accept = lower.substringAfter(":").trim()
+            // Lowercased like `accept`: these are compared against lowercase literals / authorities.
+            lower.startsWith("sec-fetch-site:") -> secFetchSite = lower.substringAfter(":").trim()
+            lower.startsWith("origin:") -> origin = lower.substringAfter(":").trim()
+            lower.startsWith("referer:") -> referer = lower.substringAfter(":").trim()
+            lower.startsWith("host:") -> hostHeader = lower.substringAfter(":").trim()
             // Original-case value: the multipart boundary token is case-sensitive.
             lower.startsWith("content-type:") -> contentType = line.substringAfter(":").trim()
             sessionEnabled && lower.startsWith("x-relais-session:") ->
@@ -360,6 +377,21 @@ class RelaisHttpServer(
             method = method,
             path = path,
             authorized = { authorized(authorization) },
+            // Lazy, and consulted only for BASIC: Bearer traffic never pays for this.
+            // Named, not positional, and that is load-bearing: parameters 2-5 are four consecutive
+            // `String?`, so ANY permutation of them compiles. The probe would catch a
+            // secFetchSite/origin or referer/host swap, but origin/referer swapped is a silent
+            // weakening no test in the tree observes. Naming them makes that a compile error.
+            rejectsAsCrossSite = {
+              rejectsAsCrossSite(
+                method = method,
+                secFetchSite = secFetchSite,
+                origin = origin,
+                referer = referer,
+                host = hostHeader,
+                tls = tls,
+              )
+            },
             rateLimitOk = { rateLimiter.allow(ip) },
             exemptRateLimitOk = { exemptRateLimiter.allow(ip) },
             contentLength = contentLength,
@@ -374,6 +406,12 @@ class RelaisHttpServer(
             when (reject) {
               RelaisHttpGate.Reject.UNAUTHORIZED ->
                 RelaisError.json("unauthorized", RelaisError.AUTHENTICATION)
+              // PERMISSION, not AUTHENTICATION: the credential IS valid here and the request context
+              // is what was rejected. Labelling it authentication_error can send an
+              // OpenAI-compatible client into a credential-refresh loop against a request that can
+              // never succeed.
+              RelaisHttpGate.Reject.CROSS_SITE ->
+                RelaisError.json("cross-site request rejected", RelaisError.PERMISSION)
               RelaisHttpGate.Reject.RATE_LIMITED ->
                 RelaisError.json(
                   "rate limit exceeded ($RATE_LIMIT/${RATE_WINDOW_MS / 1000}s)",
@@ -387,7 +425,10 @@ class RelaisHttpServer(
               RelaisHttpGate.Reject.BODY_TOO_LARGE ->
                 RelaisError.json("request too large", RelaisError.INVALID_REQUEST)
             }
-          reply(reject.status, body)
+          // Parallel to the body, not inside the `when`: the challenge is a property of the STATUS
+          // and the Accept header, and keeping the `when` body-only is what makes it an expression
+          // and therefore exhaustiveness-checked.
+          reply(reject.status, body, challengeHeaders(reject.status, accept))
           return
         }
 
@@ -860,10 +901,13 @@ class RelaisHttpServer(
   }
 
   private fun handleDashboard(ctx: RequestContext) {
-    // Auth-gated (bearer required — same gate as /metrics; the open routes are /health and /ca.crt,
+    // Auth-gated (Bearer or Basic — same gate as /metrics; the open routes are /health and /ca.crt,
     // and both are still rate-limited). Reads only
     // already-collected metrics; no state change. Scriptless + escaped; strict security headers below.
-    RelaisMetrics.recordRequest(ctx.endpoint, 200)
+    // inRecentLog = false: this page auto-refreshes every 10s, and the RECENT REQUESTS panel it
+    // renders holds only 20 slots — self-loads would crowd out the traffic the panel exists to show.
+    // Aggregate counters still increment, so /metrics is unaffected.
+    RelaisMetrics.recordRequest(ctx.endpoint, 200, inRecentLog = false)
     val metricsJson = RelaisMetrics.renderJson(context)
     val dashCaps = RelaisClientConfig.Capabilities(multimodal = RelaisEngine.isMultimodal, tools = true, reasoning = true)
     val dashStatus = assembleDashboardStatus(
@@ -2066,11 +2110,12 @@ class RelaisHttpServer(
       else -> "other"
     }
 
-  private fun authorized(header: String?): Boolean {
-    val token = header?.removePrefix("Bearer ")?.trim() ?: return false
-    // Constant-time compare to avoid leaking the key via response-timing differences.
-    return MessageDigest.isEqual(token.toByteArray(), apiKey.toByteArray())
-  }
+  /**
+   * Which scheme authenticated this request, or null. Delegates to the top-level [authenticate] so
+   * the parse and the compare are reachable from the JVM test lane; this wrapper exists only to bind
+   * [apiKey].
+   */
+  private fun authorized(header: String?): AuthScheme? = authenticate(header, apiKey)
 
   /**
    * Reads up to [length] (capped) bytes of body and decodes them as UTF-8 for the JSON endpoints.
@@ -2088,6 +2133,7 @@ class RelaisHttpServer(
       200 -> "OK"
       400 -> "Bad Request"
       401 -> "Unauthorized"
+      403 -> "Forbidden"
       404 -> "Not Found"
       413 -> "Payload Too Large"
       429 -> "Too Many Requests"
@@ -2148,6 +2194,241 @@ class RelaisHttpServer(
     pool.shutdownNow()
     Log.i(TAG, "Stopped")
   }
+}
+
+// ---------------------------------------------------------------------------
+// Auth + CSRF helpers (feature-09 Task 3)
+//
+// TOP-LEVEL, NOT MEMBERS OF RelaisHttpServer — and that placement is load-bearing, not stylistic.
+// These are unit-tested directly from RelaisHttpAuthTest in the JVM lane, which cannot construct a
+// RelaisHttpServer (that needs a Context). An `internal` MEMBER would still require an instance, so
+// moving any of these inside the class breaks their tests at compile time. If a reference fails to
+// resolve, fix the reference — do not drag the function into the class.
+//
+// Nothing here may call `android.*`. `isReturnDefaultValues = true` (build.gradle.kts) makes
+// unmocked Android calls return defaults in the JVM lane, which would make the NEGATIVE assertions
+// below pass for the wrong reason (a defaulted decode yields nothing, and "nothing" is what they
+// assert). Base64 is java.util.Base64 — see RelaisHttpIo.kt:270 and RelaisImagesEndpoint.kt for the
+// same rule already written down twice.
+// ---------------------------------------------------------------------------
+
+/** Which credential carrier authenticated a request. The CSRF guard applies to [BASIC] only. */
+internal enum class AuthScheme { BEARER, BASIC }
+
+/**
+ * Parses an `Authorization` header into (scheme, candidate key), or null if it names no scheme we
+ * accept.
+ *
+ * `Bearer <k>` -> (BEARER, k). `Basic <b64>` -> base64-decode, drop the username up to the FIRST
+ * `:`. Anything else — including a bare scheme-less key — returns null.
+ *
+ * Two deliberate narrownesses, both of which look like bugs until you know why:
+ *
+ *  1. **`substringAfter(':', "")`, with the explicit empty fallback.** Kotlin's one-arg
+ *     `substringAfter` defaults `missingDelimiterValue` to the RECEIVER, so a colon-less payload
+ *     would come back unchanged — i.e. `Basic base64(rawkey)` would authenticate, rebuilding through
+ *     Basic the exact scheme-less hole this function exists to close.
+ *  2. **The scheme match is case-SENSITIVE**, deliberately narrower than RFC 7235 (which makes the
+ *     auth-scheme token case-insensitive). Accepting `bearer`/`basic` would be a widening shipped in
+ *     the same change as an advertised tightening. Nothing in this repo or its docs sends a
+ *     lowercase scheme. Revisit only with a reason, not as a tidy-up.
+ *
+ * **Trimming is asymmetric between the branches, deliberately.** The Bearer branch trims its token
+ * and the Basic branch trims its base64 blob: both are *header syntax*, where surrounding whitespace
+ * is insignificant. The decoded Basic password is *data* and is taken literally.
+ *
+ * An earlier draft trimmed the decoded password too, justified as "pre-existing Bearer behaviour;
+ * dropping it would be a second silent tightening". That argument is sound for Bearer and does not
+ * transfer: Basic ships for the first time in this change, so there is no pre-existing behaviour to
+ * tighten and nothing to be silent about. Trimming it would make `base64(":KEY ")` and
+ * `base64(":KEY")` the same credential — a second spelling of the key that no client sends and no
+ * document mentions. Do not "harmonize" the two branches; [RelaisHttpAuthTest] `8n` pins both halves.
+ */
+internal fun extractApiKey(header: String?): Pair<AuthScheme, String>? {
+  val h = header ?: return null
+  if (h.startsWith("Bearer ")) return AuthScheme.BEARER to h.removePrefix("Bearer ").trim()
+  if (h.startsWith("Basic ")) {
+    val raw = h.removePrefix("Basic ").trim() // syntax: whitespace around the blob is insignificant
+    val decoded = runCatching { String(JvmBase64.getDecoder().decode(raw), Charsets.UTF_8) }
+      .getOrNull() ?: return null
+    // No colon at all => no username field => not a Basic credential. See note 1 above.
+    if (!decoded.contains(':')) return null
+    // No .trim() here: this is the password, and it is data. See the KDoc above.
+    return AuthScheme.BASIC to decoded.substringAfter(':', "")
+  }
+  return null
+}
+
+/**
+ * Parses [header] and performs the constant-time comparison, returning the scheme that
+ * authenticated or null.
+ *
+ * **Returning the SCHEME rather than a Boolean is the point, and it is the one thing no other test
+ * in this change can catch.** `extractApiKey` is tested pure; the gate is tested with an injected
+ * fake. An implementation that parses Basic flawlessly and then reports BEARER passes both — and
+ * every real Basic request would skip the CSRF guard, so the feature would not exist while the suite
+ * stayed green. [RelaisHttpAuthTest] pins this seam directly.
+ *
+ * No length check and no early return before [MessageDigest.isEqual]: either would reintroduce the
+ * response-timing signal the constant-time compare exists to remove. The scheme parse is the only
+ * nullable step and it is not key-dependent, so returning null for an unknown scheme leaks nothing.
+ */
+internal fun authenticate(header: String?, apiKey: String): AuthScheme? {
+  val (scheme, token) = extractApiKey(header) ?: return null
+  // Constant-time compare to avoid leaking the key via response-timing differences.
+  return if (MessageDigest.isEqual(token.toByteArray(), apiKey.toByteArray())) scheme else null
+}
+
+/**
+ * The `WWW-Authenticate` challenge, for a 401 to an HTML client and nothing else.
+ *
+ * Takes the STATUS rather than a [RelaisHttpGate.Reject] so this file's auth helpers — and their
+ * test — stay free of gate types; `UNAUTHORIZED` is the only reject carrying 401, so the two are
+ * equivalent. Call sites pass `reject.status`, never a repeated literal.
+ *
+ * Two negatives are as load-bearing as the positive. A non-HTML 401 must stay bare, or every SDK's
+ * error path acquires a browser auth prompt it cannot answer. And a **403** must never carry a
+ * challenge: a 403 here means the credential was ACCEPTED and the request context rejected, so
+ * challenging would tell the browser to re-prompt for a key that is already correct.
+ */
+internal fun challengeHeaders(status: Int, accept: String?): List<String> =
+  if (status == 401 && acceptsHtml(accept)) {
+    listOf("""WWW-Authenticate: Basic realm="Relais", charset="UTF-8"""")
+  } else {
+    emptyList()
+  }
+
+/**
+ * Does [accept] name `text/html` as something the client will take?
+ *
+ * `Accept` is a comma-separated list of media ranges with parameters, so `contains("text/html")`
+ * answers a different question — "do these nine characters occur anywhere in the header" — and the
+ * two disagree in **both** directions: `application/json; profile="text/html"` matches the substring
+ * without accepting HTML, and `text/html;q=0` is an explicit *refusal* that also matches it.
+ *
+ * **The `&#42;/&#42;` wildcard deliberately does NOT count.** RFC 7231 says it accepts everything, but
+ * the question here is not "may I send HTML" — it is "is this a browser that can answer an auth
+ * prompt". That wildcard is what curl and most SDKs send, and honouring it would put a
+ * `WWW-Authenticate` on exactly the error paths [challengeHeaders]'s contract promises to leave bare.
+ * Same reasoning for `text/&#42;`, which nothing in practice sends. Only an explicit `text/html`
+ * range with non-zero `q` qualifies.
+ */
+private fun acceptsHtml(accept: String?): Boolean {
+  val header = accept ?: return false
+  return header.split(',').any { range ->
+    val parts = range.split(';').map { it.trim() }
+    val type = parts.firstOrNull()?.lowercase() ?: return@any false
+    if (type != "text/html") return@any false
+    // q is the only parameter that can turn acceptance into refusal; q=0 (and 0.0, 0.000) does.
+    val q = parts.drop(1)
+      .firstOrNull { it.startsWith("q=", ignoreCase = true) }
+      ?.substringAfter('=')
+      ?.trim()
+      ?.toDoubleOrNull()
+    q == null || q > 0.0
+  }
+}
+
+/**
+ * Canonical authority (`host:port`, lowercased) of [url], or null if it does not parse or names no
+ * host. An absent port is filled from the URL's OWN scheme.
+ *
+ * Mirrors the parse shape of [cc.grepon.relais.batch.WebhookGuard.check] (`:54-58`) — and *only*
+ * that shape. See [rejectsAsCrossSite] for why nothing below those lines comes along.
+ */
+private fun originAuthority(url: String): String? {
+  val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return null
+  val scheme = uri.scheme?.lowercase() ?: return null
+  val host = uri.host?.lowercase() ?: return null
+  val port = if (uri.port != -1) uri.port else defaultPortFor(scheme) ?: return null
+  return "$host:$port"
+}
+
+/** Default port for the two schemes this node can speak; null for anything else. */
+private fun defaultPortFor(scheme: String): Int? = when (scheme) {
+  "https" -> 443
+  "http" -> 80
+  else -> null
+}
+
+/**
+ * Canonical authority of a `Host` header, filling an absent port from the LISTENER's scheme.
+ *
+ * **Bracket-aware, never "contains `:`".** A portless IPv6 `Host: [::1]` contains colons, so a
+ * colon test would call it "already has a port", skip the default-port fill on this side only, and
+ * reject a request whose Origin canonicalised to `[::1]:443`. The port is the segment after the
+ * LAST `]` for a bracketed host, or after the only `:` otherwise.
+ */
+private fun hostAuthority(host: String, tls: Boolean): String? {
+  val h = host.trim().lowercase()
+  if (h.isEmpty()) return null
+  val defaultPort = if (tls) 443 else 80
+  if (h.startsWith("[")) {
+    val close = h.lastIndexOf(']')
+    if (close < 0) return null
+    val rest = h.substring(close + 1)
+    return if (rest.startsWith(":")) h else "$h:$defaultPort"
+  }
+  return if (h.count { it == ':' } == 1) h else "$h:$defaultPort"
+}
+
+/**
+ * Does this request read as cross-site for the purposes of the Basic-credential CSRF guard?
+ *
+ * Consulted ONLY for requests that authenticated via [AuthScheme.BASIC]. Bearer keeps today's
+ * behaviour: a Bearer header must be set by script, and a cross-origin request carrying it trips a
+ * CORS preflight this server fails (there is no `Access-Control-*` header anywhere in the tree), so
+ * the API is CSRF-immune by accident of the carrier. Basic credentials are re-attached by the UA
+ * itself, with no script and no preflight — which is the immunity this guard replaces.
+ *
+ * Three cases:
+ *  - **`Sec-Fetch-Site` present:** reject only `cross-site` and `same-site`. `none` is what an
+ *    address-bar navigation or bookmark sends and an attacker page cannot produce it, so rejecting
+ *    it would 403 the operator's very first page load — the feature itself. Unrecognised values are
+ *    allowed; this header is browser-set and we do not guess at future ones.
+ *  - **Absent, and the method is not GET:** fall back to an `Origin`/`Referer` same-authority check.
+ *    Fetch Metadata is not universal (older Safari, some embedded WebViews, header-stripping
+ *    proxies), so without this a foreign page in such a client could fire an authenticated
+ *    state-changing POST once credentials are cached.
+ *  - **Absent, and the method IS GET:** allowed. A GET is not the state change this guard exists to
+ *    stop, and the address-bar and meta-refresh cases have no Origin/Referer to check either.
+ *
+ * **The scheme is compared, not just the authority.** [tls] alone does not do this: it only supplies
+ * a default port. Without an explicit scheme check, `Origin: http://node:8443` against
+ * `Host: node:8443` on a TLS listener canonicalises equal on both sides and passes — two genuinely
+ * different origins, which is the only thing this function decides.
+ *
+ * **This deliberately does NOT reuse [cc.grepon.relais.batch.WebhookGuard.check].** That function
+ * decides whether an OUTBOUND url is safe for this node to call; this one decides whether an INBOUND
+ * Origin names this listener. Opposite directions, different threat models. Three of its steps are
+ * wrong here: it DNS-resolves the host (network I/O on every gated request, and a DNS-failure mode
+ * inside an auth decision); it has an allowlist that returns Allowed BEFORE its scheme check; and
+ * its `classify` blocks loopback and `isSiteLocalAddress` — 10/8, 172.16/12, 192.168/16 — which is
+ * the ONLY network this dashboard is ever reached on. Copy it and every legitimate same-origin POST
+ * 403s while looking exactly like the guard working. We reuse its parse and re-derive its policy.
+ */
+internal fun rejectsAsCrossSite(
+  method: String,
+  secFetchSite: String?,
+  origin: String?,
+  referer: String?,
+  host: String?,
+  tls: Boolean,
+): Boolean {
+  val sfs = secFetchSite?.trim()?.lowercase()
+  if (!sfs.isNullOrEmpty()) return sfs == "cross-site" || sfs == "same-site"
+  // "not GET", literally — so a Basic HEAD with no Sec-Fetch-Site and no Origin fails closed at 403
+  // rather than reaching the dispatch `when` and 404ing. Deliberate: HEAD is not routed anywhere in
+  // this server, so the stricter answer costs nothing and needs no second method predicate to drift.
+  if (method.uppercase() == "GET") return false
+  val expected = host?.let { hostAuthority(it, tls) } ?: return true
+  val claimed = origin?.takeIf { it.isNotBlank() } ?: referer?.takeIf { it.isNotBlank() } ?: return true
+  val claimedScheme = runCatching { java.net.URI(claimed) }.getOrNull()?.scheme?.lowercase()
+    ?: return true
+  // Scheme first, ahead of the authority comparison — see the KDoc note above.
+  if (claimedScheme != (if (tls) "https" else "http")) return true
+  val claimedAuthority = originAuthority(claimed) ?: return true
+  return claimedAuthority != expected
 }
 
 // ---------------------------------------------------------------------------
