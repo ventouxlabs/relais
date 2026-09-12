@@ -16,6 +16,15 @@
 > into `RelaisHttpGate.decide`, which **falsified** — not merely renumbered — Task 3's mirrored
 > pattern and its "immediately after `authorized()`" ordering. Disposition of each finding is in
 > Notes → *Critic + codex findings disposition (2026-09-12, post-#318)*.
+>
+> **Revised again 2026-09-12 against a codex pass on that revision** (3 P1, 1 P2) — the round-1
+> *prescriptions* proved no more reliable than the plan they corrected. The three P1s are **three
+> instances of one defect class**: pure helpers are tested, injected fakes are tested, and the wiring
+> between them is tested by nothing. Task 3 now specifies `java.util.Base64` (not the already-imported
+> `android.util.Base64`, which would make every negative Basic test pass vacuously), a canonical
+> authority comparison, and a pure `authenticate()` whose scheme preservation is pinned by a RED-proven
+> test — plus one hardware probe for the two seams the JVM lane cannot reach. See Notes → *Codex
+> round-2 disposition* and Testing Strategy → *Closing the seam class*.
 
 ## Summary
 
@@ -54,7 +63,7 @@ the new `handleSelectModel` lives in the new file, and it takes primitives rathe
 - **Complexity:** Medium-High (was Medium — the compat gate, the swap race, and the gate-wide CSRF guard are all correctness work, not rendering work)
 - **Source PRD:** N/A
 - **PRD Phase:** N/A
-- **Estimated Files:** 16 (2 created, 14 updated), plus a `.claude/HANDOFF.md` section
+- **Estimated Files:** 17 (3 created — including `BasicAuthGateProbe.kt`, the only cover for the two seams the JVM lane cannot reach — and 14 updated), plus a `.claude/HANDOFF.md` section
 - **Ships as two PRs** (O4, adopted): **PR-A** = Tasks 1-3 (auth + refresh + log hygiene + the 403 vocabulary); **PR-B** = Tasks 4-10 (the selector). PR-A is the security-sensitive half and gets a minimal blast radius for the security reviewer — which is also why the `Referrer-Policy` narrowing HIGH-3 requires is **defined** in PR-A and **shipped** in PR-B, in the commit that adds the form.
 - **Blocked on:** ~~all of `feature-18-trusted-lan-cert` landing first~~ — **satisfied.** #318 merged as `cf316146`; this plan is re-based onto it. See *Dependencies & Cross-plan Sequencing* for what remains (ordering against `feature-17`/`-19`/`-20`/`-22` only).
 
@@ -375,9 +384,10 @@ class ClientConfigEndpointProbe {
 | `.../main/java/cc/grepon/relais/RelaisHttpGate.kt` | **A** | UPDATE | `authorized: () -> AuthScheme?`, a new `rejectsAsCrossSite: () -> Boolean` supplier, `Reject.CROSS_SITE(403)`, and the two-line ordering change in `decide` (`:83-91`). **The Origin/Referer comparison algorithm does not go here** — see Task 3 |
 | `.../main/java/cc/grepon/relais/RelaisError.kt` | **A** | UPDATE | One new `const val` for the 403 envelope type (MEDIUM-0). Eight types today (`:33-56`), none for forbidden |
 | `.../main/java/cc/grepon/relais/RelaisMetrics.kt` | **A** | UPDATE | `recordRequest(endpoint, status, inRecentLog: Boolean = true)` (`:131`) |
-| `.../main/java/cc/grepon/relais/RelaisHttpServer.kt` | A + B | UPDATE | **PR-A:** parse `sec-fetch-site`, `origin`, `referer` **and `host`** in the header loop (`:340-348` — `host` has no arm today, and it is the one the `Origin` comparison is *against*); `extractApiKey` + `authorized()` → `AuthScheme?` (`:2069`); pass the two new suppliers to `decide` (`:356-367`); a `CROSS_SITE` arm in the reject `when` (`:373-389`); conditional `WWW-Authenticate` alongside the single `reply` (`:390`); `403 -> "Forbidden"` in `reason()` (`:2086-2100`); `inRecentLog = false` at `:866`. **PR-B:** `/select-model` route arm beside `:403` + `endpointLabel` entry beside `:2048`; `form-action 'self'` on the dashboard CSP (`:893`); **`Referrer-Policy: no-referrer` → `same-origin` at `:896` (HIGH-3 — load-bearing for PR-A's Origin fallback; ships here, defined in Task 3)**; the new `assembleDashboardStatus` arguments. **No visibility changes in either** |
+| `.../main/java/cc/grepon/relais/RelaisHttpServer.kt` | A + B | UPDATE | **PR-A:** parse `sec-fetch-site`, `origin`, `referer` **and `host`** in the header loop (`:340-348` — `host` has no arm today, and it is the one the `Origin` comparison is *against*); four new **pure, `android.*`-free, `internal`** helpers — `extractApiKey`, `authenticate`, `rejectsAsCrossSite`, `challengeHeaders` — with `authorized()` (`:2069`) reduced to a one-line delegation and left `private`; pass the two new suppliers to `decide` (`:356-367`); a `CROSS_SITE` arm in the reject `when` (`:373-389`); conditional `WWW-Authenticate` alongside the single `reply` (`:390`); `403 -> "Forbidden"` in `reason()` (`:2086-2100`); `inRecentLog = false` at `:866`. **PR-B:** `/select-model` route arm beside `:403` + `endpointLabel` entry beside `:2048`; `form-action 'self'` on the dashboard CSP (`:893`); **`Referrer-Policy: no-referrer` → `same-origin` at `:896` (HIGH-3 — load-bearing for PR-A's Origin fallback; ships here, defined in Task 3)**; the new `assembleDashboardStatus` arguments. **No visibility changes in either** |
 | `.../test/java/cc/grepon/relais/RelaisHttpGateTest.kt` | **A** | UPDATE | Retype the two wrappers (`:44`, `:64`), add `CountingAuth`, add the CROSS_SITE ordering tests. **Four assertion blocks must stay byte-identical and be re-proven RED after the migration** — see Testing Strategy |
-| `.../test/java/cc/grepon/relais/RelaisHttpAuthTest.kt` | **A** | **CREATE** | Basic/Bearer/bare-key parsing and the `rejectsAsCrossSite` predicate (tests 8a-8l), isolated from dashboard concerns. **The gate-ordering tests 8n-8p do NOT live here** — they belong in `RelaisHttpGateTest.kt` beside the counting blocks they extend. **This is the first JVM coverage `authorized()` has ever had** (grep-confirmed: the only `Bearer` assertions in the unit lane are `RelaisExperimentsTest.kt:143/188/225/255`, and those assert on a rendered page, not the gate) |
+| `.../androidTest/java/cc/grepon/relais/BasicAuthGateProbe.kt` | **A** | **CREATE** | **Test 8t — the only coverage seams S2/S3 get.** Four real requests against a loopback `RelaisHttpServer`, mirroring `ClientConfigEndpointProbe.kt`'s `assumeTrue`-gated shape and header `adb` line. Hardware-gated, **not CI** — see *Closing the seam class* |
+| `.../test/java/cc/grepon/relais/RelaisHttpAuthTest.kt` | **A** | **CREATE** | Pure-function coverage: `extractApiKey`, **`authenticate`** (test 8s — the parse→compare seam), `rejectsAsCrossSite` and `challengeHeaders` (tests 8a-8m, 8s). **Every function under test here must be `android.*`-free** or `isReturnDefaultValues = true` turns its negative rows vacuous. **The gate-ordering tests 8n-8p do NOT live here** — they belong in `RelaisHttpGateTest.kt` beside the counting blocks they extend. **This is the first JVM coverage `authorized()` has ever had** (grep-confirmed: the only `Bearer` assertions in the unit lane are `RelaisExperimentsTest.kt:143/188/225/255`, and those assert on a rendered page, not the gate) |
 | `.../test/java/cc/grepon/relais/RelaisErrorTest.kt` | **A** | UPDATE | One row in the type-constant enumeration at `:57-66` for MEDIUM-0's new constant |
 | `.../test/java/cc/grepon/relais/RelaisMetricsIncrementsTest.kt` | **A** | UPDATE | Ring-buffer opt-out |
 | `.../main/java/cc/grepon/relais/RelaisDashboard.kt` | A + B | UPDATE | **PR-A:** the meta-refresh tag after the viewport meta (`:293`). **PR-B:** extend `DashboardStatus` (+3 fields, `:34`), render the form + pending hint, add the pure form parser and validator, delete the READ-ONLY claim at `:176` |
@@ -489,19 +499,39 @@ constraint is discharged; what follows records what that changed and what orderi
   **Invocation counts are unchanged for every request shape reachable on `main` today.** (c) adds a supplier call only for `BASIC` + cross-site, a shape that cannot exist before this task, because Basic is not accepted at all.
 
 - **IMPLEMENT:** Five pieces.
-  1. `internal enum class AuthScheme { BEARER, BASIC }` and a pure `internal fun extractApiKey(header: String?): Pair<AuthScheme, String>?` — `Bearer <k>` → `(BEARER, k)`; `Basic <b64>` → base64-decode, then take the substring after the first `:` **using `decoded.substringAfter(':', "")`, or an explicit `if (decoded.indexOf(':') < 0) return null`** → `(BASIC, k)`; **anything else, including a bare scheme-less key, → `null`**.
+  1. `internal enum class AuthScheme { BEARER, BASIC }` and a pure `internal fun extractApiKey(header: String?): Pair<AuthScheme, String>?` — `Bearer <k>` → `(BEARER, k)`; `Basic <b64>` → base64-decode **with `java.util.Base64.getDecoder()`**, then take the substring after the first `:` **using `decoded.substringAfter(':', "")`, or an explicit `if (decoded.indexOf(':') < 0) return null`** → `(BASIC, k)`; **anything else, including a bare scheme-less key, → `null`**.
+
+     **P1-1 — `java.util.Base64`, NOT `android.util.Base64`, and this is not a style preference.** `android.util.Base64` is already imported at `RelaisHttpServer.kt:20`, which makes it the obvious reach — and it would quietly destroy this task's entire negative test surface. `isReturnDefaultValues = true` (`Android/src/app/build.gradle.kts:209`) makes unmocked `android.*` calls return defaults in the JVM lane, and that file's own comment admits the tradeoff: *"masks accidental unmocked-Android calls."* **The failure is asymmetric, which is what makes it dangerous:**
+     - 8a/8b/8c/8d (valid Basic decodes to the key) would **fail loudly** — a defaulted decode returns no bytes, so no key comes out.
+     - 8e (malformed base64) and **8k (colon-less — HIGH-2's whole point)** would **pass for the wrong reason**: a defaulted decode yields nothing, `null` comes back, and `null` is exactly what they assert.
+
+     An implementer who hits only the loud half may "fix" it by mocking `android.util.Base64` — which cements the vacuous negatives and leaves HIGH-2 pinned by a test that cannot fail. **The repo already wrote this rule down three times**, and the third even settles the API-level question:
+     - `RelaisHttpIo.kt:270` — *"Pure and device-free: base64-encodes via `java.util.Base64` (NOT `android.util.Base64`) so it runs…"*
+     - `RelaisImagesEndpoint.kt:25-26` — *"…so the envelope round-trips in plain JVM tests… **minSdk 31 carries java.util.Base64 (API 26+)**."* (`minSdk = 31`, `build.gradle.kts:44` — confirmed.)
+     - `RelaisAnthropicParser.kt:145-150` + `:157` — the *injection* variant: `decode: (String) -> ByteArray = { b64 -> JvmBase64.getDecoder().decode(b64) }`, with production passing the Android-backed decoder.
+
+     Use the **direct** `java.util.Base64` form (the `RelaisHttpIo`/`RelaisImagesEndpoint` shape), not the injected one — `extractApiKey` has no production reason to want a different decoder, and an injection point here is a seam an implementer could wire wrong (see R14). Use `getDecoder()`, **not** `getMimeDecoder()`: the strict decoder throws on non-alphabet input, which is what makes 8e's `runCatching` → `null` a real assertion rather than a silent acceptance. `RelaisHttpServer.kt:2084`'s existing `private fun decode` stays on `android.util.Base64` — it serves the multimodal image path and is not this task's concern.
 
      **HIGH-2 — the delimiter default is the whole point.** Kotlin's `String.substringAfter(delimiter)` defaults `missingDelimiterValue = this`, so a **colon-less** payload returns the receiver unchanged: `Authorization: Basic <base64(rawkey)>` would decode to the raw key and **authenticate**. That is the `removePrefix` footgun at `:2070` — the one this task exists to close — rebuilt in the new carrier, inside the security-sensitive PR, past a test table (8c/8d) that looks thorough precisely where the gap is. Pin it with **test 8k** and **prove it RED**: implement the bare `substringAfter(":")` first, watch 8k fail, then fix.
 
-  2. **`authorized()` changes its return type from `Boolean` to `AuthScheme?`** — `null` means *not authenticated*, a non-null value is *authenticated via that scheme*:
+  2. **`authorized()` changes its return type from `Boolean` to `AuthScheme?`** — `null` means *not authenticated*, a non-null value is *authenticated via that scheme*. **Put the parse AND the compare in a pure `internal` helper, and make `authorized()` a one-line delegation** (P1-3):
      ```kotlin
-     private fun authorized(header: String?): AuthScheme? {
+     /** Pure: parses the header and performs the constant-time compare. JVM-testable. */
+     internal fun authenticate(header: String?, apiKey: String): AuthScheme? {
        val (scheme, token) = extractApiKey(header) ?: return null
        // Constant-time compare to avoid leaking the key via response-timing differences.
        return if (MessageDigest.isEqual(token.toByteArray(), apiKey.toByteArray())) scheme else null
      }
+
+     private fun authorized(header: String?): AuthScheme? = authenticate(header, apiKey)
      ```
-     **This is the only call site** — the lambda at `:360`. Grep to confirm, and note the decoy (LOW-1): `grep 'fun authorized('` also returns `RelaisTaskerActivity.kt:82` (called at `:71`), an unrelated private `authorized(token: String)` on the intent-ABI path. It takes a bare token, not a header, and is **not** part of this change.
+     **Why the extra function rather than putting the body in `authorized()`.** Without it, the scheme-preservation step is tested by **nothing**. Tests 8a-8l exercise `extractApiKey` (pure); tests 8n-8p exercise `decide` with `CountingAuth(BASIC)` **injected**. An implementation that parses Basic flawlessly and then returns `BEARER` after a successful compare **passes every one of them** — and then every real Basic request skips the CSRF guard, so the feature silently does not exist with a green suite. Confirmed against the tree: there is **no JVM test class for `RelaisHttpServer`**, and **no test anywhere calls `authorized(`**. This extraction does **not** breach the plan's twice-stated no-visibility-widening rule: `authorized()` stays `private`, and `authenticate` is a **new** `internal` helper in exactly the sense `extractApiKey` already is — a member is not being widened. `MessageDigest.isEqual` is `java.security`, so the helper is JVM-clean (which is also why piece 1's `java.util.Base64` matters — an `android.util.Base64` call inside `extractApiKey` would defeat this test too).
+
+     Pinned by **test 8s**, proven RED by implementing the compare to `return BEARER` unconditionally.
+
+     **This is the third instance of this repo's signature failure, and the first caught in a plan rather than on hardware** — see R14, which names the two seams test 8s does *not* close.
+
+     **`authorized()` has exactly one call site** — the lambda at `:360`. Grep to confirm, and note the decoy (LOW-1): `grep 'fun authorized('` also returns `RelaisTaskerActivity.kt:82` (called at `:71`), an unrelated private `authorized(token: String)` on the intent-ABI path. It takes a bare token, not a header, and is **not** part of this change.
 
      **LOW-2 — settle the scheme-token case and the `.trim()`, explicitly.** Today `removePrefix("Bearer ")` is case-**sensitive**; RFC 7235 makes the `auth-scheme` token case-**insensitive**. **Decision: keep matching case-sensitively (`Bearer ` / `Basic `).** Accepting `bearer`/`basic` would be a *widening* shipped in the same diff as an advertised tightening, and nothing in the repo or its docs ever sends a lowercase scheme (`RelaisExperiments.kt:244/279/314/350`, `HttpChatTransport.kt:78`, and `RelaisClientConfig.kt:94` all use `Bearer`). **Keep the `.trim()`** on both branches — it is existing behaviour on the Bearer path (`:2070`) and dropping it would be a second silent tightening. Record both choices in `SECURITY.md`; a reviewer who reads RFC 7235 and not this line will otherwise file it as a bug.
 
@@ -511,8 +541,20 @@ constraint is discharged; what follows records what that changed and what orderi
 
      Rules:
      - **`secFetchSite` present:** `true` **only** for `"cross-site"` and `"same-site"`. `"none"`, `"same-origin"` and any unrecognised value → `false`.
-     - **`secFetchSite` absent AND `method != "GET"`** (codex P2, PR #310): extract the host from `origin` (preferred) or else `referer`, lowercase, and compare against the request's `host` header (also lowercased, port included) — mismatch, **or both absent**, → `true`.
+     - **`secFetchSite` absent AND `method != "GET"`** (codex P2, PR #310): derive a **canonical authority** from `origin` (preferred) or else `referer`, derive one from the `host` header, and compare them. Mismatch, **or both `origin` and `referer` absent**, **or `host` absent**, → `true`. See the next paragraph — "compare the host" is the under-specification that sinks this.
      - **`secFetchSite` absent AND `method == "GET"`:** `false`, regardless of `origin`/`referer`. A GET is not the state change this guard exists to stop, and the address-bar and meta-refresh cases have no `Origin`/`Referer` to check either.
+
+     **P1-2 — "compare the host" has two opposite wrong readings, and test 8j as originally filed passed under both.** The node advertises itself as `https://<ip>:8443` (`RelaisHttpServer.kt:883`), so a same-origin form POST arrives as `Origin: https://<ip>:8443` with `Host: <ip>:8443`. Conventional URI host extraction (`java.net.URI(origin).host`) **drops the port**. Therefore:
+     - Compare the extracted *hostname* against the raw `host` header value and you compare `<ip>` to `<ip>:8443` — **every same-origin POST falsely rejects.**
+     - Strip the port from both sides to "fix" that and a **cross-origin different-port** attacker (`https://<ip>:9999`) now compares equal — **the guard is open.**
+
+     Both faults were invisible to 8j as first written, because it used `https://<node-host>` with **no port** and had no `Referer`-only case. Specify the comparison, do not leave it to be inferred:
+
+     > **Canonical authority** = lowercased host **plus** an explicit port. Derive it from `origin`/`referer` by **parsing the URL** (`java.net.URI`), never by string-slicing, filling an absent port from **that URL's own scheme** (`https` → 443, `http` → 80) — the URL carries its scheme, so this needs nothing from outside the function. Take the `host`-header side as the **lowercased raw header value**, unchanged. Compare the two as whole strings. IPv6 literals keep their brackets on both sides (`[::1]:8443`) — `URI.getHost()` returns them bracketed and the `Host` header carries them bracketed, so they already agree **provided neither side is string-sliced**.
+
+     **The asymmetry is deliberate: only the `Origin` side gets a default port, never the `Host` side.** An earlier draft of this rule said to fill the `Host` side from "the listener's own scheme (TLS ⇒ 443, plaintext ⇒ 80)" — which **`rejectsAsCrossSite` cannot implement.** Its parameters are `(method, secFetchSite, origin, referer, host)`; none of them carries the listener's scheme, and adding a `tls: Boolean` to get it would push server state into a function whose purity is the entire reason the guard's algorithm lives outside `RelaisHttpGate` (see the STRUCTURE note above). The asymmetric rule needs no such parameter and fails in the **safe** direction: this node always binds an explicit port (`:8443` TLS, `127.0.0.1:8080` plaintext), so `Host` always carries one, and an `Origin` that omits its port canonicalises to `:443`/`:80`, matches nothing, and **rejects**. If a future change ever binds 443 or 80, the guard becomes *stricter*, not looser — the direction a security check should fail.
+
+     A malformed `origin`/`referer` must parse to `null` and therefore **reject** — not throw, not silently pass. Wrap the parse in `runCatching` exactly as the base64 decode is. Extended coverage is **test 8j's eight rows** below.
 
      **This branch is DORMANT in PR-A and load-bearing in PR-B — and that is exactly how it gets lost.** Nothing in the tree POSTs from a browser page until PR-B adds the form, so PR-A ships a rule no PR-A test exercises against a real navigation. Its correctness in PR-B **depends on a header PR-B must change**: the dashboard sends `Referrer-Policy: no-referrer` (`:896`), which per MDN makes a form POST arrive with `Origin: null` and no `Referer` — so under the rule above, *any UA that omits `Sec-Fetch-Site` would 403 the node's own form*. See research item 6, *Decisions → HIGH-3*, and the PR-B Files-to-Change row, which is flagged as a blocker. **Accepting `Origin: null` is not the alternative** — sandboxed iframes and cross-origin redirects send exactly that.
 
@@ -525,21 +567,32 @@ constraint is discharged; what follows records what that changed and what orderi
      **Why this rides in PR-A rather than PR-B.** The reason phrase is cosmetic on the wire (RFC 7230 §3.1.2 makes it advisory), but the **type is substantive**: reusing `AUTHENTICATION` for a CSRF 403 is actively wrong — the credential *is* valid, the request *context* is what is rejected — and an OpenAI-compatible client seeing `authentication_error` may enter a credential-refresh/retry loop against a request that can never succeed. `RelaisError`'s own KDoc (`:17-30`) makes envelope consistency the file's thesis and names LiteLLM and Open WebUI as the clients that trip on drift. PR-A is the change that introduces the **first 403 in the tree** (grep: the only other 403 handling is client-side, `RelaisHuggingFace.kt:186` and `ModelDownload.kt:72`); deferring means PR-A knowingly ships a mislabelled envelope and hands PR-B a defect it did not cause.
 
   5. **MEDIUM-3 — `WWW-Authenticate` needs a concrete insertion point.** Task 3's old claim that `reply()` takes headers so *"no new seam is needed"* is true but insufficient: the rejection is now a **single** `reply(reject.status, body)` at `:390`, fed by an exhaustive `when` that yields **only a body** (`:373-389`). The implementer needs a *parallel* computation, and must not attach the challenge to 429/413:
+     **Extract the decision as a pure helper (P2-4) so test 8m is actually executable.** Inline in `handle()`, 8m has nothing to call — `handle()` is not JVM-reachable — which is why the placement table previously hedged it to "manual-only if no helper is extracted". Scope the helper; do not leave the hedge:
      ```kotlin
-     val extra =
-       if (reject == RelaisHttpGate.Reject.UNAUTHORIZED && accept?.contains("text/html") == true)
+     /**
+      * Pure: the 401-and-HTML-only Basic challenge. Takes the STATUS, not `RelaisHttpGate.Reject` —
+      * see below. JVM-testable ([RelaisHttpAuthTest]).
+      */
+     internal fun challengeHeaders(status: Int, accept: String?): List<String> =
+       if (status == 401 && accept?.contains("text/html") == true)
          listOf("WWW-Authenticate: Basic realm=\"Relais\", charset=\"UTF-8\"")
        else emptyList()
-     reply(reject.status, body, extra)
+
+     // …at the single reject site:
+     reply(reject.status, body, challengeHeaders(reject.status, accept))
      ```
-     Keep the `when` an **expression** yielding the body only — that is what makes Kotlin enforce exhaustiveness, and it is why `CROSS_SITE` cannot be added without also adding its arm. Pin the negative with **test 8m**: a 429 and a 413 with `Accept: text/html` carry **no** challenge header.
+     **Take `status: Int`, not the `Reject` enum.** Typing the parameter as `RelaisHttpGate.Reject` would compile — same module — but it drags a gate type into the auth helper and into `RelaisHttpAuthTest.kt`, which otherwise touches no gate types at all; the `Reject` idiom belongs in `RelaisHttpGateTest.kt`, and splitting it across both files is how the placement table starts lying again. `status` is exactly equivalent here (`UNAUTHORIZED` is the only `Reject` carrying 401) and it keeps 8m in one file with one vocabulary. The call site still reads `reject.status`, so the "never a repeated literal" property from the ERROR_HANDLING pattern is preserved.
+
+     Keep the `when` an **expression** yielding the body only — that is what makes Kotlin enforce exhaustiveness, and it is why `CROSS_SITE` cannot be added without also adding its arm. **Test 8m** is now a real JVM test in `RelaisHttpAuthTest.kt`: `401` + `text/html` → the challenge; `429`, `413` and **`403`** with the same `Accept` → `emptyList()`; `401` with a non-HTML `Accept` → `emptyList()`. *The `403` row matters: a 403 means the credential was accepted, so challenging for it would tell a browser to re-prompt for a key that is already correct.* Note what 8m still does **not** cover — that `handle()` actually calls this at the reject site — which is R14's seam S3, closed by the probe.
 
      **Provenance of the non-GET fallback — codex review (P2, PR #310).** The `null`-allowed branch added for H1 is still CSRF-able for state-changing requests: a browser/WebView that omits `Sec-Fetch-Site` entirely (Fetch Metadata is not universal — older Safari, some embedded WebViews, some header-stripping proxies) reads as `null` and is allowed by design, so a foreign page loaded in such a client could fire an authenticated Basic `POST /select-model` once credentials are cached. Scoping the fallback to non-GET is what keeps GET navigation — address bar, bookmark, and the meta-refresh reload, which has the same missing-header property — untouched. Pinned by **test 8j**.
 
 - **MIRROR:** **not** the old inline gate — that code no longer exists (HIGH-1). Extend `RelaisHttpGate.decide`; the error envelope and the reply stay in `handle()`. Mirror the current reject block at `RelaisHttpServer.kt:368-392` (the exhaustive body-only `when`, the single `reply(reject.status, …)`), the supplier discipline documented at `RelaisHttpGate.kt:61-67`, and AUTH_PATTERN in *Patterns to Mirror* — one predicate, one credential, one constant-time compare.
-- **IMPORTS:** `android.util.Base64` (already imported in `RelaisHttpServer.kt`).
+- **IMPORTS:** **`java.util.Base64`** — aliased (`import java.util.Base64 as JvmBase64`), matching `RelaisAnthropicParser.kt:157`'s idiom, because `android.util.Base64` is already imported unaliased at `RelaisHttpServer.kt:20` and the two would collide. **Do not reach for the already-imported `android.util.Base64`** — see piece 1. `java.security.MessageDigest` is already imported and stays.
 - **GOTCHA:**
-  - Wrap the base64 decode in `runCatching` — malformed input must return `null`, never throw.
+  - Wrap the base64 decode in `runCatching` — malformed input must return `null`, never throw. Same for the `Origin`/`Referer` URL parse.
+  - **This task adds four pure helpers to a file the plan itself cites as too large — name the tension, do not let a reviewer find it.** `RelaisHttpServer.kt` is **2432** lines against an under-800 target, and the repo's rule (CLAUDE.md) is *prefer extracting a new file over growing an existing large file* — the very rule this plan invokes to justify **not** relocating `handleDashboard` (LOW-4) and to justify `RelaisHttpPages.kt` in PR-B. Adding `extractApiKey`, `authenticate`, `rejectsAsCrossSite` and `challengeHeaders` here grows it further. **The deferral is deliberate:** PR-A's minimal blast radius for the security reviewer (O4) outranks file hygiene for ~40 lines, and all four are pure and `internal`, so relocating them later is a move with no call-site changes beyond an import. Say so in PR-A's description rather than leaving it to be scored as the plan breaking its own rule. If a reviewer prefers a new `RelaisHttpAuth.kt` from the start, that is a reasonable call and costs nothing structural — it is the *timing* that is being deferred, not the principle.
+  - **Nothing added in this task may call `android.*`.** `extractApiKey`, `authenticate`, `rejectsAsCrossSite` and `challengeHeaders` are all pure and JVM-testable **by design, not by accident** — that is the only reason PR-A has any real test coverage at all, given there is no `RelaisHttpServer` unit test. A single `android.util.*` call inside any of them silently converts its negative test rows into vacuous ones under `isReturnDefaultValues = true` (`build.gradle.kts:209`).
   - **Do not add a length check or an early `return false`** before the compare; that reintroduces the timing signal the constant-time compare exists to remove (R6). The scheme parse is the only nullable step and it is not key-dependent, so it leaks nothing.
   - `accept` is lowercased at parse (`:343`); lowercase `sec-fetch-site` the same way and compare against lowercase literals.
   - **Allow `none`** — see research item 4; rejecting it `403`s the operator's very first address-bar navigation, which is the feature.
@@ -682,10 +735,12 @@ constraint is discharged; what follows records what that changed and what orderi
 | 8g | **Bare key, no scheme** | `Authorization: KEY` | `null` — pins the M3 tightening. Accepted today; **rejected after this change** | **Yes** |
 | 8h | Scheme returned, not just key | `Bearer KEY` vs `Basic base64(":KEY")` | `BEARER` vs `BASIC` — the gate branches on this | No |
 | 8i | `Sec-Fetch-Site` predicate | `GET` + `null`, `"none"`, `"same-origin"`, `"cross-site"`, `"same-site"`, `"garbage"` | `false, false, false, **true**, **true**, false` — **`none` must be allowed** or the first address-bar navigation 403s | **Yes** |
-| 8j | Non-GET `Origin`/`Referer` fallback | `POST`, no `Sec-Fetch-Site`: (i) no `Origin`/`Referer`; (ii) `Origin: https://<node-host>`; (iii) `Origin: https://evil.example` | `true`, `false`, `true` — the codex-P2 branch | **Yes** |
+| 8j | Non-GET `Origin`/`Referer` fallback — **authority comparison (P1-2)** | `POST`, no `Sec-Fetch-Site`, `Host: <ip>:8443` throughout: (i) no `Origin`/`Referer`; (ii) `Origin: https://<ip>:8443`; (iii) `Origin: https://evil.example`; **(iv) `Origin: https://<ip>:9999`** — same host, **different port**; **(v) `Host: [::1]:8443` + `Origin: https://[::1]:8443`** — bracketed IPv6 literal; **(vi) `Host` absent entirely**; **(vii) no `Origin`, `Referer: https://<ip>:8443/` only**; (viii) `Origin: ht!tp://[[[` — malformed | `true, false, true, **true**, **false**, **true**, **false**, **true**` — rows (ii)+(iv) together are what catch port-stripping, (ii)+(v) catch string-slicing, (vii) is the only `Referer`-fallback coverage, and (viii) must reject rather than throw. **The original three rows passed under BOTH opposite bugs** | **Yes** |
+| **8s** | **The real `authenticate()` PRESERVES the scheme (P1-3)** | `authenticate("Basic " + b64(":KEY"), "KEY")` and `authenticate("Bearer KEY", "KEY")` | **`BASIC`** and `BEARER` respectively. **Prove RED by implementing the compare to `return AuthScheme.BEARER` unconditionally** — under that bug 8a-8l and 8n-8p all still pass, every real Basic request bypasses the CSRF guard, and the feature silently does not exist. This row is the *only* JVM test of the parse→compare seam | **Yes** |
+| **8t** | **End-to-end gate wiring (`BasicAuthGateProbe.kt`, on-device)** | a real loopback `RelaisHttpServer`, four real requests — see *Closing the seam class* below | Basic+`cross-site` → **403**; Basic+`same-origin` → 200; **Bearer**+`cross-site` → 200; Basic `POST` + **`Origin: http://127.0.0.1:<port>`** (`http`, not `https` — the probe server is `tls = false`; see the note under that table), no `Sec-Fetch-Site` → **not 403**. **Not CI** — hardware-gated, like every `*Probe.kt` | **Yes** |
 | **8k** | **Basic, colon-less payload (HIGH-2)** | `Basic base64("KEY")` | **`null`** — no `:`, so no username field, so nothing to strip. **Prove RED by implementing bare `substringAfter(":")` first**; under that implementation this authenticates, which is the bare-key hole reopened through Basic | **Yes** |
 | 8l | Scheme-token case is deliberately narrow (LOW-2) | `bearer KEY`, `basic base64(":KEY")` | `null` for both — pins the decision *not* to widen to RFC 7235's case-insensitive token in this diff | **Yes** |
-| 8m | Challenge is 401-only (MEDIUM-3) | 429 and 413 rejects with `Accept: text/html` | **no** `WWW-Authenticate` header on either; the 401 with the same `Accept` **does** carry it | **Yes** |
+| 8m | Challenge is 401-and-HTML-only (MEDIUM-3) | `challengeHeaders(status, accept)` over `401`/`429`/`413`/**`403`** × `Accept: text/html`, plus `401` × `application/json` | the challenge **only** for `401` + `text/html`; `emptyList()` for all five others. **The `403` row is the new one** — a 403 means the credential was accepted, so challenging would re-prompt for a key that is already correct | **Yes** |
 | 8n | `CROSS_SITE` precedes both budgets (HIGH-4) | `decide` with `CountingAuth(BASIC)`, `rejectsAsCrossSite = { true }`, `Counting` on both budgets | `Reject.CROSS_SITE`; **`rate.calls == 0` and `exempt.calls == 0`** — a cross-site reject must not burn the operator's own budget, since the attacker page runs on the operator's IP | **Yes** |
 | 8o | Bearer is untouched by the guard | `CountingAuth(BEARER)`, `rejectsAsCrossSite` as a **counting** supplier | not rejected; **the cross-site supplier is never called** (`calls == 0`) | **Yes** |
 | 8p | An auth-exempt path cannot trip the guard | `GET /health` and `GET /ca.crt`, `rejectsAsCrossSite = { true }` | not rejected; **`auth.calls == 0`** — no `authorized()` runs, so there is no scheme (HIGH-1 tail; `/ca.crt` is exempt since #318) | **Yes** |
@@ -695,17 +750,65 @@ constraint is discharged; what follows records what that changed and what orderi
 | — | **Invert** `RelaisDashboardTest.kt:396-403` | shipped fixture | now **asserts** the form is present | No |
 | — | **Referrer-Policy gate (PR-B, HIGH-3)** | the dashboard's header list | contains `Referrer-Policy: same-origin`, with an assertion message naming the CSRF dependency, so a revert to `no-referrer` **fails a test** instead of silently reopening HIGH-3 | **Yes** |
 
+### Closing the seam class, not just the instance (R14)
+
+**The three findings above are three instances of ONE defect**, and fixing them one at a time leaves
+the class open. The shape: *a pure helper is tested, an injected fake is tested, and the wiring
+between them is tested by nothing.* Three such seams exist in Task 3:
+
+| # | Seam | Covered by |
+|---|---|---|
+| **S1** | `extractApiKey` → the constant-time compare: does a successful Basic auth **report `BASIC`**? | **Test 8s** (JVM), via the `authenticate()` extraction |
+| **S2** | header loop → the `rejectsAsCrossSite` supplier: does `handle()` parse all four headers and pass them into the **right slots**? | **Nothing in the JVM lane.** 8i/8j call the predicate directly *with* a host argument; 8n injects `{ true }`. **P1-2's missing `host` arm lands exactly here** — omit it and every JVM test still passes |
+| **S3** | `authorized()` / `challengeHeaders()` → their call sites in `handle()`: are they called at all? | **Nothing in the JVM lane** — `handle()` has no unit test and cannot get one without the widening this plan forbids |
+
+S2 and S3 are not reachable from the JVM lane at any price PR-A should pay. This repo already has
+the instrument for exactly that situation — CLAUDE.md: *"Endpoint/IO code that needs a real
+capability check belongs in `androidTest` as a `*Probe.kt`"* — with direct precedent in
+`ClientConfigEndpointProbe.kt` (already quoted as this plan's PROBE_STRUCTURE) and
+`IncompatibleModel404Probe.kt`, which probes gate behaviour specifically.
+
+**So: one new probe, `BasicAuthGateProbe.kt`, four requests against a real loopback server (test
+8t).** Each request covers a seam no unit test can reach:
+
+| Request | What it proves that no JVM test does |
+|---|---|
+| Basic + `Sec-Fetch-Site: cross-site` → **403** | The whole chain: header parsed → scheme preserved → supplier wired → gate ordered → `CROSS_SITE` arm reached |
+| Basic + `Sec-Fetch-Site: same-origin` → **200** | The guard is not simply rejecting all Basic |
+| **Bearer** + `Sec-Fetch-Site: cross-site` → **200** | The guard is scheme-scoped **end to end**, not just in `decide`'s injected view — this is the one that fails if `authenticate()` returns the wrong scheme in production but 8s was mutated away |
+| Basic `POST`, no `Sec-Fetch-Site`, **`Origin: http://127.0.0.1:<port>`** → **not 403** *(scheme matters — see below)* | `host` is actually parsed (S2) and the authority comparison agrees with a real `Host` header — **the P1-2 fault, in the only place it is observable** |
+
+**`http://`, not `https://`, in that fourth row — and this is a trap, not a typo.** The probe pattern
+this mirrors builds its server as `RelaisHttpServer(context, port = port, tls = false, bindAddr =
+"127.0.0.1")` (`ClientConfigEndpointProbe.kt`, quoted in PROBE_STRUCTURE). With `tls = false` the
+origin is `http://`, so an `Origin: https://127.0.0.1:<port>` would canonicalise against a scheme the
+listener is not speaking and **mismatch even under a correct implementation** — and an implementer
+watching the row fail would "fix" the comparison to make it pass, breaking the real rule to satisfy a
+wrong test. Add a fifth row if you want the negative: `Origin: http://127.0.0.1:<other-port>` → 403,
+which is the different-port case (8j row iv) observed end to end.
+
+**State the limitation honestly rather than implying this is automated:** probes are **not CI** — they
+need hardware and an explicit `-e RELAIS_PROBE 1`. This is a discipline gate, and it is the same bar
+feature-18 shipped under. The repo's own lesson applies: *hardware-verified-or-not-done.* Put the
+runnable `adb` line in the probe's file header, matching `ClientConfigEndpointProbe.kt`.
+
+*Alternative considered and declined:* extracting the header-parse `when` (`:340-348`) into a pure
+function would make S2 JVM-testable. Rejected — it restructures shipped code inside the
+security-sensitive PR, which *NOT Building* forbids, and it trades a bounded hardware check for an
+unbounded refactor. Revisit if a later PR has reason to touch that loop anyway.
+
 **Which file each new test lands in.** The ordering evidence must not end up split across two files,
 or the next reviewer cannot tell whether the counting discipline was preserved:
 
 | Tests | File | Why |
 |---|---|---|
-| 8a-8h, 8k, 8l | `RelaisHttpAuthTest.kt` (**new**) | Pure `extractApiKey`/`authorized` parsing — no gate involved |
+| 8a-8h, 8k, 8l, **8s** | `RelaisHttpAuthTest.kt` (**new**) | Pure `extractApiKey` / `authenticate` — no gate involved. **8s is the seam test; it must be here and it must be proven RED** |
 | 8i, 8j | `RelaisHttpAuthTest.kt` (**new**) | Pure `rejectsAsCrossSite` predicate — the *rule*, tested directly |
 | **8n, 8o, 8p** | **`RelaisHttpGateTest.kt`** | These call `RelaisHttpGate.decide` with `CountingAuth`/`Counting`. They belong **beside** the four byte-identical blocks whose idiom they extend — that adjacency is what makes the ordering evidence readable as one argument |
-| 8m | `RelaisHttpAuthTest.kt` if the challenge computation is extracted as a pure function; otherwise manual check 6f | `reply`/`handle()` are not JVM-reachable — see 8r |
+| **8m** | **`RelaisHttpAuthTest.kt`** | **No longer conditional (P2-4):** Task 3 piece 5 scopes the pure `challengeHeaders(status, accept)` helper, so 8m is a real JVM test. The earlier "…if a helper is extracted, otherwise manual" hedge contradicted Task 3's claim that 8m *pins* the behaviour; the hedge is removed and the helper is scoped. **It takes `status: Int`, not `RelaisHttpGate.Reject`** — deliberately, so this file stays free of gate types and the `Reject` vocabulary stays in `RelaisHttpGateTest.kt` |
 | 8q | `RelaisErrorTest.kt` | One row in the existing constant enumeration |
 | 8r | **manual check 6e only** | `reason()` is private and this plan forbids widening it — see the table above |
+| **8t** | **`androidTest/.../BasicAuthGateProbe.kt`** (**new**) | The only thing covering S2 and S3. Hardware-gated, not CI |
 
 ### Test-file migration (`RelaisHttpGateTest.kt`) — read before editing it
 
@@ -759,7 +862,12 @@ fix the fakes before continuing.
 - [ ] **Basic payload with NO `:` at all ⇒ `null`**, not the raw key (HIGH-2 — `substringAfter(':', "")`).
 - [ ] Malformed base64 and malformed `%` escapes return `null` rather than throwing.
 - [ ] `Sec-Fetch-Site` **absent** ⇒ allowed **on GET** (curl/SDK read path preserved); on non-GET it falls back to the `Origin`/`Referer` same-host check; **`none` ⇒ allowed** (address-bar navigation, the primary way an operator opens this page).
+- [ ] **A successful Basic auth reports `BASIC`** — the parse and the compare agree (8s). The single most consequential assertion in PR-A: without it the guard can be wired perfectly and still never fire.
+- [ ] Same host, **different port** ⇒ cross-site (`https://<ip>:9999` vs `Host: <ip>:8443`); same host, same port ⇒ allowed. Both, or the comparison is wrong in one of the two opposite directions.
+- [ ] Bracketed IPv6 authorities compare equal to themselves (`[::1]:8443`), and an absent `Host` rejects.
+- [ ] A `Referer`-only request (no `Origin`) still resolves — the fallback's second limb is exercised, not just its first.
 - [ ] A cross-site 403 charges **neither** rate-limit budget (HIGH-4) — the attacker page shares the operator's IP.
+- [ ] A `CROSS_SITE` reject carries **no** `WWW-Authenticate` — the credential was valid, so re-prompting for it is wrong.
 - [ ] An auth-exempt path (`GET /health`, `GET /ca.crt`) can never trip the CSRF guard, because no `authorized()` runs there.
 - [ ] A 403 answers `403 Forbidden` with `type: permission_error` — **not** `403 ERR` with `authentication_error`.
 - [ ] `WWW-Authenticate` appears on the 401 with `Accept: text/html` and on **nothing else** — not the 429, not the 413.
@@ -796,6 +904,21 @@ grep -rn 'fun authorized(' Android/src/app/src
 
 # Task 3 changes `RelaisHttpGate.decide`'s signature. Confirm nothing else calls it.
 grep -rn 'RelaisHttpGate.decide' Android/src/app/src              # expect handle() + RelaisHttpGateTest.kt only
+
+# R15: the four new helpers must be android.*-free, or isReturnDefaultValues silently guts their
+# negative test rows. Run this on the diff, not the file.
+git diff main -- Android/src/app/src/main/java/cc/grepon/relais/RelaisHttpServer.kt | grep '^+' | grep 'android\.'
+#   expect NOTHING in extractApiKey / authenticate / rejectsAsCrossSite / challengeHeaders
+grep -n 'isReturnDefaultValues' Android/src/app/build.gradle.kts   # :209 — read the comment above it
+
+# R14 seam: confirm the gap this plan is closing actually exists before trusting 8s is worth writing.
+ls Android/src/app/src/test/java/cc/grepon/relais/ | grep -i 'RelaisHttpServerTest'  # expect NOTHING
+grep -rn 'authorized(' Android/src/app/src/test Android/src/app/src/androidTest      # expect NOTHING pre-change
+
+# The probe is NOT part of CI. Compile it, then actually run it on hardware.
+cd Android/src && ./gradlew :app:compileFullOpenDebugAndroidTestKotlin
+adb shell am instrument -w -e class cc.grepon.relais.BasicAuthGateProbe \
+  -e RELAIS_PROBE 1 com.ventouxlabs.relais.izzy.test/androidx.test.runner.AndroidJUnitRunner
 
 # MEDIUM-0: confirm PR-A really is introducing the first server-side 403.
 grep -rn '403' Android/src/app/src/main/java/cc/grepon/relais/RelaisHttpServer.kt
@@ -899,6 +1022,12 @@ curl -sk -u ":$KEY" https://$IP:8443/ | grep -c 'class="label">/</td>'   # expec
 - [ ] `Authorization: <rawkey>` with no scheme is rejected, **and so is `Basic base64(rawkey)` with no colon** (HIGH-2), and both are recorded in `SECURITY.md` and `.claude/HANDOFF.md`.
 - [ ] `WWW-Authenticate` rides the `401` with `Accept: text/html` and **nothing else** — a 429 and a 413 with the same `Accept` carry no challenge.
 - [ ] The four byte-identical assertion blocks in `RelaisHttpGateTest.kt` survived the `CountingAuth` migration **and were re-proven RED against both mutations** (double `authorized()` call; eager `rateLimitOk()`).
+- [ ] **A valid Basic credential reports `BASIC`, not `BEARER`** — test 8s, proven RED by a compare that returns `BEARER` unconditionally. Without it the feature can ship non-existent with a green suite (R14).
+- [ ] **Every new function in Task 3 is `android.*`-free** — `extractApiKey`, `authenticate`, `rejectsAsCrossSite`, `challengeHeaders`. Base64 is `java.util.Base64`, not the already-imported `android.util.Base64` (R15). Grep the new code for `android.` before review.
+- [ ] The `Origin`/`Referer` check compares **canonical authorities** (host + explicit-or-scheme-default port, brackets intact), and test 8j covers matching port, **mismatching port**, bracketed IPv6, absent `Host`, `Referer`-only, and a malformed URL — the three-row version passed under two opposite bugs (P1-2).
+- [ ] `host` is parsed in the header loop. *(It has no arm today; omitting it fails no JVM test.)*
+- [ ] **`BasicAuthGateProbe.kt` was actually run on hardware** and its four requests pass. CI runs none of it; an unrun probe means seams S2/S3 shipped unverified.
+- [ ] `authorized()` is still `private`, and no existing member of `RelaisHttpServer.kt` was widened — `authenticate` and `challengeHeaders` are **new** `internal` helpers, which is not the same thing.
 - [ ] `POST /select-model` validates membership **first** and compat **second**, and persists nothing on either rejection.
 - [ ] The dropdown offers exactly `(registry ∪ configured id)` minus anything with an `incompatibleReason`, sorted lexicographically, with copy §1.4 L93 amended from "catalog order" to match (Task 4 gotcha 1b).
 - [ ] A valid switch **dispatches the swap first** and persists **through `ModelSwitch.applyManualId`** only when the dispatch won the CAS; a concurrent second submit gets `503 + Retry-After` and persists nothing. No app restart required.
@@ -918,7 +1047,8 @@ curl -sk -u ":$KEY" https://$IP:8443/ | grep -c 'class="label">/</td>'   # expec
 - [ ] Patterns followed (NAMING_CONVENTION, ERROR_HANDLING, LOGGING_PATTERN, HANDLER_PATTERN, TEST_STRUCTURE, PROBE_STRUCTURE)
 - [ ] Error handling explicit at every boundary; no silently swallowed failures; malformed input returns `null`, never throws
 - [ ] Logging via file-private `TAG`; no key, IP, body, or raw path logged
-- [ ] Tests written, proven RED first, three-flavor lane green
+- [ ] Tests written, proven RED first, three-flavor lane green — **including 8s (scheme preservation) and 8k (colon-less Basic), the two whose RED proof is the only thing distinguishing them from vacuous rows**
+- [ ] `BasicAuthGateProbe.kt` **run on hardware**, not merely compiled — CI covers seams S2/S3 not at all
 - [ ] No hardcoded values — colors from the `:root` token block, capacity from `REQUEST_LOG_CAPACITY`, model ids from the registry
 - [ ] Docs updated (`dashboard-copy.md` — amended **and extended**, `SECURITY.md`, `RUNBOOK.md`, `HANDOFF.md`, `ModelSwitch.kt` KDoc)
 - [ ] No scope additions beyond NOT Building — in particular, no handler relocation and no `internal` widening in `RelaisHttpServer.kt`
@@ -938,6 +1068,8 @@ curl -sk -u ":$KEY" https://$IP:8443/ | grep -c 'class="label">/</td>'   # expec
 | **R3** — **Accepting Basic converts an explicit credential into an ambient one across ~20 routes** (rewritten; the previous "the carrier changes but the credential does not" framing was a false premise) | **Certain** | **Medium** | The mechanism, stated honestly: today a `Bearer` header must be set by script, and a cross-origin request carrying it triggers a CORS preflight this server fails (no `Access-Control-*` anywhere — grepped). Cached **Basic** credentials are re-attached by the UA itself, no script, no preflight; and `Content-Type` is never enforced on the JSON routes (`:345` parsed, read only for multipart at `:553`/`:734`), so a cross-site *simple* POST reaches `handleOpenAi`. Impact is capped at **side effects, no read** — the response is opaque without CORS — but that still buys an attacker page unmetered inference, RAG corpus injection, session mutation and batch-job creation. **Mitigation (Task 3): the `Sec-Fetch-Site` guard runs inside `RelaisHttpGate.decide` for every Basic-authenticated request**, not on `/select-model` alone. Residual: a browser too old to send `Sec-Fetch-Site` gets no protection — acceptable on a trusted LAN, documented in `SECURITY.md` |
 | **R3b** — The `Sec-Fetch-Site` rule is easy to get wrong in the direction that breaks the feature | Medium | Medium | Reject **only** `cross-site` and `same-site`. Allow `none` — that is what an address-bar navigation sends, and an attacker page cannot produce it. A reviewer working from the obvious-sounding "reject unless `same-origin`" will 403 the first page load; test 8i pins all six cases. **For state-changing (non-GET) requests specifically**, an absent header falls back to an `Origin`/`Referer` same-host check rather than being allowed outright (codex P2 review, PR #310) — test 8j. *One thing this risk previously over-stated is now settled: a meta refresh **cannot** send `same-site`, because `same-site` means "same site, **different** origin" and a meta refresh targets the identical URL. The page cannot 403 itself (MEDIUM-2).* |
 | **R3c** — **PR-A ships the `Origin`/`Referer` fallback DORMANT; PR-B is where it can 403 the node's own form** | **Medium** | **High** | Nothing in the tree POSTs from a browser page until PR-B adds the form, so no PR-A test exercises the branch against a real navigation and no PR-A reviewer has a reason to think about `Referrer-Policy`. Under the dashboard's `no-referrer` (`RelaisHttpServer.kt:896`) a form POST arrives with `Origin: null` and no `Referer` (MDN), so the fallback 403s the node's own form on any UA that omits `Sec-Fetch-Site` — Safari < 16.4, older embedded WebViews, header-stripping proxies. The failure is opaque: the form renders enabled, the operator clicks `SET MODEL`, and gets a 403 with no diagnostic. **Mitigation is three mechanical measures, not a note** — see *Decisions → HIGH-3*. Accepting `Origin: null` is **not** among them: sandboxed iframes and cross-origin redirects send exactly that |
+| **R14** — **The seam between the tested halves is tested by nothing — this repo's signature failure, third occurrence** | **Medium** | **High** | Pure helpers get unit tests, `decide` gets injected fakes, and the **wiring** gets neither. An implementation that parses Basic perfectly and returns `BEARER` after the compare passes 8a-8l **and** 8n-8p, while every real Basic request bypasses the CSRF guard: the feature does not exist, suite green. Verified: **no JVM test class for `RelaisHttpServer`**, and **no test in the tree calls `authorized(`**. Precedent — in-app chat lost its `(Application)` ctor with every layer green, and the report Worker could not boot past 24 green tests, a clean dry-run and two codex passes. **Mitigation: test 8s** (JVM, closes seam S1, proven RED) **plus probe 8t** (closes S2/S3 — the only reach into `handle()`). **Residual, stated rather than papered over:** 8t is `androidTest`, so **CI catches none of it**; if the probe is not run on hardware, S2 and S3 ship unverified. Same bar feature-18 shipped under — *hardware-verified-or-not-done*. See *Closing the seam class* |
+| **R15** — **`android.util.Base64` in the pure extractor would make the negative tests vacuous** | Medium | **High** | `isReturnDefaultValues = true` (`build.gradle.kts:209`, whose own comment admits it *"masks accidental unmocked-Android calls"*) makes unmocked `android.*` return defaults in the JVM lane. The failure is **asymmetric**: positive rows fail loudly, but 8e and **8k — HIGH-2's only pin** — pass for the wrong reason, because a defaulted decode yields `null` and `null` is what they assert. An implementer who "fixes" the loud half by mocking cements the vacuous half. **Mitigation: `java.util.Base64` (aliased), stated three ways** in Task 3 piece 1, the IMPORTS line and a GOTCHA, with the repo's three existing precedents cited. The general rule — *nothing added in this task may call `android.*`* — is what keeps `authenticate` and `challengeHeaders` testable too |
 | **R13** — **A 10s refresh spends 20% of the per-IP budget, and the first 429 ends the refresh chain for good** (MEDIUM-1; **pre-existing in this plan, not caused by #316/#317/#318**) | **Medium** | Medium | `/` is not auth-exempt, so each refresh charges `RATE_LIMIT = 30`/60s (`:92`), not the 120 exempt budget (`:102`): one idle tab = 6 req/min = 20%, two = 40%, shared with SDK traffic from the same machine. A 429 answers **JSON**, which carries no meta-refresh tag, so the chain **stops dead** and the tab shows raw JSON until a manual reload. **Decision: keep 10s** — 30s reads as dead on a status panel (O2) and the cost is stated rather than traded away. Record it in `SECURITY.md`/`RUNBOOK.md` and watch for it in the on-device check. If operators hit it, the fix is the budget (exempt-eligibility for `/`, or a higher `RATE_LIMIT`), not the interval — both out of scope here |
 | **R4** — **A second `SET MODEL` mid-swap persists a selection whose swap was silently dropped** (re-diagnosed; the mitigation previously cited the wrong line) | Medium | **High** | The guard is the `swapDispatching` CAS at `RelaisEngine.kt:434`, **not** `startupInProgress` at `:437` (which is merely *set* there). `swapDispatching` clears only in the `finally` at `:493-496`, so a mid-swap call no-ops — config would say B, engine serve A, no retry ever scheduled, `303` reads as success. The disabled-form UI guard does not cover it: the meta refresh can repaint an unlocked form in the window between persist and `startupInProgress = true`, and a stale tab can POST at any time. **Fix (Tasks 7-8): the swap function returns whether it won the CAS; dispatch first, persist only on `true`, answer `503 + Retry-After` otherwise.** Residual: `true` means the thread started, not that it succeeded — it can still bail at `:455-458` — which is what the pending hint surfaces |
 | **R5** — R8 minification is on in release and CI runs none of it | Low | High | No reflection added, so no new keep rules expected — but confirm on the on-device release gate, since CI cannot |
@@ -1120,8 +1252,64 @@ rewritten** — a fresh citation stapled to a dead reason is the failure this ro
 | **LOW-3** | Task 1's "all-`/` panel" framing is true but **less unique than claimed** | **Fixed.** `/health` records through `ctx.send` (`:812`) → `reply` (`:309-310`) — chain verified end to end rather than taken from the report — and #318's `handleCaCert` records at `:839`, so a monitoring poller floods the same 20 slots harder. Task 1's GOTCHA, the Problem→Solution row and the acceptance criterion now all say "a reduction in `/` noise", not "the panel is clean" |
 | **LOW-4** | The sequencing notes are **spent** — #318 landed as `cf316146` | **Fixed, and the rationale replaced rather than recited.** The do-not-relocate conclusion stands, but no longer on "keeps feature-18's line references valid" (those have been consumed). It now rests on CLAUDE.md: `RelaisHttpServer.kt` is **2432** lines against an under-800 target, and the repo's rule is *extract new code rather than grow the file* — which relocating working code does not serve, while it would force two visibility widenings (H2). `Blocked on:` struck from Metadata, the two table rows rewritten, and the acceptance criterion restated as satisfied fact. The stale "2202-line server" figure in Files-to-Change is corrected — that number is exactly what the conclusion now rests on |
 
-**Citations refreshed.** Every reference in this document was re-derived by `grep`, not taken from
-the review. The six the lead verified — `handleDashboard` **:862**, CSP **:893** (plus the second CSP
+### Codex round-2 disposition (2026-09-12, against revision `98e18683`)
+
+A second codex pass **on the revision itself** found four issues, three P1. All four applied; both
+load-bearing claims independently re-verified against the tree before acceptance. The theme is that
+the *prescriptions* in round 1 were not reliable either — and the three P1s turn out to be **three
+instances of one defect class**, which is the finding that mattered most.
+
+| # | Finding | Disposition |
+|---|---|---|
+| **P1-1** | `android.util.Base64` makes the Basic tests non-hermetic | **Fixed, and the evidence is stronger than reported.** Verified `isReturnDefaultValues = true` at `build.gradle.kts:209` with its own "masks accidental unmocked-Android calls" comment, and `minSdk = 31` at `:44`. The report cited one precedent; there are **three** — `RelaisHttpIo.kt:270`, `RelaisImagesEndpoint.kt:25-26` (which also pre-settles the API level: *"minSdk 31 carries java.util.Base64 (API 26+)"*), and `RelaisAnthropicParser.kt:145-157` (the injection variant). Specified the **direct** `java.util.Base64` form, aliased to avoid colliding with the existing unaliased import at `:20`, and `getDecoder()` not `getMimeDecoder()` so 8e's `runCatching` is a real assertion. Generalised to a rule — **nothing added in this task may call `android.*`** — because `authenticate` and `challengeHeaders` have the same exposure. Recorded as **R15**. The existing `private fun decode` at `:2084` stays on the Android decoder; it serves the multimodal path |
+| **P1-2** | The authority comparison is underspecified in a way 8j cannot catch | **Fixed.** Confirmed the node advertises `https://<ip>:8443` (`:883`), so `Origin` carries a port and `java.net.URI.getHost()` drops it. Both opposite bugs — comparing hostname-to-`host:port` (rejects every same-origin POST) and stripping ports from both sides (accepts a different-port cross-origin attacker) — passed the original three-row 8j. Specified **canonical authority** (lowercased host + explicit-or-scheme-default port, parsed not sliced, brackets intact) and extended 8j from three rows to **eight**: matching port, mismatching port, bracketed IPv6, absent `Host`, `Referer`-only, and a malformed URL that must reject rather than throw. Noted the scheme-default fill is defensive — this node never binds 443/80 — so the rule is right for its own reasons rather than for a port number a later change could move |
+| **P1-3** | The seam between the two tested halves is tested by nothing | **Fixed as proposed, then widened — see below.** Confirmed both halves: no JVM test class for `RelaisHttpServer`, and **no test in the tree calls `authorized(`**. Adopted the `internal fun authenticate(header, apiKey)` extraction; it does not breach the no-widening rule, since `authorized()` stays `private` and this adds a **new** `internal` helper as `extractApiKey` already is. Test **8s** pins scheme preservation, RED-proven by a compare returning `BEARER` unconditionally. Recorded as **R14** |
+| **P2-4** | 8m is still not executable as filed | **Fixed by scoping the helper, not by downgrading.** Task 3 piece 5 specifies a pure `internal fun challengeHeaders(status: Int, accept: String?): List<String>`, so 8m becomes a real JVM test in `RelaisHttpAuthTest.kt` and the placement table's "…if a helper is extracted, otherwise manual" hedge is deleted. The two places now agree. **It takes `status`, not `RelaisHttpGate.Reject`:** the enum version compiles (same module) but drags a gate type into a test file that otherwise touches none, re-splitting the vocabulary the placement table exists to keep together; `status` is exactly equivalent, since `UNAUTHORIZED` is the only `Reject` carrying 401, and the call site still reads `reject.status` so no literal is repeated. Added a row the finding did not ask for: **a 403 must carry no challenge** — the credential was *accepted*, so challenging would tell the browser to re-prompt for a key that is already correct |
+
+**Three corrections to this round's own fixes, caught before the commit landed** — the same lesson as
+rounds 1 and 2, now applied to my own output:
+
+- **The `Host`-side scheme default contradicted the boundary two rounds went into defending.** My first
+  draft of P1-2's rule said to fill the `Host` side's absent port "from the listener's own scheme" —
+  but `rejectsAsCrossSite(method, secFetchSite, origin, referer, host)` carries no scheme, so **the
+  function could not implement its own spec**, and adding a `tls: Boolean` would push server state into
+  the function whose purity is the entire reason the algorithm lives outside `RelaisHttpGate`. Rewritten
+  asymmetric: default-fill the **`Origin` side only**, from the URL's own scheme; take `Host` as the raw
+  lowercased value. Needs no new parameter and fails **strict**, not loose.
+- **`challengeHeaders` took a gate type it did not need** — see the P2-4 row above.
+- **Probe row 4 used `https://` against a `tls = false` probe server**, so it would have failed under a
+  *correct* implementation and invited an implementer to "fix" the comparison to satisfy a wrong test.
+  Corrected to `http://`, with the reason written down beside it.
+
+**Where I went past the report — P1-3 closes an instance; the class needed more.** Asked whether test
+8s alone is sufficient, the answer is no, and P1-2 is the proof: **three** seams of this shape exist
+in Task 3, and P1-2's missing `host` arm lands squarely in the one that 8s does not touch.
+
+- **S1** — parse → compare (does Basic report `BASIC`?): closed by **8s**, JVM.
+- **S2** — header loop → the `rejectsAsCrossSite` supplier (are all four headers parsed and passed to
+  the right slots?): **uncovered**. 8i/8j call the predicate directly *with* a host; 8n injects
+  `{ true }`. Omit the `host` arm entirely and **every JVM test still passes.**
+- **S3** — `authorized()` / `challengeHeaders()` → their call sites in `handle()` (are they called at
+  all?): **uncovered**, and unreachable without the widening this plan forbids.
+
+S2 and S3 cannot be reached from the JVM lane at a price PR-A should pay, so they are closed by one
+new hardware probe — **`BasicAuthGateProbe.kt`, test 8t** — using the repo's own documented
+instrument for exactly this situation (CLAUDE.md's `*Probe.kt` rule; precedent in
+`ClientConfigEndpointProbe.kt`, already this plan's PROBE_STRUCTURE, and `IncompatibleModel404Probe.kt`).
+Four requests, each covering a seam no unit test reaches; the Bearer + `cross-site` → 200 row is the
+one that catches a wrong-scheme production bug even if 8s were mutated away, and the
+`Origin`-with-real-`Host` row is the only place P1-2's fault is observable. Full reasoning, and the
+declined JVM alternative (extracting the header-parse `when`), are under *Closing the seam class*.
+
+**The residual is stated, not papered over:** probes are `androidTest`, so **CI catches none of this**.
+An unrun probe means S2 and S3 ship unverified. That is the same bar feature-18 shipped under, and the
+repo's own rule — *hardware-verified-or-not-done* — is why the acceptance criteria now ask whether the
+probe was **actually run**, not whether it exists.
+
+### Citations
+
+**Every reference in this document was re-derived by `grep`, not taken from
+the review.** The six the lead verified — `handleDashboard` **:862**, CSP **:893** (plus the second CSP
 at **:918** for `/experiments`), `respondText` **:2105**, `authorized()` **:2069**, `recordRequest`
 **`RelaisMetrics.kt:131`** with signature `(endpoint: String, status: Int)`, and
 `RelaisHttpServer.kt` = **2432** lines — plus a further ~40 the review did not list, among them:
