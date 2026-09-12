@@ -63,5 +63,9 @@ class RelaisErrorTest {
     assertEquals("service_unavailable", RelaisError.SERVICE_UNAVAILABLE)
     assertEquals("internal_error", RelaisError.INTERNAL_ERROR)
     assertEquals("corpus_full", RelaisError.CORPUS_FULL)
+    // PERMISSION must stay distinct from AUTHENTICATION: the 403 it labels means the credential was
+    // VALID and the request context was rejected, so a client reading it as an auth failure may
+    // enter a credential-refresh loop against a request that can never succeed.
+    assertEquals("permission_error", RelaisError.PERMISSION)
   }
 }

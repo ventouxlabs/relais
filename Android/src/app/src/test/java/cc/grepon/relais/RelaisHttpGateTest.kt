@@ -44,7 +44,8 @@ class RelaisHttpGateTest {
   private fun decide(
     method: String = "GET",
     path: String = "/v1/models",
-    authorized: Boolean = true,
+    authorized: AuthScheme? = AuthScheme.BEARER,
+    rejectsAsCrossSite: Boolean = false,
     rateLimitOk: Boolean = true,
     exemptRateLimitOk: Boolean = true,
     contentLength: Int = 0,
@@ -53,6 +54,7 @@ class RelaisHttpGateTest {
         method,
         path,
         { authorized },
+        { rejectsAsCrossSite },
         { rateLimitOk },
         { exemptRateLimitOk },
         contentLength,
@@ -64,7 +66,8 @@ class RelaisHttpGateTest {
   private fun reason(
     method: String = "GET",
     path: String = "/v1/models",
-    authorized: Boolean = true,
+    authorized: AuthScheme? = AuthScheme.BEARER,
+    rejectsAsCrossSite: Boolean = false,
     rateLimitOk: Boolean = true,
     exemptRateLimitOk: Boolean = true,
     contentLength: Int = 0,
@@ -73,6 +76,7 @@ class RelaisHttpGateTest {
       method,
       path,
       { authorized },
+      { rejectsAsCrossSite },
       { rateLimitOk },
       { exemptRateLimitOk },
       contentLength,
@@ -90,12 +94,12 @@ class RelaisHttpGateTest {
 
   @Test
   fun `an unauthenticated request to a normal route is 401`() {
-    assertEquals(401, decide(path = "/v1/models", authorized = false))
+    assertEquals(401, decide(path = "/v1/models", authorized = null))
   }
 
   @Test
   fun `GET health is auth-exempt`() {
-    assertNull(decide(method = "GET", path = "/health", authorized = false))
+    assertNull(decide(method = "GET", path = "/health", authorized = null))
   }
 
   /**
@@ -105,13 +109,13 @@ class RelaisHttpGateTest {
    */
   @Test
   fun `GET health with a query string is auth-exempt`() {
-    assertNull(decide(method = "GET", path = "/health?verbose=1", authorized = false))
+    assertNull(decide(method = "GET", path = "/health?verbose=1", authorized = null))
   }
 
   /** The exemption is GET-only: a POST to the same path still needs the key. */
   @Test
   fun `POST health is not auth-exempt`() {
-    assertEquals(401, decide(method = "POST", path = "/health", authorized = false))
+    assertEquals(401, decide(method = "POST", path = "/health", authorized = null))
   }
 
   // -------------------------------------------------------------------------
@@ -128,7 +132,7 @@ class RelaisHttpGateTest {
 
   @Test
   fun `GET ca_crt is auth-exempt`() {
-    assertNull(decide(method = "GET", path = "/ca.crt", authorized = false))
+    assertNull(decide(method = "GET", path = "/ca.crt", authorized = null))
   }
 
   /**
@@ -137,7 +141,7 @@ class RelaisHttpGateTest {
    */
   @Test
   fun `GET ca_crt with a trailing suffix is not auth-exempt`() {
-    assertEquals(401, decide(method = "GET", path = "/ca.crtXYZ", authorized = false))
+    assertEquals(401, decide(method = "GET", path = "/ca.crtXYZ", authorized = null))
   }
 
   /**
@@ -147,12 +151,12 @@ class RelaisHttpGateTest {
    */
   @Test
   fun `GET ca_crt with a query string is not auth-exempt`() {
-    assertEquals(401, decide(method = "GET", path = "/ca.crt?x=1", authorized = false))
+    assertEquals(401, decide(method = "GET", path = "/ca.crt?x=1", authorized = null))
   }
 
   @Test
   fun `POST ca_crt is not auth-exempt`() {
-    assertEquals(401, decide(method = "POST", path = "/ca.crt", authorized = false))
+    assertEquals(401, decide(method = "POST", path = "/ca.crt", authorized = null))
   }
 
   // -------------------------------------------------------------------------
@@ -197,7 +201,7 @@ class RelaisHttpGateTest {
   fun `a rate-limited GET health is 429`() {
     assertEquals(
       429,
-      decide(method = "GET", path = "/health", authorized = false, exemptRateLimitOk = false),
+      decide(method = "GET", path = "/health", authorized = null, exemptRateLimitOk = false),
     )
   }
 
@@ -205,7 +209,7 @@ class RelaisHttpGateTest {
   fun `a rate-limited GET ca_crt is 429`() {
     assertEquals(
       429,
-      decide(method = "GET", path = "/ca.crt", authorized = false, exemptRateLimitOk = false),
+      decide(method = "GET", path = "/ca.crt", authorized = null, exemptRateLimitOk = false),
     )
   }
 
@@ -224,12 +228,12 @@ class RelaisHttpGateTest {
   /** An exempt route is charged the exempt budget: exhausting the standard one must not touch it. */
   @Test
   fun `GET health passes when only the standard budget is exhausted`() {
-    assertNull(decide(method = "GET", path = "/health", authorized = false, rateLimitOk = false))
+    assertNull(decide(method = "GET", path = "/health", authorized = null, rateLimitOk = false))
   }
 
   @Test
   fun `GET ca_crt passes when only the standard budget is exhausted`() {
-    assertNull(decide(method = "GET", path = "/ca.crt", authorized = false, rateLimitOk = false))
+    assertNull(decide(method = "GET", path = "/ca.crt", authorized = null, rateLimitOk = false))
   }
 
   /** And the converse: a normal route is charged the standard budget, never the exempt one. */
@@ -249,7 +253,7 @@ class RelaisHttpGateTest {
   fun `the reject reason names which budget was exhausted`() {
     assertEquals(
       RelaisHttpGate.Reject.EXEMPT_RATE_LIMITED,
-      reason(method = "GET", path = "/health", authorized = false, exemptRateLimitOk = false),
+      reason(method = "GET", path = "/health", authorized = null, exemptRateLimitOk = false),
     )
     assertEquals(
       RelaisHttpGate.Reject.RATE_LIMITED,
@@ -274,7 +278,7 @@ class RelaisHttpGateTest {
    */
   @Test
   fun `an unauthorized request is 401 even when the rate limit is also exhausted`() {
-    assertEquals(401, decide(path = "/v1/models", authorized = false, rateLimitOk = false))
+    assertEquals(401, decide(path = "/v1/models", authorized = null, rateLimitOk = false))
   }
 
   // -------------------------------------------------------------------------
@@ -294,13 +298,13 @@ class RelaisHttpGateTest {
   /** BEHAVIOR CHANGE (#314): the body cap used to be skipped for `/health` along with auth. */
   @Test
   fun `a GET health over the body cap is 413`() {
-    assertEquals(413, decide(method = "GET", path = "/health", authorized = false, contentLength = cap + 1))
+    assertEquals(413, decide(method = "GET", path = "/health", authorized = null, contentLength = cap + 1))
   }
 
   /** Auth is checked before the body cap: an unauthenticated oversized body reveals only the 401. */
   @Test
   fun `an unauthorized oversized request is 401 not 413`() {
-    assertEquals(401, decide(method = "POST", path = "/v1/models", authorized = false, contentLength = cap + 1))
+    assertEquals(401, decide(method = "POST", path = "/v1/models", authorized = null, contentLength = cap + 1))
   }
 
   /** The rate limiter is checked before the body cap, matching the pre-change ordering. */
@@ -326,17 +330,37 @@ class RelaisHttpGateTest {
   }
 
   /**
+   * Sibling of [Counting] for the auth slot, which became `() -> AuthScheme?` in feature-09.
+   *
+   * A separate class rather than a retyped [Counting]: [Counting] is still exactly right for the two
+   * rate suppliers and the new cross-site one, and the assertion rows below are the mechanical
+   * evidence that gate ordering did not move — they must keep comparing the same shapes.
+   */
+  private class CountingAuth(private val result: AuthScheme?) : () -> AuthScheme? {
+    var calls = 0
+      private set
+
+    override fun invoke(): AuthScheme? {
+      calls++
+      return result
+    }
+  }
+
+  /** Never-cross-site, for the rows that are not about the CSRF guard. */
+  private fun noCrossSite() = Counting(false)
+
+  /**
    * Δ7: a 401 must not consume the caller's per-IP budget. Otherwise an unauthenticated flood would
    * exhaust a legitimate client's budget from behind the same NAT address.
    */
   @Test
   fun `no rate limiter is consulted when auth fails`() {
-    val auth = Counting(false)
+    val auth = CountingAuth(null)
     val rate = Counting(true)
     val exempt = Counting(true)
     assertEquals(
       RelaisHttpGate.Reject.UNAUTHORIZED,
-      RelaisHttpGate.decide("GET", "/v1/models", auth, rate, exempt, 0, cap),
+      RelaisHttpGate.decide("GET", "/v1/models", auth, noCrossSite(), rate, exempt, 0, cap),
     )
     assertEquals("auth must be evaluated", 1, auth.calls)
     assertEquals("a failed-auth request must stay unmetered", 0, rate.calls)
@@ -346,10 +370,10 @@ class RelaisHttpGateTest {
   /** An auth-exempt path skips the key comparison entirely, exactly as the pre-change gate did. */
   @Test
   fun `the key comparison is not run for an auth-exempt path`() {
-    val auth = Counting(false)
+    val auth = CountingAuth(null)
     val rate = Counting(true)
     val exempt = Counting(true)
-    assertNull(RelaisHttpGate.decide("GET", "/health", auth, rate, exempt, 0, cap))
+    assertNull(RelaisHttpGate.decide("GET", "/health", auth, noCrossSite(), rate, exempt, 0, cap))
     assertEquals("an exempt path must not run the key comparison", 0, auth.calls)
     assertEquals("an exempt path is still metered", 1, exempt.calls)
   }
@@ -363,7 +387,9 @@ class RelaisHttpGateTest {
   fun `an exempt route charges the exempt budget and only that one`() {
     val rate = Counting(true)
     val exempt = Counting(true)
-    assertNull(RelaisHttpGate.decide("GET", "/health", Counting(false), rate, exempt, 0, cap))
+    assertNull(
+      RelaisHttpGate.decide("GET", "/health", CountingAuth(null), noCrossSite(), rate, exempt, 0, cap)
+    )
     assertEquals("the exempt budget must be charged", 1, exempt.calls)
     assertEquals("the standard budget must be untouched", 0, rate.calls)
   }
@@ -372,8 +398,101 @@ class RelaisHttpGateTest {
   fun `a normal route charges the standard budget and only that one`() {
     val rate = Counting(true)
     val exempt = Counting(true)
-    assertNull(RelaisHttpGate.decide("GET", "/v1/models", Counting(true), rate, exempt, 0, cap))
+    assertNull(
+      RelaisHttpGate.decide(
+        "GET", "/v1/models", CountingAuth(AuthScheme.BEARER), noCrossSite(), rate, exempt, 0, cap,
+      )
+    )
     assertEquals("the standard budget must be charged", 1, rate.calls)
     assertEquals("the exempt budget must be untouched", 0, exempt.calls)
+  }
+
+  // -------------------------------------------------------------------------
+  // Cross-site guard (feature-09). Ordering here is load-bearing in the same way Δ7 is: an attacker
+  // page runs inside the OPERATOR's browser, so it shares the operator's source IP. Metering these
+  // rejects would let a hostile page burn the operator's own 30/60s budget — the identical
+  // NAT-shared-budget argument the 401 makes above.
+  // -------------------------------------------------------------------------
+
+  @Test
+  fun `a cross-site BASIC request is 403 and consumes neither budget`() {
+    val auth = CountingAuth(AuthScheme.BASIC)
+    val cross = Counting(true)
+    val rate = Counting(true)
+    val exempt = Counting(true)
+    assertEquals(
+      RelaisHttpGate.Reject.CROSS_SITE,
+      RelaisHttpGate.decide("POST", "/v1/chat/completions", auth, cross, rate, exempt, 0, cap),
+    )
+    assertEquals("the cross-site check must be consulted for BASIC", 1, cross.calls)
+    assertEquals("a cross-site reject must not burn the operator's own budget", 0, rate.calls)
+    assertEquals("a cross-site reject must not touch the exempt budget either", 0, exempt.calls)
+  }
+
+  /**
+   * Bearer keeps today's behaviour exactly: the guard replaces CSRF immunity that only Basic loses,
+   * so no SDK regresses. Counting the calls, not just the status — a `decide` that evaluated the
+   * supplier and then ignored it for Bearer would pass a status-only assertion.
+   */
+  @Test
+  fun `a cross-site BEARER request is untouched and never consults the guard`() {
+    val cross = Counting(true)
+    val rate = Counting(true)
+    assertNull(
+      RelaisHttpGate.decide(
+        "POST", "/v1/chat/completions", CountingAuth(AuthScheme.BEARER), cross, rate,
+        Counting(true), 0, cap,
+      )
+    )
+    assertEquals("the cross-site check must never run for BEARER", 0, cross.calls)
+    assertEquals("a passing BEARER request is still metered", 1, rate.calls)
+  }
+
+  /**
+   * An auth-exempt path cannot trip the guard, and the reason is structural rather than a rule:
+   * `authorized()` never runs there, so there is no scheme to compare. Asserting `auth.calls == 0`
+   * alongside is what pins that, rather than the absence of a 403 (which a guard that simply never
+   * fires would also produce).
+   */
+  @Test
+  fun `an auth-exempt path cannot trip the cross-site guard`() {
+    for (path in listOf("/health", "/ca.crt")) {
+      val auth = CountingAuth(AuthScheme.BASIC)
+      val cross = Counting(true)
+      assertNull(
+        "$path is exempt, so the guard has no scheme to fire on",
+        RelaisHttpGate.decide("GET", path, auth, cross, Counting(true), Counting(true), 0, cap),
+      )
+      assertEquals("$path must not run the key comparison", 0, auth.calls)
+      assertEquals("$path must not consult the cross-site check", 0, cross.calls)
+    }
+  }
+
+  /** A BASIC request that is NOT cross-site proceeds normally and is metered. */
+  @Test
+  fun `a same-origin BASIC request passes and is metered`() {
+    val rate = Counting(true)
+    assertNull(
+      RelaisHttpGate.decide(
+        "POST", "/v1/chat/completions", CountingAuth(AuthScheme.BASIC), Counting(false), rate,
+        Counting(true), 0, cap,
+      )
+    )
+    assertEquals("an allowed BASIC request is metered like any other", 1, rate.calls)
+  }
+
+  /** The 403 precedes the body cap too — an oversized cross-site POST reports the 403. */
+  @Test
+  fun `cross-site precedes the body cap`() {
+    assertEquals(
+      403,
+      decide(
+        method = "POST",
+        path = "/v1/chat/completions",
+        authorized = AuthScheme.BASIC,
+        rejectsAsCrossSite = true,
+        contentLength = cap + 1,
+      ),
+    )
   }
 }

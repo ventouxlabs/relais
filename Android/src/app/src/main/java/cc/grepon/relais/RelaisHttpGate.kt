@@ -36,6 +36,7 @@ internal object RelaisHttpGate {
    */
   enum class Reject(val status: Int) {
     UNAUTHORIZED(401),
+    CROSS_SITE(403),
     RATE_LIMITED(429),
     EXEMPT_RATE_LIMITED(429),
     BODY_TOO_LARGE(413),
@@ -46,6 +47,11 @@ internal object RelaisHttpGate {
    *
    * Ordering is load-bearing and unchanged from the pre-extraction gate:
    *  1. **Auth**, which the exempt paths skip.
+   *  1b. **Cross-site**, for Basic-authenticated requests only (feature-09). Sits here — after auth,
+   *     **before both budgets** — for the same reason the 401 does: an attacker page runs inside the
+   *     operator's own browser and therefore on the operator's own IP, so metering these rejects
+   *     would let a hostile page burn the operator's budget. It is also the correct response
+   *     ordering: a 429 or 413 must not mask the 403.
    *  2. **Rate limit** — the 401 deliberately precedes this, so a failed-auth request is never
    *     counted against the per-IP budget. Reordering would let an unauthenticated flood consume a
    *     legitimate client's budget from behind the same NAT address. Metering failed auth separately
@@ -66,6 +72,15 @@ internal object RelaisHttpGate {
    * comparison, a 401 never touches a rate limiter, and **exactly one** of the two budgets is ever
    * charged for a given request.
    *
+   * @param authorized the credential check; returns the scheme that authenticated, or null. It
+   *   reports the **scheme** rather than a boolean so this function can decide whether the
+   *   cross-site guard applies without re-parsing the header — keeping the auth outcome in exactly
+   *   one place, which is what the #314/#317 extraction bought.
+   * @param rejectsAsCrossSite whether the request reads as cross-site. Consulted **only** when the
+   *   scheme is [AuthScheme.BASIC]. A supplier, so the `Origin`/`Referer` work never runs for the
+   *   Bearer traffic that is the overwhelming majority. Note this gate learns the *outcome* and
+   *   never the header values: the comparison algorithm lives beside the auth code, so `decide`
+   *   stays an ordering function rather than hosting a second algorithm.
    * @param rateLimitOk the standard per-IP budget, charged for non-exempt routes.
    * @param exemptRateLimitOk the larger auth-exempt budget, charged for exempt routes only.
    * @param contentLength the parsed `Content-Length`, and [maxBody] `MAX_BODY_BYTES` — both `Int`,
@@ -74,14 +89,20 @@ internal object RelaisHttpGate {
   fun decide(
     method: String,
     path: String,
-    authorized: () -> Boolean,
+    authorized: () -> AuthScheme?,
+    rejectsAsCrossSite: () -> Boolean,
     rateLimitOk: () -> Boolean,
     exemptRateLimitOk: () -> Boolean,
     contentLength: Int,
     maxBody: Int,
   ): Reject? {
     val exempt = authExempt(method, path)
-    if (!exempt && !authorized()) return Reject.UNAUTHORIZED
+    // Nested, not flattened: an exempt path must never run `authorized()`, so it has no scheme and
+    // the cross-site guard CANNOT fire on it — true by construction here rather than by argument.
+    if (!exempt) {
+      val scheme = authorized() ?: return Reject.UNAUTHORIZED
+      if (scheme == AuthScheme.BASIC && rejectsAsCrossSite()) return Reject.CROSS_SITE
+    }
     if (exempt) {
       if (!exemptRateLimitOk()) return Reject.EXEMPT_RATE_LIMITED
     } else {
