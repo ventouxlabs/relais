@@ -464,6 +464,32 @@ class RelaisHttpServer(
 
           method == "GET" && path == "/" -> handleDashboard(ctx)
 
+          // The dashboard's model switch. Everything the handler needs is resolved HERE, at the
+          // call site, so the handler itself needs none of this class's private members:
+          //  - the body, via the private readBody
+          //  - both model lists, RE-DERIVED now rather than trusted from the submitting page
+          //  - a responder closing over the private respondText, which — unlike `reply` — does NOT
+          //    record a metric, so the recordRequest lives inside the lambda. One site, all four
+          //    response paths; otherwise the /select-model series would contain only the gate's 403s
+          //    and show the route failing 100% of the time while every success stayed invisible.
+          method == "POST" && path == "/select-model" -> {
+            val onDisk = provisionedOnDisk()
+            handleSelectModel(
+              context = context,
+              body = readBody(reader, contentLength),
+              available =
+                availableModelIdsFor(
+                  onDisk,
+                  RelaisConfig.modelId(context),
+                  RelaisRuntimeCompat::incompatibleReason,
+                ),
+              provisioned = onDisk,
+            ) { status, html, extraHeaders ->
+              RelaisMetrics.recordRequest(ctx.endpoint, status)
+              respondText(ctx.sock, status, html, "text/html; charset=utf-8", extraHeaders)
+            }
+          }
+
           method == "GET" && path == "/experiments" -> handleExperiments(ctx)
 
           method == "GET" && path.startsWith("/metrics") -> handleMetrics(ctx)
@@ -938,14 +964,20 @@ class RelaisHttpServer(
     RelaisMetrics.recordRequest(ctx.endpoint, 200, inRecentLog = false)
     val metricsJson = RelaisMetrics.renderJson(context)
     val dashCaps = RelaisClientConfig.Capabilities(multimodal = RelaisEngine.isMultimodal, tools = true, reasoning = true)
+    // SINGLE READ of each volatile the page derives two things from. `startupInProgress` feeds both
+    // statusLabel and switchLocked, and the configured id feeds three fields — reading either twice
+    // lets a swap land in between and render a self-contradicting page (LIVE beside a disabled form,
+    // or a dropdown whose `selected` id is not the one the hint names).
     val liveness = RelaisLivenessState.snapshot
+    val startingNow = liveness.startupInProgress
+    val configuredId = RelaisConfig.modelId(context)
     val dashStatus = assembleDashboardStatus(
       engineReady = RelaisEngine.isReady,
       listenersUp = liveness.listenersUp,
-      startupInProgress = liveness.startupInProgress,
+      startupInProgress = startingNow,
       thermalStatus = ThermalGovernor.statusValue,
       decodeTokensPerSec = metricsJson.optDouble("decode_tokens_per_second", 0.0),
-      currentModelId = RelaisConfig.modelId(context),
+      currentModelId = configuredId,
       uptimeSeconds = metricsJson.optDouble("uptime_seconds", 0.0),
       queueDepth = RelaisMetrics.queueDepth(),
       errorsTotal = metricsJson.optLong("errors_total", 0L),
@@ -958,16 +990,14 @@ class RelaisHttpServer(
       capabilities = dashCaps.toCapsString(),
       // Load-only (feature-18): rendering a status page must never mint key material.
       cert = RelaisTls.certInfoOrNull(context),
+      availableModelIds =
+        availableModelIdsFor(provisionedOnDisk(), configuredId, RelaisRuntimeCompat::incompatibleReason),
+      switchLocked = startingNow,
+      pendingModelId = pendingModelIdFor(configuredId, RelaisEngine.residentModelId),
     )
     respondText(
       ctx.sock, 200, renderDashboardHtml(dashStatus), "text/html; charset=utf-8",
-      listOf(
-        // Scriptless page — no script-src at all; default-src 'none' blocks everything else.
-        "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
-        "X-Content-Type-Options: nosniff",
-        "X-Frame-Options: DENY",
-        "Referrer-Policy: no-referrer",
-      ),
+      dashboardSecurityHeaders(),
     )
   }
 
@@ -2120,6 +2150,10 @@ class RelaisHttpServer(
       // Same predicate as the auth exemption and the dispatch branch — see [RelaisHttpGate.isCaCertPath].
       RelaisHttpGate.isCaCertPath(path) -> "/ca.crt"
       path == "/" -> "/"
+      // Exact match, like the `/` arm above it — ordering between the two is immaterial, but both
+      // must precede the startsWith arms. Without this the switch collapses to "other" and the
+      // dashboard's own route disappears from its own request log.
+      path == "/select-model" -> "/select-model"
       path.startsWith("/experiments") -> "/experiments"
       path.startsWith("/metrics") -> "/metrics"
       path.startsWith("/generate") -> "/generate"
@@ -2161,6 +2195,9 @@ class RelaisHttpServer(
   private fun reason(status: Int): String =
     when (status) {
       200 -> "OK"
+      // POST/Redirect/GET after the model switch. Added with the first 303 in this tree — a new
+      // status literal is not finished until reason() has an arm for it, or the wire reads "303 ERR".
+      303 -> "See Other"
       400 -> "Bad Request"
       401 -> "Unauthorized"
       403 -> "Forbidden"
@@ -2259,6 +2296,84 @@ internal fun isTlsHandshakeFailureBeforeRequest(requestLineRead: Boolean, error:
 
 /** Which credential carrier authenticated a request. The CSRF guard applies to [BASIC] only. */
 internal enum class AuthScheme { BEARER, BASIC }
+
+// ---------------------------------------------------------------------------
+// Dashboard helpers (feature-09 Tasks 4-5)
+//
+// Top-level for the same load-bearing reason as the auth helpers above: they are asserted directly
+// from RelaisHttpDashboardTest in the JVM lane, which cannot construct a RelaisHttpServer.
+// ---------------------------------------------------------------------------
+
+/**
+ * Security headers for `GET /` — extracted from [RelaisHttpServer.handleDashboard] so they can be
+ * ASSERTED. That is the whole reason this function exists: as an inline `listOf(...)` inside a
+ * private member, nothing in the tree could reach these values, and two of them are load-bearing.
+ *
+ * `Referrer-Policy: same-origin`, NOT `no-referrer`: the CSRF fallback for user agents that omit
+ * `Sec-Fetch-Site` requires this page's own POSTs to carry a real `Origin`, and `no-referrer` makes
+ * the browser send `Origin: null` on a form submission (Fetch: a non-CORS, non-GET request under
+ * that policy). A revert therefore silently disables the model-switch form on those clients — which
+ * is why it is pinned by a test whose message says so. Nothing is leaked by the narrowing: this page
+ * has no subresource (`default-src 'none'`), links nowhere, and is scriptless, so the only requests
+ * it can originate are same-origin, and `same-origin` still omits `Referer` cross-origin.
+ *
+ * `form-action 'self'` bounds where the model-switch form may submit. It does not FALL BACK to
+ * `default-src`, so without it the directive is simply absent and submissions are unrestricted; it
+ * is a tightening, not what permits the form.
+ *
+ * Note what a test on this function does NOT prove — that [RelaisHttpServer.handleDashboard] still
+ * calls it. That half is `DashboardHeadersProbe` (androidTest), which asserts the real response.
+ */
+internal fun dashboardSecurityHeaders(): List<String> =
+  listOf(
+    // Scriptless page — no script-src at all; default-src 'none' blocks everything else.
+    "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; " +
+      "frame-ancestors 'none'; form-action 'self'",
+    "X-Content-Type-Options: nosniff",
+    "X-Frame-Options: DENY",
+    "Referrer-Policy: same-origin",
+  )
+
+/**
+ * The model ids the dashboard's switch form offers: the provisioned registry UNIONED with the
+ * configured id, minus anything the runtime-compat table rejects, sorted.
+ *
+ * Three properties, each of which a test pins by deleting it:
+ *  - **Union with [configured]** — [RelaisModelSwap.resolveModelRequest] keeps the configured id
+ *    swap-eligible on its own so the operator's selection works before it has been recorded. Drop
+ *    this and, in that window, the currently-selected model is missing from its own dropdown.
+ *  - **Compat filter** — the targeted swap path skips `resolveModel` and therefore every compat
+ *    check, so an unfiltered dropdown can offer a model that takes the node down on first inference.
+ *  - **Sorted** — [provisionedIds] returns a Set, whose iteration order is filesystem enumeration
+ *    order. `.sorted()` supplies both the List and an order a test can assert.
+ *
+ * [incompatibleReason] is injected and has **no default** deliberately. `resolveModelRequest`
+ * defaults the same parameter to `{ null }`, which is right for callers with no table to consult and
+ * wrong here: filtering is this function's only job, and a defaulted predicate would make the filter
+ * test pass while filtering nothing.
+ *
+ * Pure; no Context, no Android.
+ */
+internal fun availableModelIdsFor(
+  provisioned: List<ProvisionedModel>,
+  configured: String,
+  incompatibleReason: (String) -> String?,
+): List<String> =
+  (provisionedIds(provisioned) + configured).filter { incompatibleReason(it) == null }.sorted()
+
+/**
+ * The configured model id when the engine is not serving it, else null.
+ *
+ * Null when [resident] is null — before any successful init there is nothing to be behind, and a
+ * hint claiming otherwise on a cold node would be noise. Non-null means config is ahead of the
+ * engine: a swap is in flight, OR one ran and did not take effect (its target file was missing, or
+ * engine-create failed and rolled back). Those are indistinguishable from here, which is why the
+ * rendered hint states the fact and predicts nothing.
+ *
+ * Pure; no Context, no Android.
+ */
+internal fun pendingModelIdFor(configured: String, resident: String?): String? =
+  configured.takeIf { resident != null && it != resident }
 
 /**
  * Parses an `Authorization` header into (scheme, candidate key), or null if it names no scheme we
