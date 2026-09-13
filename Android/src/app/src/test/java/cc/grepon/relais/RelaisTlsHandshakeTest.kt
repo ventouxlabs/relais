@@ -21,6 +21,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLProtocolException
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
@@ -122,6 +124,35 @@ class RelaisTlsHandshakeTest {
     assertTrue("expected a path-building failure, got: $why", isPathFailure(why))
     // Discriminating half: the SANs are perfectly good here, so this must NOT be a name error.
     assertFalse("this must fail on the chain, not the name: $why", isHostnameFailure(why))
+  }
+
+  // #324: a client that rejects the node CA has not made an HTTP request. This is deliberately a
+  // pure test: inducing the browser-only certificate alert through the JVM TLS server would test
+  // JSSE's wire behavior, not the request/metric classification that protects the dashboard log.
+  @Test
+  fun `pre-request TLS handshake and protocol alerts are not HTTP failures`() {
+    assertTrue(isTlsHandshakeFailureBeforeRequest(false, SSLHandshakeException("certificate unknown")))
+    assertTrue(isTlsHandshakeFailureBeforeRequest(false, SSLProtocolException("unexpected message")))
+  }
+
+  @Test
+  fun `TLS alert after a request line remains a request failure`() {
+    assertFalse(isTlsHandshakeFailureBeforeRequest(true, SSLHandshakeException("late failure")))
+  }
+
+  @Test
+  fun `ordinary pre-request IO failures are not mistaken for TLS alerts`() {
+    assertFalse(isTlsHandshakeFailureBeforeRequest(false, java.io.IOException("peer closed")))
+  }
+
+  @Test
+  fun `wrapped TLS alert is still recognized`() {
+    assertTrue(
+      isTlsHandshakeFailureBeforeRequest(
+        false,
+        java.io.IOException("socket read failed", SSLHandshakeException("certificate unknown")),
+      ),
+    )
   }
 
   /**

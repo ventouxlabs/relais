@@ -65,6 +65,8 @@ import java.net.ServerSocket
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.Executors
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLProtocolException
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -299,10 +301,14 @@ class RelaisHttpServer(
   private fun handle(client: java.net.Socket) {
     client.use { sock ->
       var endpoint = "other"
+      // A TLS socket performs its handshake lazily, on the first read. Keep this separate from the
+      // endpoint label: before a request line exists, the peer has not made an HTTP request at all.
+      var requestLineRead = false
       try {
         sock.soTimeout = SOCKET_TIMEOUT_MS // don't let an idle/slow client hold a worker thread
         val reader = HttpRequestReader(sock.getInputStream())
         val requestLine = reader.readLine() ?: return
+        requestLineRead = true
         val parts = requestLine.split(" ")
         if (parts.size < 2) return
         val method = parts[0]
@@ -648,10 +654,17 @@ class RelaisHttpServer(
           else -> reply(404, RelaisError.json("not found", RelaisError.NOT_FOUND))
         }
       } catch (e: Exception) {
-        Log.e(TAG, "Request handling error", e)
-        RelaisMetrics.recordRequest(endpoint, 500)
-        // Generic client message; detail stays in logcat (don't leak internals to the caller).
-        runCatching { respond(sock, 500, RelaisError.json("internal error", RelaisError.INTERNAL_ERROR)) }
+        if (isTlsHandshakeFailureBeforeRequest(requestLineRead, e)) {
+          // A browser that rejects our CA sends a TLS alert before HTTP begins. It is useful setup
+          // information in logcat, but it is not a 500 or a request-log entry: there was no route,
+          // response, or server-side request failure to measure (#324).
+          Log.i(TAG, "TLS handshake rejected by client; no HTTP request was received")
+        } else {
+          Log.e(TAG, "Request handling error", e)
+          RelaisMetrics.recordRequest(endpoint, 500)
+          // Generic client message; detail stays in logcat (don't leak internals to the caller).
+          runCatching { respond(sock, 500, RelaisError.json("internal error", RelaisError.INTERNAL_ERROR)) }
+        }
       }
     }
   }
@@ -2194,6 +2207,21 @@ class RelaisHttpServer(
     pool.shutdownNow()
     Log.i(TAG, "Stopped")
   }
+}
+
+/**
+ * TLS implementations may wrap the peer's certificate-rejection alert in an [IOException]. Only
+ * suppress metrics before the HTTP request line is read: after that point a failure belongs to a
+ * real request and must remain visible to operators.
+ */
+internal fun isTlsHandshakeFailureBeforeRequest(requestLineRead: Boolean, error: Throwable): Boolean {
+  if (requestLineRead) return false
+  var cause: Throwable? = error
+  while (cause != null) {
+    if (cause is SSLHandshakeException || cause is SSLProtocolException) return true
+    cause = cause.cause
+  }
+  return false
 }
 
 // ---------------------------------------------------------------------------
