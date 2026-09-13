@@ -46,13 +46,13 @@ object ModelSwitch {
 
   /**
    * Best-effort observation of the engine picking up the newly-selected model: polls
-   * [RelaisEngine.startupInProgress] until it settles (or a ~60s cap), then reports whether the node
+   * [RelaisLivenessState.snapshot] until startup settles (or a ~60s cap), then reports whether the node
    * is serving. The reload is lazy (the resident engine reloads on next use), so this reflects a
    * reload already underway rather than initiating one. Returns `true` iff [RelaisEngine.isReady].
    */
   suspend fun awaitReload(): Boolean {
     var iterations = 0
-    while (RelaisEngine.startupInProgress && iterations < MAX_RELOAD_POLL_ITERATIONS) {
+    while (RelaisLivenessState.snapshot.startupInProgress && iterations < MAX_RELOAD_POLL_ITERATIONS) {
       delay(RELOAD_POLL_INTERVAL_MS)
       iterations++
     }

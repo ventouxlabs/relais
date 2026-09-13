@@ -115,16 +115,17 @@ object RelaisWatchdog {
 class RelaisWatchdogReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
     if (!RelaisConfig.shouldRun(context)) return
+    val liveness = RelaisLivenessState.snapshot
     // `isReady && listenersUp`, not `isReady` alone. A bind failure leaves the engine resident on
     // purpose, so engine readiness alone read as healthy for a node nothing could reach — and this
     // is the branch that made that unrecoverable rather than merely mislabelled, because returning
     // here skips the revive below. The state needing recovery was the state preventing it.
-    if (RelaisEngine.isReady && RelaisListenerState.listenersUp) {
+    if (RelaisEngine.isReady && liveness.listenersUp) {
       RelaisWatchdog.reset(context) // healthy — clear backoff
       RelaisWatchdog.schedule(context) // keep the heartbeat at the base interval
       return
     }
-    if (RelaisEngine.startupInProgress) {
+    if (liveness.startupInProgress) {
       // Provisioning/initializing in-process (e.g. first-run model download) — coming up, not dead.
       // Keep the heartbeat at base; don't escalate backoff or post the "needs attention" alarm.
       RelaisWatchdog.reset(context)

@@ -35,7 +35,7 @@ package cc.grepon.relais
  * mirrors [shouldUnloadIdleEngine] in RelaisIdleTtl.kt. The actual concurrency/lock-ordering safety
  * (never swapping mid-inference, watchdog not mistaking the swap's not-ready window for a crash) is
  * NOT expressed here — it lives in [RelaisEngine.ensureModelSwapInBackground], which reuses
- * [RelaisEngine.startupInProgress] (the same "still coming up, not dead" signal every existing
+ * [RelaisLiveness.startupInProgress] (the same "still coming up, not dead" signal every existing
  * not-ready window already relies on — see that function's KDoc and [RelaisWatchdogReceiver]).
  */
 

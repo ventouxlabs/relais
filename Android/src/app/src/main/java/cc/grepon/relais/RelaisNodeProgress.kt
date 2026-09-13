@@ -25,7 +25,7 @@ package cc.grepon.relais
  * phase line (`resolving model…` / `downloading model · 43% · 1.2/2.8 GB` / `loading engine…`) via
  * [computeControlPanelState]. Never a bare "starting…" (P6).
  *
- * `@Volatile` fields (mirrors [RelaisEngine.startupInProgress]'s pattern) — cross-thread visibility
+ * `@Volatile` fields (mirrors [RelaisLivenessState.snapshot]'s publication pattern) — cross-thread visibility
  * without a lock is enough for a 1s-polled progress readout; no invariant spans more than one field.
  */
 object RelaisNodeProgress {

@@ -174,7 +174,7 @@ class RelaisNodeService : Service() {
    * the service reports no listeners. That is an unrecoverable node produced by the recovery path
    * itself.
    *
-   * This must be unconditional at the start of a retry, not a branch. [RelaisListenerState] is an
+   * This must be unconditional at the start of a retry, not a branch. [RelaisLivenessState] is an
    * AND of two independent listeners, so "one down, one up" is not a rare case — it is half the
    * state space, and it is exactly the case a retry meets. Making that state *visible* did not make
    * its transitions safe.
@@ -192,7 +192,7 @@ class RelaisNodeService : Service() {
   }
 
   /**
-   * Recomputes [RelaisListenerState.listenersUp] from the live sockets and returns it.
+   * Recomputes [RelaisLiveness.listenersUp] from the live sockets and returns it.
    *
    * The single place the predicate is written. `isListening`, not `!= null`: a stopped server is
    * still a non-null field, so a null check answered "did someone assign this?" rather than "is a
@@ -201,13 +201,13 @@ class RelaisNodeService : Service() {
    */
   private fun refreshListenerState(): Boolean {
     val up = httpServer?.isListening == true && httpsServer?.isListening == true
-    RelaisListenerState.listenersUp = up
+    RelaisLivenessState.publishListenersUp(up)
     return up
   }
 
   private fun dispatchStartupIfNeeded() {
     // One expression for "are the listeners up", shared with every user-visible surface via
-    // RelaisListenerState — two copies of this predicate is exactly how the display and the retry
+    // RelaisLivenessState — two copies of this predicate is exactly how the display and the retry
     // gate would drift back apart.
     val listenersUp = refreshListenerState()
     if (!shouldDispatchStartup(RelaisEngine.isReady, startupDispatchInFlight.get(), listenersUp)) return
@@ -218,7 +218,7 @@ class RelaisNodeService : Service() {
     thread(name = "relais-init") {
       RelaisEngine.lastInitFailed = false // new attempt: drop any prior failure so a restart-after-
       // failure doesn't flash NodeState.ERROR in the window before startupInProgress flips.
-      RelaisEngine.startupInProgress = true // tell the watchdog "coming up", not "dead" (slow downloads)
+      RelaisLivenessState.publishStartupInProgress(true) // tell the watchdog "coming up", not "dead" (slow downloads)
       RelaisNodeProgress.reset() // drop any stale phase/bytes from a prior attempt (control-panel phase line)
       try {
         updateNotification("Provisioning model…")
@@ -262,11 +262,9 @@ class RelaisNodeService : Service() {
         updateNotification("Resident engine ready · http 127.0.0.1:8080 · https :8443 (LAN)")
         Log.i(TAG, "Node up: engine resident; http loopback :8080, https LAN :8443")
         // Now reachable — surfaces may read LIVE. This must stay ahead of the `finally` that clears
-        // startupInProgress: the invariant every polling surface reads against is that startup is
-        // never published as finished before the listeners it started are published. Publishing
-        // them in the other order lets a poll compose "listeners down" with "startup finished" and
-        // render a node that just came up healthy as OFFLINE, offering START. See the read-order
-        // comment in RelaisShellViewModel.snapshotPanelState.
+        // startupInProgress. Each update replaces an immutable liveness snapshot, so readers see a
+        // real transition rather than a torn pair. Publish listeners before startup completes so
+        // the sequence remains STARTING -> LIVE even for readers that observe every transition.
         refreshListenerState()
         // Security H3: never log the API key — it is shown in the Relais Node control screen.
       } catch (e: Exception) {
@@ -283,14 +281,14 @@ class RelaisNodeService : Service() {
         // rebuilds only what is missing.
         // Through the shared teardown, so the stop-before-clear rule is inherited rather than
         // restated — and so this path cannot drift from the retry path that must obey the same rule.
-        // It also clears RelaisListenerState: the engine stays resident, so `isReady` remains true,
+        // It also clears RelaisLivenessState: the engine stays resident, so `isReady` remains true,
         // and without that every surface would read LIVE for a node nothing can reach while the
         // false LIVE suppressed the retry that would fix it.
         stopListeners()
         runCatching { RelaisDiscovery.unregister() } // stop advertising a node that is not serving
         updateNotification("Init failed: ${e.message}")
       } finally {
-        RelaisEngine.startupInProgress = false
+        RelaisLivenessState.publishStartupInProgress(false)
         RelaisNodeProgress.reset()
         startupDispatchInFlight.set(false) // release the guard — a future retry (fresh START) may dispatch again
       }

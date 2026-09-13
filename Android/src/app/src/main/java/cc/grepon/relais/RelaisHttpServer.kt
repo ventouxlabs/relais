@@ -923,10 +923,11 @@ class RelaisHttpServer(
     RelaisMetrics.recordRequest(ctx.endpoint, 200, inRecentLog = false)
     val metricsJson = RelaisMetrics.renderJson(context)
     val dashCaps = RelaisClientConfig.Capabilities(multimodal = RelaisEngine.isMultimodal, tools = true, reasoning = true)
+    val liveness = RelaisLivenessState.snapshot
     val dashStatus = assembleDashboardStatus(
       engineReady = RelaisEngine.isReady,
-      listenersUp = RelaisListenerState.listenersUp,
-      startupInProgress = RelaisEngine.startupInProgress,
+      listenersUp = liveness.listenersUp,
+      startupInProgress = liveness.startupInProgress,
       thermalStatus = ThermalGovernor.statusValue,
       decodeTokensPerSec = metricsJson.optDouble("decode_tokens_per_second", 0.0),
       currentModelId = RelaisConfig.modelId(context),
@@ -961,10 +962,11 @@ class RelaisHttpServer(
     // that script call the node's own /v1 endpoints.
     RelaisMetrics.recordRequest(ctx.endpoint, 200)
     val expCaps = RelaisClientConfig.Capabilities(multimodal = RelaisEngine.isMultimodal, tools = true, reasoning = true)
+    val liveness = RelaisLivenessState.snapshot
     val expStatus = assembleExperimentsStatus(
       engineReady = RelaisEngine.isReady,
-      listenersUp = RelaisListenerState.listenersUp,
-      startupInProgress = RelaisEngine.startupInProgress,
+      listenersUp = liveness.listenersUp,
+      startupInProgress = liveness.startupInProgress,
       currentModelId = RelaisConfig.modelId(context),
       capabilities = expCaps.toCapsString(),
     )
@@ -2738,4 +2740,3 @@ internal fun <T : java.net.ServerSocket> bindOrClose(socket: T, bind: (T) -> Uni
   }
   return socket
 }
-

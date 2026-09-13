@@ -15,7 +15,7 @@ package cc.grepon.relais.core
 import android.content.Context
 import cc.grepon.relais.RelaisConfig
 import cc.grepon.relais.RelaisEngine
-import cc.grepon.relais.RelaisListenerState
+import cc.grepon.relais.RelaisLivenessState
 import cc.grepon.relais.RelaisNodeService
 import cc.grepon.relais.ThermalGovernor
 
@@ -29,15 +29,17 @@ object RelaisNodeController {
   /** Operator intent-to-run latch (survives process death; what the watchdog keys off). */
   fun isRunning(context: Context): Boolean = RelaisConfig.shouldRun(context)
 
-  fun state(context: Context): NodeState =
-    computeNodeState(
+  fun state(context: Context): NodeState {
+    val liveness = RelaisLivenessState.snapshot
+    return computeNodeState(
       shouldRun = RelaisConfig.shouldRun(context),
       ready = RelaisEngine.isReady,
-      listenersUp = RelaisListenerState.listenersUp,
-      startupInProgress = RelaisEngine.startupInProgress,
+      listenersUp = liveness.listenersUp,
+      startupInProgress = liveness.startupInProgress,
       lastInitFailed = RelaisEngine.lastInitFailed,
       thermalStatus = ThermalGovernor.statusValue,
     )
+  }
 
   fun start(context: Context) = RelaisNodeService.start(context)
 
