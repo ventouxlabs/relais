@@ -121,6 +121,7 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
   var batteryUnrestricted by remember {
     mutableStateOf(powerManager.isIgnoringBatteryOptimizations(ctx.packageName))
   }
+  var autoStartEnabled by remember { mutableStateOf(RelaisConfig.autoStartEnabled(ctx)) }
   LaunchedEffect(Unit) {
     while (true) {
       ready = RelaisEngine.isReady
@@ -243,6 +244,11 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
       // than surface a button that silently degrades to the generic settings list.
       if (BuildConfig.POLICY_OPEN && !batteryUnrestricted) {
         ActionLink("ALLOW UNRESTRICTED ›") { requestIgnoreBatteryOptimizations(ctx) }
+      }
+      ToggleRow("AUTO-START ON BOOT", autoStartEnabled) {
+        val next = !autoStartEnabled
+        RelaisConfig.setAutoStart(ctx, next)
+        autoStartEnabled = next
       }
     }
 

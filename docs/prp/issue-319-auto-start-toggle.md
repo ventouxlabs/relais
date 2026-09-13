@@ -15,6 +15,12 @@ Restore the documented opt-in boot auto-start capability by exposing the existin
 - Audit production callers of configuration setters while implementing; record, but do not expand
   this PR to fix, unrelated write-only settings.
 
+## Audit result
+
+`RelaisConfig.setIdleTtlMinutes` remains without a production caller; this is already tracked by
+#22 and is intentionally outside this focused auto-start change. No other operator-facing
+configuration setter was found to be write-only on the CONFIGURE surface.
+
 ## Acceptance criteria
 
 - The CONFIGURE screen displays `AUTO-START ON BOOT` with its current `on`/`off` value.
