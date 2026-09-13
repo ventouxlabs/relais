@@ -10,7 +10,8 @@ surface renders a state that actually existed rather than a torn cross-thread co
 - Replace `RelaisListenerState.listenersUp` and the lifecycle use of
   `RelaisEngine.startupInProgress` with a process-wide immutable snapshot containing both values.
 - Publish each transition as one volatile snapshot replacement; writer helpers preserve the other
-  component so listener changes and startup changes cannot overwrite one another.
+  component so listener changes and startup changes cannot overwrite one another. Startup ownership
+  is counted so one completed operation cannot clear an overlapping startup/reload/swap.
 - Migrate all readers to read one snapshot before deriving a state: the control panel, node
   controller/tile, watchdog, dashboard, experiments surface, and model-switch polling.
 - Migrate every existing lifecycle writer: `RelaisNodeService` startup/listener transitions and

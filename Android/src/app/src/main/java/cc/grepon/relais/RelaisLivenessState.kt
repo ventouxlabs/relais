@@ -27,6 +27,7 @@ data class RelaisLiveness(
  */
 internal class RelaisLivenessPublisher(initial: RelaisLiveness = RelaisLiveness()) {
   @Volatile private var current = initial
+  private var activeStartupOperations = if (initial.startupInProgress) 1 else 0
 
   val snapshot: RelaisLiveness get() = current
 
@@ -36,8 +37,16 @@ internal class RelaisLivenessPublisher(initial: RelaisLiveness = RelaisLiveness(
   }
 
   @Synchronized
-  fun publishStartupInProgress(value: Boolean) {
-    current = current.copy(startupInProgress = value)
+  fun beginStartup() {
+    activeStartupOperations += 1
+    current = current.copy(startupInProgress = true)
+  }
+
+  @Synchronized
+  fun endStartup() {
+    check(activeStartupOperations > 0) { "endStartup without a matching beginStartup" }
+    activeStartupOperations -= 1
+    current = current.copy(startupInProgress = activeStartupOperations > 0)
   }
 }
 
@@ -56,5 +65,7 @@ object RelaisLivenessState {
 
   fun publishListenersUp(value: Boolean) = publisher.publishListenersUp(value)
 
-  fun publishStartupInProgress(value: Boolean) = publisher.publishStartupInProgress(value)
+  fun beginStartup() = publisher.beginStartup()
+
+  fun endStartup() = publisher.endStartup()
 }

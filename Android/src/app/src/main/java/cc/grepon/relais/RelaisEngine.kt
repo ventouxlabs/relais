@@ -388,12 +388,12 @@ object RelaisEngine {
     if (!backgroundReloadDispatching.compareAndSet(false, true)) return // a reload is already dispatching
     thread(name = "relais-idle-reload") {
       try {
-        RelaisLivenessState.publishStartupInProgress(true) // tell the watchdog "coming up", not "dead"
+        RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead"
         ensureInitialized(context)
       } catch (e: Exception) {
         Log.w(TAG, "background idle-reload failed: ${e.message}")
       } finally {
-        RelaisLivenessState.publishStartupInProgress(false)
+        RelaisLivenessState.endStartup()
         backgroundReloadDispatching.set(false)
       }
     }
@@ -427,7 +427,7 @@ object RelaisEngine {
     if (!swapDispatching.compareAndSet(false, true)) return // a swap is already dispatching
     thread(name = "relais-model-swap") {
       try {
-        RelaisLivenessState.publishStartupInProgress(true) // tell the watchdog "coming up", not "dead" (same signal as any init)
+        RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead" (same signal as any init)
         // Captured ONCE, before resolveModel runs, so the id stamped on the reloaded engine can never
         // drift from an operator config change happening mid-swap (#180 review, MEDIUM finding 2):
         // resolveModel() internally re-reads RelaisConfig.modelId(context) itself (its signature only
@@ -484,7 +484,7 @@ object RelaisEngine {
       } catch (e: Exception) {
         Log.w(TAG, "model swap failed: ${e.message}")
       } finally {
-        RelaisLivenessState.publishStartupInProgress(false)
+        RelaisLivenessState.endStartup()
         swapDispatching.set(false)
       }
     }

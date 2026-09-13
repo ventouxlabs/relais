@@ -218,7 +218,7 @@ class RelaisNodeService : Service() {
     thread(name = "relais-init") {
       RelaisEngine.lastInitFailed = false // new attempt: drop any prior failure so a restart-after-
       // failure doesn't flash NodeState.ERROR in the window before startupInProgress flips.
-      RelaisLivenessState.publishStartupInProgress(true) // tell the watchdog "coming up", not "dead" (slow downloads)
+      RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead" (slow downloads)
       RelaisNodeProgress.reset() // drop any stale phase/bytes from a prior attempt (control-panel phase line)
       try {
         updateNotification("Provisioning model…")
@@ -288,7 +288,7 @@ class RelaisNodeService : Service() {
         runCatching { RelaisDiscovery.unregister() } // stop advertising a node that is not serving
         updateNotification("Init failed: ${e.message}")
       } finally {
-        RelaisLivenessState.publishStartupInProgress(false)
+        RelaisLivenessState.endStartup()
         RelaisNodeProgress.reset()
         startupDispatchInFlight.set(false) // release the guard — a future retry (fresh START) may dispatch again
       }
