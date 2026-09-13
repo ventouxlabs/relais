@@ -6,7 +6,7 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-12 17:10 EDT — ⏩ START HERE. **#318 and #323 MERGED. feature-09 PR-B is fully implemented in 4 commits, unpushed, reviewed by nobody.**
+## 2026-09-12 21:10 EDT — ⏩ START HERE. **#318 and #323 MERGED. feature-09 PR-B implemented, `/codex review` GATE: FAIL — two confirmed defects, both UNFIXED. JD is fixing them in codex.**
 
 `main` = `62050b83`. Two feature-09 PRs shipped this session, both hardware-verified on rango:
 
@@ -61,8 +61,10 @@ surface is unverified** — the same shape as PR-A's `BasicAuthGateProbe`, which
 
 Done through **implement**. The plan (`.claude/PRPs/plans/feature-09-web-dashboard.plan.md`, Tasks
 4-10 per its `:371`) took **8 rounds and 29 findings**; round 8 returned `[P1] None. [P2] None.`,
-which fired the stop rule. **Nothing in the plan proved wrong under implementation.** Everything
-after "implement" is untouched — no review, no codex, no device.
+which fired the stop rule. **Nothing in the plan proved wrong under implementation.**
+
+**Codex has now run and FAILED the gate** — see the red section below. Still untouched after that:
+the fixes, a re-run of codex, and every device check.
 
 ### Open review items — three raised by the executor, one by me
 
@@ -128,6 +130,97 @@ be taken** — it converts a review question into a multiple-choice with an exit
 accounting; don't draft the excuse. The executor refusing the exoneration is the same disagree-upward
 move as its round-7 `endpointLabel` decline, pointed at the lead this time.
 
+### 🔴 `/codex review` — GATE: FAIL. Two defects, both CONFIRMED, both UNFIXED.
+
+Run at 21:05 on `--base c94f1441` (implementation only, excluding the 8 already-reviewed plan
+commits). CLI 0.154.0, model `gpt-6-astra`, exit 0. **Neither is fixed; JD is fixing them in codex.**
+I re-derived both against the tree rather than relaying them — the verdict below reflects my reading,
+and it corrects codex on two points.
+
+Full working notes: `scratchpad/codex-review-verdict.md` (session-local; the substance is here).
+
+---
+
+#### [P1] The swap persists the model ID but never the model PATH
+
+`RelaisHttpPages.kt:110-115` · `RelaisEngine.kt:441-497` · `ModelSwitch.kt:48-51`
+
+Evidence chain, every link read:
+
+1. `handleSelectModel` step 4 calls `ModelSwitch.applyManualId(context, id)` = `clearModelRef` +
+   `setModelId`. **Id only.**
+2. The swap reloads via `ensureInitialized(context, modelPath = path, modelId = configuredModelId)`,
+   which sets `residentModelId` / `residentModelPath` **in memory only** (`RelaisEngine.kt:374-375`).
+3. `grep -rn 'remember(\|setModelPath'` across `RelaisEngine.kt`, `RelaisHttpPages.kt`,
+   `ModelSwitch.kt` → **zero hits**. No swap path updates `RelaisModelProvisioner.cachedPath` or the
+   persisted `RelaisConfig.modelPath`.
+4. `shutdown()` (`:1002`) nulls `engine`; `isReady` is `engine?.isInitialized() == true`
+   (`:348-349`), engine alone — so an idle unload does make the reload fire.
+5. The reload calls `ensureInitialized(context)` with DEFAULTS:
+   `modelPath = cachedPathOrDefault(context)` (`:446-449`) and `modelId = RelaisConfig.modelId(context)`.
+
+**Result after a dashboard swap A → B, then an idle unload: A's weights load stamped with B's id.**
+Requests naming B silently receive A's output. No error, no log, no failing test.
+
+**Correction 1 — restart needs no allowlist.** Codex said a restart "requires allowlist resolution,
+which fails offline". It does not. `RelaisConfig.modelPath` still holds A's path and `File(A).exists()`
+is true, so the offline fast path at `RelaisModelProvisioner.kt:287-297` takes it and calls
+`remember(context, A, persistForId = idAtStart = B)` — **re-persisting A's path under id B.** Same
+wrong-model outcome, but the divergence is self-reinforcing rather than self-correcting.
+
+**Correction 2 — ⚠ THE OBVIOUS FIX IS INERT. Read this before patching.** The tempting fix is to
+route the swap's successful transition through
+`RelaisModelProvisioner.remember(context, path, persistForId = id)`, citing `remember`'s own `:422`
+comment that it is "the ONE funnel". **That does nothing on this path.** `remember` persists only
+when `shouldPersistPath(provisionedForId, currentId)` holds — `:380-381`,
+`provisionedForId == null || provisionedForId == currentId` — and it reads
+`currentId = RelaisConfig.modelId(context)` at `:419`. The swap thread runs **before**
+`applyManualId` writes the new id, so `currentId` is still A while `persistForId` is B. Mismatch, no
+persist. `cachedPath` (assigned unconditionally at `:416`) *would* update, so **the idle-reload
+symptom disappears while the restart symptom silently survives** — a fix that makes the bug harder to
+find than leaving it alone.
+
+**The real constraint:** the id and the path must become durable in the same ordering relation to the
+dispatch. The fix is a decision about *where that pairing lives*, not a second write next to the
+existing one. And `shouldPersistPath`'s drift guard exists for issue #11 (operator changes model
+mid-download) — it is doing its job here and must not be defeated by passing `persistForId = null`.
+
+**Why this is new in PR-B, though the swap is #180's.** The #180 per-request swap has the identical
+path-not-updated behavior and is safe anyway, because it **never persists the id**: config and the
+persisted path stay consistent (both A) and the divergence dies with the process. PR-B is the first
+caller that makes the operator's choice durable, and persisting the id without the path is what makes
+the pair incoherent across a restart. This is the executor's own rule from `RelaisHttpPages.kt:61-65`
+— *"The precedent is right; this destination does not preserve what made it safe"* — which it wrote
+about the resident-check short-circuit and then missed one call lower, at the persist.
+
+---
+
+#### [P2] The compatibility branch in `handleSelectModel` is unreachable
+
+`RelaisHttpServer.kt:460-465` · `RelaisHttpPages.kt:84-97` · `RelaisHttpPages.kt:222-227`
+
+`available = availableModelIdsFor(onDisk, configured, ::incompatibleReason)`, and that function is
+`(provisionedIds + configured).filter { incompatibleReason(it) == null }.sorted()` — **the filter
+covers the configured id too**. So `available` can never contain an incompatible id, and step 1's
+`validateModelChoice` rejects every one with *"unknown model id — no change applied"*. Step 2 is dead
+code, and its own comment asserts the opposite ("a page rendered before a model became known-bad can
+still POST it").
+
+Operator impact: selecting a provisioned-but-incompatible model reports the file as unknown instead
+of naming the runtime reason it cannot load.
+
+**Fix direction:** validate membership against the UNFILTERED provisioned ids + configured id, then
+apply the compatibility check. Keep the filter for the rendered dropdown only.
+
+---
+
+#### What this says about the 17/17 mutation table
+
+Every mutant killed, and neither defect was caught. **Mutation coverage measures the assertions you
+wrote, not the branches those assertions can reach.** P2 lives in a branch nothing reaches; P1 needs
+a reload after an unload, which no JVM test can observe. Both sat under a green three-flavor lane,
+4047 passing tests, and eight rounds of plan review.
+
 ### What PR-B closes, and what it changes on the wire
 
 - **#313** (mDNS TXT `model=` goes stale after every #180 hot-swap) — closed by this diff. New pure
@@ -147,12 +240,23 @@ move as its round-7 `endpointLabel` decline, pointed at the lead this time.
 
 ### Next actions, in order
 
-1. Review the four-commit diff (`git diff c94f1441..009912ed`), then `/codex review` on it
-   (`gpt-5.6-terra`; the default `gpt-6-astra` 400s on CLI 0.151.0). Treat the executor's report as
-   evidence to re-derive, not as a pass — its own round-7 decline is the model for that.
-2. **Run both probes on rango**, plus manual check 10 (real swap → `dumpsys nsd` → cleared logcat).
+1. **Fix the P1 and P2 above.** JD is doing this in codex. Read the P1's "THE OBVIOUS FIX IS INERT"
+   paragraph first — the one-line funnel patch passes review by inspection and changes nothing
+   durable.
+2. **Add a test that can fail.** Neither defect is reachable by the current suite, so a fix with a
+   green lane proves nothing. P2 is JVM-testable today (assert the incompatible-id POST returns the
+   compatibility message, not "unknown model id"). P1 is not: it needs a reload after an unload, so
+   it wants a probe, and it should be added to the manual-check list alongside check 10.
+3. **Re-run `/codex review --base c94f1441`** after the fix. Per
+   [[relais-dual-review-disjoint]], always re-run codex after fixing — a fix landing inside the
+   previous fix is this repo's most common defect shape, and fix commits are the highest-risk diff.
+4. **Run both probes on rango**, plus manual check 10 (real swap → `dumpsys nsd` → cleared logcat).
    Nothing else covers that surface.
-3. PR → merge. Then step 5 below.
+5. PR → merge. Then step 5 of the implementation order below.
+
+**Model note for the next codex run:** the default `gpt-6-astra` works on **CLI 0.154.0**
+(`_gstack_codex_model_probe` → `MODEL_OK`). The `gpt-5.6-terra` workaround in older notes was for the
+0.151.0 400 and is no longer needed — but probe rather than assume, which is how this was found.
 
 ### Filed this session, still open
 
