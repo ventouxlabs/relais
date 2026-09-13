@@ -44,10 +44,34 @@ object ModelSwitch {
   /**
    * Persist a raw manual-id pick. Drops any curated ref first so the entered id resolves via the
    * allowlist instead of a now-stale ref overriding it (mirrors [RelaisConfig] semantics).
+   *
+   * [resolvedPath] has **no default, deliberately.** Omitting it is what fails OPEN — silently, and
+   * in a way no test observes — so the signature makes every caller state which case it is in:
+   *
+   *  - **A path** — the caller already knows where the model lives and is BYPASSING
+   *    [RelaisModelProvisioner.resolveModel] (the dashboard's targeted swap does exactly this).
+   *    `resolveModel` is the only caller of [RelaisModelProvisioner.remember], so a bypass that
+   *    persists the id alone leaves the cached and durable path naming the OUTGOING model. The next
+   *    reload after an idle unload then loads the old weights under the new id and serves them with
+   *    no error anywhere. **Whoever bypasses resolution owns updating the cache.**
+   *  - **null** — no bypass. The reload re-resolves and `remember` runs on its own. The in-app
+   *    surfaces ([ChatViewModel], [ModelsScreen]) are in this case: their models arrive through the
+   *    download/provision funnel, which already persists the path.
+   *
+   * **Order is load-bearing.** [RelaisConfig.setModelId] must run BEFORE `remember`, because
+   * `remember` persists only when [RelaisModelProvisioner.shouldPersistPath] finds `persistForId`
+   * equal to the id it reads back from config. Call them the other way round and the ids mismatch,
+   * the drift guard (issue #11, an operator changing model mid-download) correctly refuses, and the
+   * durable path is silently not written — while the in-memory cache IS, which would hide the
+   * idle-reload symptom and leave the restart symptom alive. Do not "simplify" this ordering, and do
+   * not defeat the guard by passing a null id: the guard is not the problem here.
    */
-  fun applyManualId(context: Context, id: String) {
+  fun applyManualId(context: Context, id: String, resolvedPath: String?) {
     RelaisConfig.clearModelRef(context)
     RelaisConfig.setModelId(context, id)
+    if (resolvedPath != null) {
+      RelaisModelProvisioner.remember(context, resolvedPath, persistForId = id)
+    }
   }
 
   /**

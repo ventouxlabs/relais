@@ -64,41 +64,53 @@ import android.content.Context
  * can be invalidated between the read and the persist — leaving config stranded against the engine.
  * The precedent is right; this destination does not preserve what made it safe.
  *
- * @param available ids the page may offer — re-derived at POST time by the caller, never carried
- *   over from the render, because the submitting page may be arbitrarily stale.
- * @param provisioned registry entries, for resolving the swap target. Null from [swapTargetFor] only
- *   when the id is the configured-but-unrecorded one, where the engine's own fallback is correct.
+ * @param provisioned registry entries, re-read at POST time by the caller and never carried over
+ *   from the render, because the submitting page may be arbitrarily stale. Serves double duty: it
+ *   is both what [validateSelection] derives the legal id set from and what [swapTargetFor] resolves
+ *   the swap target against. Null from [swapTargetFor] only when the id is the
+ *   configured-but-unrecorded one, where the engine's own fallback is correct.
+ * @param configured the currently-configured model id, re-read at POST time for the same reason.
+ *   Unioned into the selectable set so the operator can re-pick it during the pre-recording window.
  * @param respond `(status, html, extraHeaders)`. The caller records the metric inside this lambda —
  *   `respondText` does not record, unlike `reply`.
  */
 internal fun handleSelectModel(
   context: Context,
   body: String,
-  available: List<String>,
   provisioned: List<ProvisionedModel>,
+  configured: String,
   respond: (status: Int, html: String, extraHeaders: List<String>) -> Unit,
 ) {
-  val requested = parseFormField(body, "model")
-
-  // 1. Membership. Nothing is persisted on any rejection path below.
-  val id = validateModelChoice(requested, available)
-  if (id == null) {
-    respond(400, selectModelErrorPage("unknown model id — no change applied"), selectModelHeaders())
-    return
-  }
-
-  // 2. Compatibility, re-checked server-side. Not redundant with the dropdown filter: a page
-  // rendered before a model became known-bad can still POST it, and the dropdown is client input.
-  // Both gates call the same predicate so they cannot drift apart.
-  val incompatible = RelaisRuntimeCompat.incompatibleReason(id)
-  if (incompatible != null) {
-    respond(400, selectModelErrorPage("$id cannot be loaded — $incompatible"), selectModelHeaders())
-    return
-  }
+  // 1+2. Membership and compatibility, in one pure decision. Nothing is persisted on either
+  // rejection path. Deriving the selectable set inside validateSelection is what keeps the
+  // compatibility arm reachable — see selectableModelIdsFor.
+  val id =
+    when (val outcome =
+      validateSelection(
+        parseFormField(body, "model"),
+        provisioned,
+        configured,
+        RelaisRuntimeCompat::incompatibleReason,
+      )) {
+      is SelectionOutcome.Unknown -> {
+        respond(400, selectModelErrorPage("unknown model id — no change applied"), selectModelHeaders())
+        return
+      }
+      is SelectionOutcome.Incompatible -> {
+        respond(
+          400,
+          selectModelErrorPage("${outcome.id} cannot be loaded — ${outcome.reason}"),
+          selectModelHeaders(),
+        )
+        return
+      }
+      is SelectionOutcome.Ok -> outcome.id
+    }
 
   // 3. Dispatch. False means another swap holds the CAS; answer the same 503 + Retry-After the
   // request path already uses for this exact state rather than inventing a second status code.
-  if (!RelaisEngine.ensureModelSwapInBackground(context, swapTargetFor(id, provisioned))) {
+  val target = swapTargetFor(id, provisioned)
+  if (!RelaisEngine.ensureModelSwapInBackground(context, target)) {
     respond(
       503,
       selectModelErrorPage("a model swap is already running — retry shortly"),
@@ -110,7 +122,15 @@ internal fun handleSelectModel(
   // 4. Persist, only now. Through ModelSwitch, never RelaisConfig.setModelId: applyManualId clears
   // the model ref unconditionally, which setModelId does not, and ModelSwitch is the declared single
   // source of truth for an operator model pick.
-  ModelSwitch.applyManualId(context, id)
+  //
+  // [target]?.path is NOT optional decoration. A targeted swap deliberately skips `resolveModel` —
+  // "the registry already holds the on-disk path" — and `resolveModel` is the only thing that calls
+  // RelaisModelProvisioner.remember(). Persisting the id alone therefore left the cached and durable
+  // PATH pointing at the OUTGOING model, so the next reload after an idle unload loaded the old
+  // weights stamped with the new id and served them silently. Whoever bypasses resolution owns
+  // updating the cache; this is that owner. A null target means the id is the configured-but-
+  // unrecorded one, where the swap resolves normally and `remember` runs on its own.
+  ModelSwitch.applyManualId(context, id, resolvedPath = target?.path)
   // 303, not 302, so the browser reloads with GET and a refresh does not re-POST the form.
   respond(303, "", selectModelHeaders() + "Location: /")
 }
@@ -223,8 +243,69 @@ internal fun availableModelIdsFor(
   provisioned: List<ProvisionedModel>,
   configured: String,
   incompatibleReason: (String) -> String?,
-): List<String> =
-  (provisionedIds(provisioned) + configured).filter { incompatibleReason(it) == null }.sorted()
+): List<String> = selectableModelIdsFor(provisioned, configured).filter { incompatibleReason(it) == null }
+
+/**
+ * Every model id a `POST /select-model` may legally NAME: the provisioned registry unioned with the
+ * configured id, sorted. **Deliberately unfiltered by runtime compatibility.**
+ *
+ * This is NOT [availableModelIdsFor] and the two are not interchangeable — that mistake is the defect
+ * this function exists to make unrepresentable. "What the dropdown may OFFER" is a strict subset of
+ * "what a POST may NAME", and the difference is exactly the provisioned-but-incompatible models:
+ *
+ *  - **Offering** one is a real hazard: the targeted swap skips `resolveModel` and therefore every
+ *    compat check, so the node would take itself down on first inference.
+ *  - **Rejecting the POST as "unknown model id"** is a lie. The file is on disk and the operator can
+ *    see it; they are owed the runtime reason. Validating membership against the filtered list made
+ *    the compatibility branch in [handleSelectModel] unreachable — dead code whose own comment
+ *    asserted it was live.
+ *
+ * [availableModelIdsFor] is DEFINED in terms of this function rather than duplicating the union, so
+ * the two can never drift into agreeing again.
+ *
+ * Pure; no Context, no Android.
+ */
+internal fun selectableModelIdsFor(provisioned: List<ProvisionedModel>, configured: String): List<String> =
+  (provisionedIds(provisioned) + configured).sorted()
+
+/** The three outcomes of validating a `POST /select-model` body. Exhaustive; no else branch. */
+internal sealed interface SelectionOutcome {
+  /** [id] is selectable and loadable. The only outcome that dispatches a swap. */
+  data class Ok(val id: String) : SelectionOutcome
+
+  /** Absent, blank, or naming nothing on disk. Never reveals whether some other id exists. */
+  data object Unknown : SelectionOutcome
+
+  /** On disk, but the runtime-compat table refuses it. [reason] is shown to the operator verbatim. */
+  data class Incompatible(val id: String, val reason: String) : SelectionOutcome
+}
+
+/**
+ * Validates a submitted model id. **Takes the registry, not a pre-computed id list** — that is the
+ * fix for the defect above, and it is structural rather than behavioral: with no list parameter there
+ * is no wrong list a caller can hand in. The caller supplies what it already has (`provisionedOnDisk()`
+ * and the configured id) and cannot express the bug.
+ *
+ * Membership is checked against [selectableModelIdsFor] and compatibility SECOND, so a provisioned
+ * model the compat table refuses reports the actual reason instead of "unknown model id".
+ *
+ * [incompatibleReason] is injected with no default, for the same reason [availableModelIdsFor] injects
+ * it: a defaulted `{ null }` would make every compatibility assertion pass while checking nothing.
+ *
+ * Pure; no Context, no Android.
+ */
+internal fun validateSelection(
+  requested: String?,
+  provisioned: List<ProvisionedModel>,
+  configured: String,
+  incompatibleReason: (String) -> String?,
+): SelectionOutcome {
+  val id =
+    validateModelChoice(requested, selectableModelIdsFor(provisioned, configured))
+      ?: return SelectionOutcome.Unknown
+  val reason = incompatibleReason(id) ?: return SelectionOutcome.Ok(id)
+  return SelectionOutcome.Incompatible(id, reason)
+}
 
 /**
  * The configured model id when the engine is not serving it, else null.

@@ -51,6 +51,11 @@ import org.junit.runner.RunWith
  *  - **`reason(303)`.** `reason` is private and there is no `RelaisHttpServer` unit test, so the
  *    status line is the only place the phrase is observable. A missing arm reads `303 ERR`.
  *  - **`endpointLabel`.** Also private. The panel must show `/select-model`, not `other`.
+ *  - **The id and the PATH are persisted together** (the codex P1). `applyManualId` must be handed
+ *    `resolvedPath = target?.path`, because a targeted swap skips `resolveModel` — the only caller
+ *    of `RelaisModelProvisioner.remember` — and persisting the id alone leaves the cached and
+ *    durable path naming the OUTGOING model. **Measured: neutering this to `resolvedPath = null`
+ *    passes all 1355 JVM tests in every flavor.** The suite cannot see it; only manual check 11 can.
  *
  * ## What this probe does NOT cover, deliberately
  *
@@ -61,6 +66,20 @@ import org.junit.runner.RunWith
  * was wrongly called or correctly skipped. **Assert zero occurrences of each of the four NSD
  * callbacks in a cleared window instead** — an absence-of-a-*pair* check passes when an unregister
  * succeeds and the re-register fails, which is exactly the violation it was meant to catch.
+ *
+ * **Manual check 11 — the id/path pairing (P1).** Also manual, for a reason worth stating: the
+ * defect only becomes observable ACROSS a reload, and both reload triggers are slow or destructive.
+ *
+ *  1. Note the configured model (A) and switch to a different provisioned model (B) in the dashboard.
+ *  2. Wait for the swap to finish, then force the idle unload (or `adb shell am force-stop` and
+ *     restart the node — the restart route exercises the persisted path, the unload route the
+ *     in-memory cache; they fail independently, so **do both**).
+ *  3. `GET /v1/models` and run one inference. The served model must BE B.
+ *
+ * The failure is silent by construction: before the fix the node answered as B while running A's
+ * weights, with no error, no log line, and a green test suite. If step 3 looks right, confirm it by
+ * reading the persisted path — a node that reports B while its stored path still ends in A's
+ * filename has the bug back.
  *
  * ## Not CI
  *

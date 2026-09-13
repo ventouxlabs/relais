@@ -473,17 +473,15 @@ class RelaisHttpServer(
           //    response paths; otherwise the /select-model series would contain only the gate's 403s
           //    and show the route failing 100% of the time while every success stayed invisible.
           method == "POST" && path == "/select-model" -> {
-            val onDisk = provisionedOnDisk()
+            // The registry and the configured id go in RAW. The handler derives what a POST may
+            // name via selectableModelIdsFor; passing the compat-FILTERED availableModelIdsFor here
+            // is what made the handler's compatibility branch unreachable, and the parameter that
+            // allowed it is gone.
             handleSelectModel(
               context = context,
               body = readBody(reader, contentLength),
-              available =
-                availableModelIdsFor(
-                  onDisk,
-                  RelaisConfig.modelId(context),
-                  RelaisRuntimeCompat::incompatibleReason,
-                ),
-              provisioned = onDisk,
+              provisioned = provisionedOnDisk(),
+              configured = RelaisConfig.modelId(context),
             ) { status, html, extraHeaders ->
               RelaisMetrics.recordRequest(ctx.endpoint, status)
               respondText(ctx.sock, status, html, "text/html; charset=utf-8", extraHeaders)
