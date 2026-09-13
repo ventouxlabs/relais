@@ -17,9 +17,12 @@ Restore the documented opt-in boot auto-start capability by exposing the existin
 
 ## Audit result
 
-`RelaisConfig.setIdleTtlMinutes` remains without a production caller; this is already tracked by
-#22 and is intentionally outside this focused auto-start change. No other operator-facing
-configuration setter was found to be write-only on the CONFIGURE surface.
+A production-source audit found these configuration writers without call sites: image-model
+selection/override (`setImageModelId`, `setImageModelUrl`, `setImageModelSha`),
+`setTtsVoiceId`, `setWebhookAllowlist`, the three thermal-governor thresholds,
+`setIdleTtlMinutes`, `setTileCannedTemplateId`, `setShareSystemPrompt`, and the four session
+memory settings. They remain out of scope for this focused auto-start change. Idle TTL is already
+tracked by #22; this PR does not assert tracking coverage for the remaining settings.
 
 ## Acceptance criteria
 
