@@ -6,7 +6,7 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-12 21:10 EDT — ⏩ START HERE. **#318 and #323 MERGED. feature-09 PR-B implemented, `/codex review` GATE: FAIL — two confirmed defects, both UNFIXED. JD is fixing them in codex.**
+## 2026-09-12 21:40 EDT — ⏩ START HERE. **#318 and #323 MERGED. feature-09 PR-B implemented; codex found two defects, both FIXED in `80d106f6`. Unpushed. Codex re-review and all hardware checks still outstanding.**
 
 `main` = `62050b83`. Two feature-09 PRs shipped this session, both hardware-verified on rango:
 
@@ -130,10 +130,31 @@ be taken** — it converts a review question into a multiple-choice with an exit
 accounting; don't draft the excuse. The executor refusing the exoneration is the same disagree-upward
 move as its round-7 `endpointLabel` decline, pointed at the lead this time.
 
-### 🔴 `/codex review` — GATE: FAIL. Two defects, both CONFIRMED, both UNFIXED.
+### ✅ `/codex review` found two defects — both now FIXED in `80d106f6`. Re-review BLOCKED on quota.
+
+**Status after the fix:** 4065 tests (1355 × 3 flavors), 0 failures, `--rerun-tasks`, no test task
+`UP-TO-DATE`; probe suite compiles. **P2 proven RED** — reintroducing the filtered-list membership
+check fails exactly one test, the regression test, with the other five still green (the mutation
+asserted the file changed before running). **P1 measured as UNCOVERED** — neutering it to
+`resolvedPath = null` passes all 1355 tests, so it is recorded as manual check 11 in
+`DashboardSelectModelProbe` rather than left implied.
+
+**The codex re-run is a fail-closed GATE: FAIL, not a pass** — `codex exit 1`, *"You've hit your
+usage limit … try again at 1:40 PM"*. Nothing was reviewed. **Re-run
+`--base f15dc74d` after the quota resets** before treating the fix as independently checked; fix
+commits are this repo's highest-risk diff and a finding landing inside the previous fix is its most
+common shape.
+
+What the fix does is below; the original findings and their evidence chains are kept because the
+cause outlasts them.
+
+---
+
+#### Original finding record — GATE: FAIL, two defects CONFIRMED (now fixed)
 
 Run at 21:05 on `--base c94f1441` (implementation only, excluding the 8 already-reviewed plan
-commits). CLI 0.154.0, model `gpt-6-astra`, exit 0. **Neither is fixed; JD is fixing them in codex.**
+commits). CLI 0.154.0, model `gpt-6-astra`, exit 0. **Both are now fixed in `80d106f6`** — the record
+below is kept for the cause, not the status.
 I re-derived both against the tree rather than relaying them — the verdict below reflects my reading,
 and it corrects codex on two points.
 
@@ -240,19 +261,13 @@ a reload after an unload, which no JVM test can observe. Both sat under a green 
 
 ### Next actions, in order
 
-1. **Fix the P1 and P2 above.** JD is doing this in codex. Read the P1's "THE OBVIOUS FIX IS INERT"
-   paragraph first — the one-line funnel patch passes review by inspection and changes nothing
-   durable.
-2. **Add a test that can fail.** Neither defect is reachable by the current suite, so a fix with a
-   green lane proves nothing. P2 is JVM-testable today (assert the incompatible-id POST returns the
-   compatibility message, not "unknown model id"). P1 is not: it needs a reload after an unload, so
-   it wants a probe, and it should be added to the manual-check list alongside check 10.
-3. **Re-run `/codex review --base c94f1441`** after the fix. Per
-   [[relais-dual-review-disjoint]], always re-run codex after fixing — a fix landing inside the
-   previous fix is this repo's most common defect shape, and fix commits are the highest-risk diff.
-4. **Run both probes on rango**, plus manual check 10 (real swap → `dumpsys nsd` → cleared logcat).
-   Nothing else covers that surface.
-5. PR → merge. Then step 5 of the implementation order below.
+1. **Re-run `/codex review --base f15dc74d`** once the quota resets (1:40 PM). The first attempt
+   exited 1 on a usage limit and reviewed nothing — that is a fail-closed gate result, not a pass.
+2. **Run both probes on rango**, plus manual check 10 (real swap → `dumpsys nsd` → cleared logcat)
+   **and the new manual check 11** (swap A→B, then force BOTH an idle unload and a restart — they
+   fail independently — and confirm the served model is actually B). Check 11 is the only cover P1
+   has, by measurement: the defect passes 1355 JVM tests.
+3. PR → merge. Then step 5 of the implementation order below.
 
 **Model note for the next codex run:** the default `gpt-6-astra` works on **CLI 0.154.0**
 (`_gstack_codex_model_probe` → `MODEL_OK`). The `gpt-5.6-terra` workaround in older notes was for the
