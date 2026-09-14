@@ -120,13 +120,14 @@ class RelaisShellViewModel(app: Application) : AndroidViewModel(app) {
     val ctx = getApplication<Application>()
     val ready = RelaisEngine.isReady
     val running = RelaisConfig.shouldRun(ctx)
+    val liveness = RelaisLivenessState.snapshot
 
     // #217: "running" with no init actually in flight means the service died (OS kill, crash, or an
     // APK reinstall under a persisted shouldRun). `startupInProgress` is the right signal because
     // RelaisNodeService holds it across the WHOLE init — including a multi-GB download — so a slow
     // first start can never be mistaken for a stall.
     stalledTicks =
-      if (running && !ready && !RelaisEngine.startupInProgress) stalledTicks + 1 else 0
+      if (running && !ready && !liveness.startupInProgress) stalledTicks + 1 else 0
 
     return computeControlPanelState(
       ready = ready,
@@ -136,15 +137,8 @@ class RelaisShellViewModel(app: Application) : AndroidViewModel(app) {
       phase = RelaisNodeProgress.phase,
       downloadReceivedBytes = RelaisNodeProgress.downloadReceivedBytes,
       downloadTotalBytes = RelaisNodeProgress.downloadTotalBytes,
-      // Read BEFORE listenersUp — the order of these two reads is load-bearing. They are separate
-      // volatile fields, so a poll descheduled between them composes a state that never existed at
-      // any instant. The invariant that makes THIS order the safe one: startup is never published
-      // as finished before the listeners it started are published. Under it, a stale read here can
-      // only over-report STARTING, which the next tick corrects; the opposite order could take
-      // "listeners down" and "startup finished" from either side of that publish and render
-      // OFFLINE — a START button on a node that just came up healthy.
-      startupInProgress = RelaisEngine.startupInProgress,
-      listenersUp = RelaisListenerState.listenersUp,
+      startupInProgress = liveness.startupInProgress,
+      listenersUp = liveness.listenersUp,
       initFailed = RelaisEngine.lastInitFailed,
       stalledStart = isStalledStart(stalledTicks),
     )

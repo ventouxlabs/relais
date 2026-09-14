@@ -254,13 +254,6 @@ object RelaisEngine {
   @Volatile private var lastActivityAtMs: Long = System.currentTimeMillis()
 
   /**
-   * True while the node is provisioning/initializing in this process (e.g. a first-run multi-GB
-   * model download). The watchdog uses this to distinguish "still coming up" from "dead", so a slow
-   * first start is not mistaken for a failure (no backoff escalation, no premature alarm).
-   */
-  @Volatile var startupInProgress: Boolean = false
-
-  /**
    * True iff the engine's current not-ready state is a graceful idle-TTL unload ([releaseIfIdle],
    * #178), not a crash. [RelaisWatchdogReceiver] checks this BEFORE treating `!isReady` as a
    * failure — without it, the watchdog's own ~60s heartbeat would see the freshly-unloaded engine,
@@ -391,16 +384,16 @@ object RelaisEngine {
    * simply never initialized, since then the service might not be running at all).
    */
   fun ensureInitializedInBackground(context: Context) {
-    if (isReady || startupInProgress) return
+    if (isReady || RelaisLivenessState.snapshot.startupInProgress) return
     if (!backgroundReloadDispatching.compareAndSet(false, true)) return // a reload is already dispatching
     thread(name = "relais-idle-reload") {
       try {
-        startupInProgress = true // tell the watchdog "coming up", not "dead"
+        RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead"
         ensureInitialized(context)
       } catch (e: Exception) {
         Log.w(TAG, "background idle-reload failed: ${e.message}")
       } finally {
-        startupInProgress = false
+        RelaisLivenessState.endStartup()
         backgroundReloadDispatching.set(false)
       }
     }
@@ -416,11 +409,11 @@ object RelaisEngine {
    * [backgroundReloadDispatching] pattern with its own dedicated guard, since the two can legitimately
    * race independently (an idle-reload and a swap are different triggers).
    *
-   * Reuses [startupInProgress] for watchdog safety rather than inventing a parallel flag: it's the
+   * Reuses [RelaisLiveness.startupInProgress] for watchdog safety rather than inventing a parallel flag: it's the
    * same "still coming up, not dead" signal every existing not-ready window already relies on (see
    * [RelaisWatchdogReceiver]), and the swap's not-ready window — between [shutdown] and the next
    * successful [ensureInitialized] — IS exactly that case. Exhaustively grepped every call site of
-   * `isReady`/`startupInProgress`/`wasIdleUnloaded` before adding this (#180 handoff); none of them
+   * `isReady`/`RelaisLiveness.startupInProgress`/`wasIdleUnloaded` before adding this (#180 handoff); none of them
    * distinguish "coming up from a cold start" from "coming up from a swap" and none need to.
    *
    * Resolves the swap target BEFORE closing the old engine: a failed/offline resolve (e.g. the
@@ -434,7 +427,7 @@ object RelaisEngine {
     if (!swapDispatching.compareAndSet(false, true)) return // a swap is already dispatching
     thread(name = "relais-model-swap") {
       try {
-        startupInProgress = true // tell the watchdog "coming up", not "dead" (same signal as any init)
+        RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead" (same signal as any init)
         // Captured ONCE, before resolveModel runs, so the id stamped on the reloaded engine can never
         // drift from an operator config change happening mid-swap (#180 review, MEDIUM finding 2):
         // resolveModel() internally re-reads RelaisConfig.modelId(context) itself (its signature only
@@ -491,7 +484,7 @@ object RelaisEngine {
       } catch (e: Exception) {
         Log.w(TAG, "model swap failed: ${e.message}")
       } finally {
-        startupInProgress = false
+        RelaisLivenessState.endStartup()
         swapDispatching.set(false)
       }
     }

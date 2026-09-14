@@ -60,8 +60,7 @@ data class RelaisControlPanelState(
  * [RelaisEngine.isReady] / [RelaisConfig.shouldRun]; [thermalShedding] mirrors
  * [ThermalGovernor.shouldShed]; [phase] and the download byte counts mirror [RelaisNodeProgress];
  * [initFailed] mirrors [RelaisEngine.lastInitFailed] (already consumed by the QS tile);
- * [listenersUp] mirrors [RelaisListenerState.listenersUp]; [startupInProgress] mirrors
- * [RelaisEngine.startupInProgress].
+ * [listenersUp] and [startupInProgress] come from one [RelaisLivenessState.snapshot].
  *
  * [listenersUp] is deliberately **required** while every other added signal is defaulted, and the
  * asymmetry is the safety property: omitting [startupInProgress] can only under-report (STARTING
