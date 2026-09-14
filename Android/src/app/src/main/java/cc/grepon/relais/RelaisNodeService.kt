@@ -497,6 +497,9 @@ class RelaisNodeService : Service() {
         refreshListenerState()
         scheduleLanRebindObservation(LAN_REBIND_EMPTY_RECHECK_MS)
       } else {
+        // onDestroy writes serviceDestroyed under this same monitor. Check again before the
+        // external mDNS side effect, not only before publishing the socket group.
+        check(!serviceDestroyed) { "service was destroyed before mDNS re-registration" }
         RelaisDiscovery.register(applicationContext)
         refreshListenerState()
         synchronized(lanRebindLock) { lanRebindStability.clear() }
@@ -507,7 +510,10 @@ class RelaisNodeService : Service() {
   private fun stopLanRebindObserver() {
     // Marking destruction before unregistering closes the callback/teardown race. A runnable that
     // was already queued must additionally acquire listenerLifecycleLock and re-check this flag.
-    serviceDestroyed = true
+    // Serialize destruction against the listener publish and mDNS re-registration critical
+    // section. Once this returns, any rebind either finished before STOP (and will be torn down
+    // below) or observes destruction and cannot publish anything new.
+    synchronized(listenerLifecycleLock) { serviceDestroyed = true }
     runCatching { connectivityManager?.unregisterNetworkCallback(lanNetworkCallback) }
     synchronized(lanRebindLock) {
       lanRebindFuture?.cancel(true)
