@@ -45,8 +45,9 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
  * churns underneath it whenever the node re-issues, so the import is not invalidated by a re-issue.
  * That is the entire reason for the extra moving part.
  *
- * Note the scope: re-issue is computed at node start, **not** on a live address change. "One import and it always verifies" overstates
- * it — see [RelaisTls].
+ * Re-issue is computed at node start and by the service after a stable live-address observation.
+ * The latter is deliberately a service concern: this Context-free minter must not grow Android
+ * callback or lifecycle state — see [RelaisTls].
  *
  * **This object has no `android.` imports and must keep none.** `RelaisTlsHandshakeTest` runs a
  * real TLS handshake against a cert minted here in the device-free JVM lane, which is only possible
@@ -125,12 +126,12 @@ internal object RelaisCertMint {
    * prints the address, and hostname verification still fails. That failure mode is why
    * `RelaisTlsHandshakeTest` asserts a real handshake rather than inspecting the extension.
    */
-  fun buildSanList(addrs: List<InetAddress>): List<GeneralName> {
+  internal fun sanLiterals(addrs: List<InetAddress>): List<String> {
     val fixed =
       listOf(
-        GeneralName(GeneralName.iPAddress, "127.0.0.1"),
-        GeneralName(GeneralName.iPAddress, "::1"),
-        GeneralName(GeneralName.dNSName, "localhost"),
+        "127.0.0.1",
+        "::1",
+        "localhost",
       )
     val fixedLiterals = setOf("127.0.0.1", "::1")
     val dynamic =
@@ -146,9 +147,13 @@ internal object RelaisCertMint {
         .filter { it.isNotEmpty() && it !in fixedLiterals }
         .distinct()
         .sorted()
-        .map { GeneralName(GeneralName.iPAddress, it) }
     return (fixed + dynamic).take(MAX_SANS)
   }
+
+  fun buildSanList(addrs: List<InetAddress>): List<GeneralName> =
+    sanLiterals(addrs).mapIndexed { index, literal ->
+      GeneralName(if (index == 2) GeneralName.dNSName else GeneralName.iPAddress, literal)
+    }
 
   /**
    * Mints the self-signed per-node CA: EC P-256, 10 years, `keyCertSign`-only, path length 0 — it

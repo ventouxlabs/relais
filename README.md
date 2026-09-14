@@ -104,6 +104,10 @@ curl -k https://<phone-ip>:8443/v1/chat/completions \
 > which cannot be represented in a certificate SAN. Every IPv4 or IPv6 address shown in the node's
 > certificate is served on HTTPS `:8443`.
 
+> If DHCP finishes after the node starts, it observes the new LAN address set and refreshes its
+> certificate and HTTPS listeners after that set has remained stable for 15 seconds. The imported
+> CA and the node's SPKI pin stay the same; see [SECURITY.md](SECURITY.md) for verification notes.
+
 Discovery: the node advertises `_relais._tcp` over mDNS, so clients can find it
 by name even after its IP changes.
 

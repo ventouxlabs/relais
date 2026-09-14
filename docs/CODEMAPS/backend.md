@@ -42,6 +42,7 @@ Shed order: thermal 503 → queue 429 → auth 401 → run 200. `resolveEmbeddin
 | RelaisCertFingerprint.kt | SPKI-base64 + cert colon-hex formatters |
 | RelaisCertInfo.kt | immutable public-cert snapshot (UI, `GET /`, `/ca.crt`) |
 | RelaisLanIp.kt | LAN IP resolution (dashboard/mDNS) + IPv4/IPv6 `allLanAddresses()` for SANs (IPv6 link-local excluded) |
+| RelaisLanRebind.kt | pure stable-address debounce used by the service's live certificate/listener rebind |
 | RelaisHttpIo.kt | request line/body reading, multipart parsing |
 | RelaisAdmission.kt | pure admission-decision types + retry-after scaling |
 | RelaisAdmissionGate.kt | shared-semaphore + exclusive-drain-all gate impl |

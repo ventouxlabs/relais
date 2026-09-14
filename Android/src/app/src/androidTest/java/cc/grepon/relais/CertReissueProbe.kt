@@ -43,10 +43,12 @@ import org.junit.runner.RunWith
  *     -e RELAIS_PROBE 1 com.ventouxlabs.relais.izzy.test/androidx.test.runner.AndroidJUnitRunner
  *   # in another shell: adb logcat -s RelaisCertReissueProbe:*
  *
- * The **cross-network** half is manual and cannot be automated from inside the probe: run it once
- * on Wi-Fi A, move the device to Wi-Fi B, run it again, and compare the two logged blocks. The
- * `CA FINGERPRINT` and `NODE KEY PIN` must be identical across the two runs while the SAN list
- * changes. That is the acceptance criterion an imported `relais-ca.crt` depends on.
+ * The **cross-network** half is manual and cannot be automated from inside the probe: with the
+ * node running, run it on Wi-Fi A, move the device to Wi-Fi B, wait for the same non-empty address
+ * set to remain present for at least 15 seconds, then run it again. Compare the two logged blocks:
+ * the `CA FINGERPRINT` and `NODE KEY PIN` must be identical while the SAN list changes. Confirm
+ * the new SAN from a second machine before stopping the node. That is the acceptance criterion an
+ * imported `relais-ca.crt` depends on.
  *
  * ## Manual: EVERY SAN MUST HAVE SOMETHING LISTENING ON IT
  *
@@ -92,10 +94,9 @@ import org.junit.runner.RunWith
  * `0.0.0.0:8443` is bound and presenting the node's certificate to the LAN, with no in-app remedy.
  * Treat a failure here as release-blocking.
  *
- * The dynamic LAN rebind that originally motivated this check is **not in this release** (see the
- * tracked follow-up), so there is no longer a scheduled callback that could resurrect the listener
- * after teardown. The check stays because the property it tests — stopping the node frees the port
- * — is worth verifying on its own, and because the rebind is expected to return.
+ * The live LAN rebind is intentionally active while the node runs. This stop check is therefore
+ * also its teardown proof: change networks, stop immediately, then verify that no queued callback
+ * can resurrect `:8443` after every UI surface says the node is stopped.
  */
 @RunWith(AndroidJUnit4::class)
 class CertReissueProbe {
@@ -113,7 +114,10 @@ class CertReissueProbe {
     val live = RelaisLanIp.allLanAddresses().mapNotNull { it.hostAddress }
     Log.i(TAG, "live addresses: ${live.joinToString(", ").ifEmpty { "(none — no LAN?)" }}")
 
-    val before = RelaisTls.certInfo(context)
+    // This probe must not mint: doing so could repair disk state after a failed service rebind and
+    // make the next process look healthy. Start the node first; the external listener checks in
+    // this file prove that the served peer matches this read-only certificate snapshot.
+    val before = requireNotNull(RelaisTls.certInfoOrNull(context)) { "Start the node before running this probe" }
     Log.i(TAG, "--- BEFORE ---")
     logInfo(before)
 
@@ -128,13 +132,10 @@ class CertReissueProbe {
     assertTrue("loopback must always be covered", before.sanList.contains("127.0.0.1"))
     assertTrue("IPv6 loopback must be covered", before.sanList.any { it == "::1" || it == "0:0:0:0:0:0:0:1" })
 
-    // Re-read after a second load, then prove the identity did not move. This used to force a
-    // re-issue through the dynamic-rebind path; that path is not in this release (see the tracked
-    // follow-up), so what is checked here is the property that matters either way — the CA and the
-    // leaf key are stable across loads, which is what an imported `relais-ca.crt` and a
-    // `--pinnedpubkey` pin depend on.
-    val after = RelaisTls.certInfo(context)
-    Log.i(TAG, "--- AFTER RE-ISSUE ---")
+    // Re-read without mutation and prove the identity did not move. The manual cross-network run
+    // below supplies the live service rebind; this protects the CA/SPKI identity it must retain.
+    val after = requireNotNull(RelaisTls.certInfoOrNull(context)) { "certificate disappeared while probe was running" }
+    Log.i(TAG, "--- AFTER READ ---")
     logInfo(after)
 
     // The CA is minted once, ever: a changed value here means every client must re-import.

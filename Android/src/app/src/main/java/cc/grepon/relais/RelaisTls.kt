@@ -16,6 +16,7 @@ import android.content.Context
 import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -48,10 +49,10 @@ import org.bouncycastle.asn1.x509.GeneralName
  * a SAN. A client imports the CA once and does not have to re-import when the leaf is re-issued,
  * because only the leaf changes.
  *
- * **Re-issue happens at node start — not on a live address change.** A node that moves network mid-session keeps serving a certificate
- * that no longer covers its address until it restarts. Do not describe this as surviving DHCP
- * churn: that claim was made, shipped into client-facing copy, and had to be retracted after
- * hardware showed the stale-leaf case.
+ * **Re-issue happens at node start and after a stable live-address change.** The service owns the
+ * latter policy because Android callback delivery and teardown cannot live in this keystore shim.
+ * It waits for one non-empty address set to persist before calling the same mint transaction; do
+ * not turn a callback itself into permission to churn a certificate or listener.
  *
  * **Two keystore files, deliberately.** `relais_ca.p12` holds the CA; `relais_tls.p12` holds the
  * leaf key and the `[leaf, ca]` chain. Only the latter is ever handed to a [KeyManagerFactory] —
@@ -172,9 +173,12 @@ internal object RelaisTls {
   }
 
   /** Builds [SocketFactories] from one load-or-mint transaction. */
-  fun socketFactories(context: Context): SocketFactories {
+  fun socketFactories(
+    context: Context,
+    lanAddresses: List<InetAddress> = RelaisLanIp.allLanAddresses(),
+  ): SocketFactories {
     val pass = RelaisConfig.tlsKeystorePassword(context).toCharArray()
-    val ks = loadOrMint(context, allowMintCa = true, allowMintLeaf = true).keystore
+    val ks = loadOrMint(context, allowMintCa = true, allowMintLeaf = true, lanAddresses = lanAddresses).keystore
     val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply { init(ks, pass) }
     val trustStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
       load(null)
@@ -213,7 +217,7 @@ internal object RelaisTls {
    * a deliberate act rather than the shape you get by typing nothing.
    */
   fun certInfo(context: Context): RelaisCertInfo =
-    loadOrMint(context, allowMintCa = true, allowMintLeaf = true).info
+    loadOrMint(context, allowMintCa = true, allowMintLeaf = true, lanAddresses = RelaisLanIp.allLanAddresses()).info
 
   /**
    * Load-**only**. Returns null when there is nothing readable to report.
@@ -233,8 +237,21 @@ internal object RelaisTls {
     val caFile = File(context.filesDir, CA_KEYSTORE_FILE)
     val tlsFile = File(context.filesDir, TLS_KEYSTORE_FILE)
     if (!caFile.exists() || !tlsFile.exists()) return null
-    return runCatching { loadOrMint(context, allowMintCa = false, allowMintLeaf = false).info }.getOrNull()
+    return runCatching {
+      loadOrMint(context, allowMintCa = false, allowMintLeaf = false, lanAddresses = RelaisLanIp.allLanAddresses()).info
+    }.getOrNull()
   }
+
+  /**
+   * Read-only check used by the live LAN-rebind controller before it disrupts a healthy listener.
+   * It deliberately reuses the DER-based predicate, so IPv6's display-string normalization cannot
+   * turn an unchanged address set into a restart loop.
+   */
+  fun needsLanReissue(context: Context, lanAddresses: List<InetAddress>): Boolean =
+    runCatching {
+      val state = loadOrMint(context, allowMintCa = false, allowMintLeaf = false, lanAddresses = lanAddresses)
+      RelaisCertMint.needsReissue(state.leaf, RelaisCertMint.buildSanList(lanAddresses), System.currentTimeMillis())
+    }.getOrDefault(false)
 
   /**
    * Writes [ks] to [target] **atomically and durably**: a temp file that is `fsync`ed before the
@@ -344,6 +361,7 @@ internal object RelaisTls {
     context: Context,
     allowMintCa: Boolean,
     allowMintLeaf: Boolean,
+    lanAddresses: List<InetAddress>,
   ): State {
     val caPass = RelaisConfig.caKeystorePassword(context).toCharArray()
     val tlsPass = RelaisConfig.tlsKeystorePassword(context).toCharArray()
@@ -359,7 +377,7 @@ internal object RelaisTls {
 
     val (caKey, caCert) = loadOrMintCa(caFile, caPass, allowMintCa, siblingExists = tlsExisted)
     val leafKey = loadLeafKeyPair(tlsFile, tlsPass, allowMint = allowMintLeaf, siblingExists = caExisted)
-    val liveSans = RelaisCertMint.buildSanList(RelaisLanIp.allLanAddresses())
+    val liveSans = RelaisCertMint.buildSanList(lanAddresses)
 
     // A leaf counts as reusable only if the CURRENT CA actually signed it. If `relais_ca.p12` was
     // deleted, or its key material is unrecoverable, loadOrMintCa mints a replacement — and the
@@ -576,9 +594,9 @@ internal object RelaisTls {
    * claimed coverage of an address the served certificate does not carry, and hostname
    * verification would fail against exactly the address the node was advertising as covered.
    *
-   * That is the mid-session DHCP scenario this feature does NOT handle (re-issue happens at node
-   * start, plus the one boot-time shot), and reporting it from `liveSans` would have hidden the
-   * gap from the person looking straight at it.
+   * The running service normally repairs that scenario after its stable-address window. Keeping
+   * this display derived from the leaf still matters during that window: the certificate remains
+   * authoritative until the replacement listener is actually up.
    */
   private fun buildInfo(caCert: X509Certificate, leaf: X509Certificate): RelaisCertInfo =
     RelaisCertInfo(
@@ -622,9 +640,9 @@ internal object RelaisTls {
      * bytes — see [RelaisCertMint.needsReissue], which compares DER for exactly this reason.
      *
      * Deliberately sourced from the certificate rather than from the address list that was used to
-     * mint it: those two agree only immediately after a re-mint, and the case where they disagree
-     * is precisely the one a user needs to see (a mid-session address change the node has not
-     * re-issued for). Java normalises IPv6 on the way out — `::1` reads back as
+     * mint it: those two agree only immediately after a re-mint, and they can briefly disagree
+     * while the running service waits for a changed address set to stabilize. Java normalises IPv6
+     * on the way out — `::1` reads back as
      * `0:0:0:0:0:0:0:1` — which is honest about what a verifier will match on.
      *
      * Empty on a malformed or absent extension rather than throwing: this feeds display surfaces,
