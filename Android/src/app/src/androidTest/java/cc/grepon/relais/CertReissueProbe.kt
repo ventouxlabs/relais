@@ -43,10 +43,12 @@ import org.junit.runner.RunWith
  *     -e RELAIS_PROBE 1 com.ventouxlabs.relais.izzy.test/androidx.test.runner.AndroidJUnitRunner
  *   # in another shell: adb logcat -s RelaisCertReissueProbe:*
  *
- * The **cross-network** half is manual and cannot be automated from inside the probe: run it once
- * on Wi-Fi A, move the device to Wi-Fi B, run it again, and compare the two logged blocks. The
- * `CA FINGERPRINT` and `NODE KEY PIN` must be identical across the two runs while the SAN list
- * changes. That is the acceptance criterion an imported `relais-ca.crt` depends on.
+ * The **cross-network** half is manual and cannot be automated from inside the probe: with the
+ * node running, run it on Wi-Fi A, move the device to Wi-Fi B, wait for the same non-empty address
+ * set to remain present for at least 15 seconds, then run it again. Compare the two logged blocks:
+ * the `CA FINGERPRINT` and `NODE KEY PIN` must be identical while the SAN list changes. Confirm
+ * the new SAN from a second machine before stopping the node. That is the acceptance criterion an
+ * imported `relais-ca.crt` depends on.
  *
  * ## Manual: EVERY SAN MUST HAVE SOMETHING LISTENING ON IT
  *
@@ -92,10 +94,9 @@ import org.junit.runner.RunWith
  * `0.0.0.0:8443` is bound and presenting the node's certificate to the LAN, with no in-app remedy.
  * Treat a failure here as release-blocking.
  *
- * The dynamic LAN rebind that originally motivated this check is **not in this release** (see the
- * tracked follow-up), so there is no longer a scheduled callback that could resurrect the listener
- * after teardown. The check stays because the property it tests — stopping the node frees the port
- * — is worth verifying on its own, and because the rebind is expected to return.
+ * The live LAN rebind is intentionally active while the node runs. This stop check is therefore
+ * also its teardown proof: change networks, stop immediately, then verify that no queued callback
+ * can resurrect `:8443` after every UI surface says the node is stopped.
  */
 @RunWith(AndroidJUnit4::class)
 class CertReissueProbe {

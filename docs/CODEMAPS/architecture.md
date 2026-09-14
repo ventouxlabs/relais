@@ -39,6 +39,7 @@ RelaisEngine (1026L) ──► litertlm 0.12.0 AAR — GPU_LITERTLM / NPU_AICORE
    ▼
 side-systems: embed/ (EmbeddingGemma) rerank/ rag/ tts/ (sherpa-onnx+Piper) batch/ imagegen/ nodetools/
 RelaisNodeService (FGS, START_STICKY): provision→engine init→bind HTTP + atomic dual-stack HTTPS→mDNS→kick workers
+  └─ ConnectivityManager callback → stable non-empty LAN snapshot (15s) → same TLS transaction + HTTPS listener owner
 RelaisWatchdog (exact alarm, exp backoff) recovers · ThermalGovernor sheds/truncates
 ```
 
