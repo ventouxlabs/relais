@@ -48,4 +48,13 @@ class RelaisLanRebindStabilityTest {
     assertNull(gate.observeLiterals(emptyList(), nowMs = 5_000))
     assertEquals(15_000L, gate.observeLiterals(listOf("192.0.2.10"), nowMs = 5_001))
   }
+
+  @Test
+  fun `the policy measures elapsed time supplied by its monotonic caller`() {
+    val gate = RelaisLanRebindStability(stableForMs = 15_000)
+
+    assertEquals(15_000L, gate.observeLiterals(listOf("192.0.2.10"), nowMs = 10))
+    // This is the one-second monotonic elapsed value used even if wall-clock/NTP time changed.
+    assertEquals(14_000L, gate.observeLiterals(listOf("192.0.2.10"), nowMs = 1_010))
+  }
 }

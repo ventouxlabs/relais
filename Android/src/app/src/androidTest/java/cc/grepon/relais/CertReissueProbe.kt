@@ -114,7 +114,10 @@ class CertReissueProbe {
     val live = RelaisLanIp.allLanAddresses().mapNotNull { it.hostAddress }
     Log.i(TAG, "live addresses: ${live.joinToString(", ").ifEmpty { "(none — no LAN?)" }}")
 
-    val before = RelaisTls.certInfo(context)
+    // This probe must not mint: doing so could repair disk state after a failed service rebind and
+    // make the next process look healthy. Start the node first; the external listener checks in
+    // this file prove that the served peer matches this read-only certificate snapshot.
+    val before = requireNotNull(RelaisTls.certInfoOrNull(context)) { "Start the node before running this probe" }
     Log.i(TAG, "--- BEFORE ---")
     logInfo(before)
 
@@ -129,13 +132,10 @@ class CertReissueProbe {
     assertTrue("loopback must always be covered", before.sanList.contains("127.0.0.1"))
     assertTrue("IPv6 loopback must be covered", before.sanList.any { it == "::1" || it == "0:0:0:0:0:0:0:1" })
 
-    // Re-read after a second load, then prove the identity did not move. This used to force a
-    // re-issue through the dynamic-rebind path; that path is not in this release (see the tracked
-    // follow-up), so what is checked here is the property that matters either way — the CA and the
-    // leaf key are stable across loads, which is what an imported `relais-ca.crt` and a
-    // `--pinnedpubkey` pin depend on.
-    val after = RelaisTls.certInfo(context)
-    Log.i(TAG, "--- AFTER RE-ISSUE ---")
+    // Re-read without mutation and prove the identity did not move. The manual cross-network run
+    // below supplies the live service rebind; this protects the CA/SPKI identity it must retain.
+    val after = requireNotNull(RelaisTls.certInfoOrNull(context)) { "certificate disappeared while probe was running" }
+    Log.i(TAG, "--- AFTER READ ---")
     logInfo(after)
 
     // The CA is minted once, ever: a changed value here means every client must re-import.

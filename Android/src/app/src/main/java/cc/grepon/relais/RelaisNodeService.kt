@@ -30,6 +30,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import java.net.BindException
 import java.net.InetAddress
@@ -243,11 +244,14 @@ class RelaisNodeService : Service() {
   private fun refreshListenerState(): Boolean {
     val up =
       httpServer?.isListening == true &&
-        httpsServers.all { it.isListening } &&
-        (httpsServers.size == 2 || (httpsServers.size == 1 && httpsIpv4CoveredByIpv6))
+        httpsListenersUp()
     RelaisLivenessState.publishListenersUp(up)
     return up
   }
+
+  private fun httpsListenersUp(): Boolean =
+    httpsServers.all { it.isListening } &&
+      (httpsServers.size == 2 || (httpsServers.size == 1 && httpsIpv4CoveredByIpv6))
 
   private fun dispatchStartupIfNeeded() {
     // One expression for "are the listeners up", shared with every user-visible surface via
@@ -411,6 +415,9 @@ class RelaisNodeService : Service() {
             }
             httpsIpv4CoveredByIpv6 = true
           }
+          // Teardown may have started while TLS was loading or the sockets were binding. Do not
+          // publish a listener group once it has won: the catch below closes every candidate.
+          check(!serviceDestroyed) { "service was destroyed while HTTPS listeners were binding" }
           httpsServers = started
         } catch (failure: Throwable) {
           started.asReversed().forEach { server -> runCatching { server.stop() } }
@@ -450,7 +457,7 @@ class RelaisNodeService : Service() {
     val addresses = RelaisLanIp.allLanAddresses()
     val delay = synchronized(lanRebindLock) {
       if (serviceDestroyed) return
-      lanRebindStability.observe(addresses, System.currentTimeMillis())
+      lanRebindStability.observe(addresses, SystemClock.elapsedRealtime())
     }
     if (delay == null) {
       // onAvailable may precede DHCP and some devices do not reliably send the later callback.
@@ -464,20 +471,33 @@ class RelaisNodeService : Service() {
     }
     synchronized(listenerLifecycleLock) {
       if (serviceDestroyed) return
-      if (!RelaisEngine.isReady || !refreshListenerState()) {
+      if (!RelaisEngine.isReady) {
         scheduleLanRebindObservation(LAN_REBIND_EMPTY_RECHECK_MS)
         return
       }
-      if (!RelaisTls.needsLanReissue(applicationContext, addresses)) {
+      // A failed HTTP listener is a whole-node recovery, not an HTTPS-only rebind. Re-enter the
+      // established startup owner rather than accidentally advertising a half-live node.
+      if (httpServer?.isListening != true) {
+        dispatchStartupIfNeeded()
+        scheduleLanRebindObservation(LAN_REBIND_EMPTY_RECHECK_MS)
+        return
+      }
+      val httpsUp = httpsListenersUp()
+      if (httpsUp && !RelaisTls.needsLanReissue(applicationContext, addresses)) {
         synchronized(lanRebindLock) { lanRebindStability.clear() }
         return
       }
-      Log.i(TAG, "Stable LAN address change; rebuilding HTTPS listeners")
+      Log.i(TAG, if (httpsUp) "Stable LAN address change; rebuilding HTTPS listeners" else "Recovering HTTPS listeners")
+      // Do not advertise a dead listener after a failed replacement. Re-registration on success
+      // also refreshes mDNS after an actual LAN move.
+      RelaisDiscovery.unregister()
       if (!startHttpsListeners(addresses)) {
-        // The existing node stays recoverable: liveness is false and the observer tries again.
+        // Keep the stable candidate: the next observation retries the same single owner instead
+        // of leaving HTTPS down until an unrelated START command or process restart.
         refreshListenerState()
         scheduleLanRebindObservation(LAN_REBIND_EMPTY_RECHECK_MS)
       } else {
+        RelaisDiscovery.register(applicationContext)
         refreshListenerState()
         synchronized(lanRebindLock) { lanRebindStability.clear() }
       }
@@ -497,7 +517,8 @@ class RelaisNodeService : Service() {
       // This is bounded because lifecycle correctness must not turn Service teardown into an
       // unbounded ANR. The listener lock below is the final fence if a platform TLS call ignores
       // interruption: it cannot publish or outlive the subsequent stop.
-      runCatching { executor?.awaitTermination(5, TimeUnit.SECONDS) }
+      val joined = runCatching { executor?.awaitTermination(5, TimeUnit.SECONDS) }.getOrDefault(true)
+      if (!joined) Log.w(TAG, "LAN rebind controller did not stop within teardown bound")
       lanRebindExecutor = null
       lanRebindStability.clear()
     }
