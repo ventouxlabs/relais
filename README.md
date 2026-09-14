@@ -83,7 +83,8 @@ Then on the phone:
    (`litert-community/gemma-4-E4B-it-litert-lm`, ~3.7 GB — **no HuggingFace token
    needed**) and initializes the resident engine.
 3. The panel shows status (`LIVE`), the LAN endpoint (`https://<phone-ip>:8443`),
-   and your **access key** (tap to copy).
+   and your **access key** (tap to copy). The HTTPS node listens on both IPv4 and IPv6;
+   use brackets around an IPv6 literal, for example `https://[2001:db8::1]:8443`.
 
 Reach it from any machine on the LAN:
 
@@ -98,6 +99,10 @@ curl -k https://<phone-ip>:8443/v1/chat/completions \
 > plaintext `http://127.0.0.1:8080` endpoint is **loopback-only** by design — see
 > [SECURITY.md](SECURITY.md). On untrusted networks, put the node behind a
 > WireGuard/Tailscale overlay.
+
+> IPv6 link-local addresses are intentionally not advertised: they require an interface scope
+> which cannot be represented in a certificate SAN. Every IPv4 or IPv6 address shown in the node's
+> certificate is served on HTTPS `:8443`.
 
 Discovery: the node advertises `_relais._tcp` over mDNS, so clients can find it
 by name even after its IP changes.

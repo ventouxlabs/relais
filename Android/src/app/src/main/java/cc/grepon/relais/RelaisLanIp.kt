@@ -67,17 +67,14 @@ internal object RelaisLanIp {
    * delta 10) — accepted deliberately, since an attacker already on the LAN learns the node's
    * address by scanning it anyway.
    *
-   * **IPv6 is excluded entirely, and that is a deliberate scope limit rather than an oversight.**
-   * Both listeners bind IPv4 only (`0.0.0.0:8443` and `127.0.0.1:8080`), so an IPv6 address here
-   * would end up certified and unreachable — the certificate would describe an endpoint no client
-   * can connect to, and the status page would report it as covered while nothing served it.
+   * IPv4 and IPv6 are both included because HTTPS binds explicit `0.0.0.0:8443` and `[::]:8443`
+   * sockets. The fixed `::1` SAN is likewise reachable through the IPv6 HTTPS listener. This must
+   * stay coupled to that listener group: certifying an address that no socket serves would make the
+   * status page look healthy while hostname-valid clients cannot connect.
    *
-   * The consequence, which the docs state rather than hide: **an IPv6-only client cannot reach the
-   * node.** That is true of this release regardless of the certificate; excluding these addresses
-   * makes the certificate honest about it rather than removing a capability.
-   *
-   * Binding dual-stack and restoring IPv6 SANs is a tracked follow-up, and the two must land
-   * together — either alone reproduces the same mismatch from the other side.
+   * IPv6 link-local addresses are excluded. Their interface scope (`%wlan0`) is needed to route a
+   * connection but cannot appear in an IP-address SAN, so a scope-free SAN would make an ambiguous
+   * and often unreachable promise.
    *
    * The `isUp` filter is load-bearing and not cosmetic. A down interface contributes a stale
    * address, so the SAN set differs on the next start, [RelaisCertMint.needsReissue] fires, and the
@@ -98,9 +95,7 @@ internal object RelaisLanIp {
         .toList()
         .filter { it.isUp && !it.isLoopback }
         .flatMap { it.inetAddresses.toList() }
-        // IPv4 only: see the KDoc. An Inet6Address here would be certified and unreachable.
-        .filterIsInstance<Inet4Address>()
-        .filter { !it.isLoopbackAddress }
+        .filter { !it.isLoopbackAddress && !(it is Inet6Address && it.isLinkLocalAddress) }
         .distinctBy { it.hostAddress }
         .sortedBy { it.hostAddress }
     }.getOrDefault(emptyList())

@@ -14,6 +14,8 @@ package cc.grepon.relais
 
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.io.IOException
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -41,6 +43,23 @@ import org.junit.Test
  * not an Android behaviour, so it needs neither a `Context` nor the TLS factory to be real.
  */
 class RelaisBindLifecycleTest {
+
+  @Test
+  fun `a failed second listener stops the already bound first listener`() {
+    val stopped = mutableListOf<String>()
+
+    val failure =
+      runCatching {
+        startAllOrStop(
+          listeners = listOf("ipv4", "ipv6"),
+          start = { listener -> if (listener == "ipv6") throw IOException("IPv6 bind failed") },
+          stop = { listener -> stopped += listener },
+        )
+      }.exceptionOrNull()
+
+    assertTrue(failure is IOException)
+    assertEquals(listOf("ipv4"), stopped)
+  }
 
   @Test
   fun `a successful bind returns an open, bound socket`() {

@@ -25,12 +25,10 @@ import org.junit.Test
  * precisely so it can be tested this way — `NetworkInterface` is final and has no public
  * constructor, so anything that enumerates interfaces is untestable off a device.
  *
- * **Consequence, stated rather than hidden:** the `isUp` and IPv6-link-local filters live in
- * [RelaisLanIp.allLanAddresses], which enumerates real interfaces, so **neither is covered here or
- * anywhere else in the JVM lane.** They are covered by `CertReissueProbe` on hardware. The
- * plan's `downInterfaceExcluded` and `excludesIpv6LinkLocal` cases are not writable as unit tests;
- * writing something that exercised a hand-rolled filter instead would assert against a copy of the
- * logic rather than the shipped one.
+ * **Consequence, stated rather than hidden:** the `isUp` filter lives in
+ * [RelaisLanIp.allLanAddresses], which enumerates real interfaces, so it is not covered in the JVM
+ * lane. IPv6 link-local rejection is repeated in [RelaisCertMint.buildSanList], where it is tested
+ * below, because a scoped address cannot be represented safely in a certificate SAN.
  */
 class RelaisCertSanTest {
 
@@ -105,29 +103,26 @@ class RelaisCertSanTest {
     assertEquals(fixedEntries, sans.take(fixedEntries.size).map { render(it) })
   }
 
-  /**
-   * IPv6 is **excluded**, because the node's listeners are IPv4-only (`0.0.0.0:8443`,
-   * `127.0.0.1:8080`). Certifying an address nothing serves is what this prevents — a status page
-   * would report it as covered, truthfully about the certificate and wrongly about the node.
-   *
-   * Restoring these is a tracked follow-up that must land together with a dual-stack bind; either
-   * half alone reproduces the mismatch from the other side. Do not re-add IPv6 here on its own.
-   */
   @Test
-  fun `an IPv6 address is not certified, because nothing serves it`() {
+  fun `an IPv6 address is certified as an IP address`() {
     val sans = RelaisCertMint.buildSanList(listOf(InetAddress.getByName("2001:db8::1")))
+    val entry = sans.single { render(it) == literal("2001:db8::1") }
 
-    assertEquals(fixedEntries, sans.map { render(it) })
-    assertTrue("no IPv6 literal may appear", sans.none { render(it).contains(":") })
+    assertEquals(GeneralName.iPAddress, entry.tagNo)
   }
 
   @Test
-  fun `IPv6 loopback is not certified either, for the same reason`() {
-    // ::1 was in the fixed set until it was noticed it has the identical defect: the loopback
-    // listener binds 127.0.0.1, so ::1 is certified and unreachable just like a LAN IPv6 address.
+  fun `IPv6 loopback is certified because HTTPS explicitly binds IPv6`() {
     val sans = RelaisCertMint.buildSanList(emptyList())
 
-    assertTrue("::1 must not be certified", sans.none { render(it).contains(":") })
+    assertTrue("::1 must be certified", sans.any { render(it) == literal("::1") })
+  }
+
+  @Test
+  fun `IPv6 link local is not certified because a SAN cannot carry its interface scope`() {
+    val sans = RelaisCertMint.buildSanList(listOf(InetAddress.getByName("fe80::1")))
+
+    assertEquals(fixedEntries, sans.map { render(it) })
   }
 
   /**
@@ -155,13 +150,13 @@ class RelaisCertSanTest {
   }
 
   /**
-   * The two entries [RelaisCertMint.buildSanList] always prepends, in [render]'s spelling.
-   *
-   * Was four. `::1` went first — the loopback listener binds `127.0.0.1`, so the IPv6 loopback was
-   * certified and unreachable exactly like a LAN IPv6 address. `relais-node.local` went for the
-   * same reason, on hardware evidence: see the test below.
+   * The three entries [RelaisCertMint.buildSanList] always prepends, in [render]'s spelling.
+   * `::1` is paired with the explicit IPv6 HTTPS listener; `relais-node.local` remains excluded
+   * because DNS-SD does not let this app own a matching host record.
    */
-  private val fixedEntries = listOf("127.0.0.1", "localhost")
+  private val fixedEntries = listOf("127.0.0.1", literal("::1"), "localhost")
+
+  private fun literal(value: String): String = InetAddress.getByName(value).hostAddress ?: ""
 
   /** Renders a [GeneralName] back to its literal, decoding `iPAddress` octets via [InetAddress]. */
   private fun render(gn: GeneralName): String =

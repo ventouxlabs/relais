@@ -37,6 +37,7 @@ import kotlin.concurrent.thread
 private const val TAG = "RelaisNodeService"
 private const val CHANNEL_ID = "relais_node"
 private const val NOTIFICATION_ID = 4242
+private val HTTPS_BIND_ADDRESSES = listOf("0.0.0.0", "::")
 
 // Idle-TTL poll cadence (#178). Independent of the configured TTL: a short, fixed poll interval
 // (vs. e.g. AlarmManager/WorkManager, whose granularity — 15 min minimum for periodic WorkManager —
@@ -81,7 +82,9 @@ internal fun shouldDispatchStartup(
 class RelaisNodeService : Service() {
   private val binder = LocalBinder()
   private var httpServer: RelaisHttpServer? = null
-  private var httpsServer: RelaisHttpServer? = null
+  // Keep IPv4 and IPv6 as explicit sockets rather than depending on a platform-default dual-stack
+  // socket: Android/runtime `IPV6_V6ONLY` defaults vary, while the certificate promises both.
+  private var httpsServers: List<RelaisHttpServer> = emptyList()
   private var wakeLock: PowerManager.WakeLock? = null
   private var idleTtlExecutor: ScheduledExecutorService? = null
 
@@ -166,7 +169,7 @@ class RelaisNodeService : Service() {
    * what actually makes concurrent calls (onCreate racing onStartCommand, repeated START taps) safe.
    */
   /**
-   * Stops and releases both listeners, leaving the fields null and the shared state false.
+   * Stops and releases every listener, leaving the fields empty and the shared state false.
    *
    * **The rule: never clear or replace a listener reference without stopping what it points at.**
    * A dropped reference to a *live* server is unreachable and still owns its port, so the next bind
@@ -175,9 +178,8 @@ class RelaisNodeService : Service() {
    * itself.
    *
    * This must be unconditional at the start of a retry, not a branch. [RelaisLivenessState] is an
-   * AND of two independent listeners, so "one down, one up" is not a rare case — it is half the
-   * state space, and it is exactly the case a retry meets. Making that state *visible* did not make
-   * its transitions safe.
+   * AND of every required listener, so a partially live listener group is an ordinary recovery
+   * state. Making that state *visible* did not make its transitions safe.
    *
    * `stop()` is safe to call on an already-stopped server (it closes a closed socket under
    * `runCatching`, joins a null thread, and shuts down an idle pool), so the double-stop a caught
@@ -185,10 +187,14 @@ class RelaisNodeService : Service() {
    */
   private fun stopListeners() {
     runCatching { httpServer?.stop() }
-    runCatching { httpsServer?.stop() }
     httpServer = null
-    httpsServer = null
+    stopHttpsListeners()
     refreshListenerState()
+  }
+
+  private fun stopHttpsListeners() {
+    httpsServers.asReversed().forEach { server -> runCatching { server.stop() } }
+    httpsServers = emptyList()
   }
 
   /**
@@ -200,7 +206,10 @@ class RelaisNodeService : Service() {
    * to report LIVE. Ask the artefact.
    */
   private fun refreshListenerState(): Boolean {
-    val up = httpServer?.isListening == true && httpsServer?.isListening == true
+    val up =
+      httpServer?.isListening == true &&
+        httpsServers.size == HTTPS_BIND_ADDRESSES.size &&
+        httpsServers.all { it.isListening }
     RelaisLivenessState.publishListenersUp(up)
     return up
   }
@@ -252,7 +261,7 @@ class RelaisNodeService : Service() {
         // Through the single owner, so its failure contract is inherited rather than restated.
         // A false here throws into the catch below, which tears the partial startup down so a
         // later START can retry.
-        check(startHttpsListener()) { "HTTPS listener failed to bind :8443" }
+        check(startHttpsListeners()) { "HTTPS listeners failed to bind :8443" }
         RelaisDiscovery.register(applicationContext) // advertise _relais._tcp for zero-config LAN discovery
         // Periodic TTL prune for the optional session memory (Feature #5). Idempotent + no-ops when
         // session memory is disabled, so scheduling it unconditionally is a true no-op by default.
@@ -296,8 +305,8 @@ class RelaisNodeService : Service() {
   }
 
   /**
-   * The **only** place an HTTPS listener is constructed, and the single owner of what happens when
-   * one fails to come up.
+   * The **only** place HTTPS listeners are constructed, and the single owner of what happens when
+   * either address family fails to come up.
    *
  * Kept as a single owner even though there is currently one caller, because there were two and
    * will be again: the dynamic LAN rebind (cut from this release, tracked as a follow-up) did
@@ -310,23 +319,25 @@ class RelaisNodeService : Service() {
    * report success as a value the caller must handle; and leave state honest — no listener, nothing
    * claiming otherwise — so a retry is possible.
    *
-   * @return true when a listener is bound and accepting.
+   * @return true when both IPv4 and IPv6 HTTPS listeners are bound and accepting.
    */
-  private fun startHttpsListener(): Boolean {
+  private fun startHttpsListeners(): Boolean {
     // Stop, THEN clear. Clearing alone drops a reference that may point at a live listener still
     // owning :8443 — the replacement bind would then collide with an orphan nothing can reach. The
-    // ordering matters as much as the clearing: between here and a successful assignment there must
-    // be no window in which the field names something that is not listening.
-    runCatching { httpsServer?.stop() }
-    httpsServer = null
+    // ordering matters as much as the clearing: between here and successful assignment there must
+    // be no window in which the group names anything that is not listening.
+    stopHttpsListeners()
     return runCatching {
-        httpsServer =
-          RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = "0.0.0.0")
-            .also { it.start() }
+        val candidates =
+          HTTPS_BIND_ADDRESSES.map { bindAddr ->
+            RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = bindAddr)
+          }
+        startAllOrStop(candidates, start = { it.start() }, stop = { it.stop() })
+        httpsServers = candidates
       }
       .onFailure {
         Log.e(TAG, "HTTPS listener failed to bind :8443", it)
-        httpsServer = null
+        httpsServers = emptyList()
       }
       .isSuccess
   }
@@ -352,12 +363,9 @@ class RelaisNodeService : Service() {
     idleTtlExecutor?.shutdownNow()
     ThermalGovernor.unregister()
     RelaisDiscovery.unregister()
-    httpServer?.stop()
-    httpsServer?.stop()
-    // After the stops, so it reads the closed sockets rather than the intent to close them. A
-    // destroyed service that left this true would have the next process read LIVE before any
-    // listener existed.
-    refreshListenerState()
+    // After the stops, so it reads closed sockets rather than the intent to close them. A destroyed
+    // service that left this true would have the next process read LIVE before any listener existed.
+    stopListeners()
     RelaisEngine.shutdown()
     runCatching { wakeLock?.release() }
     super.onDestroy()

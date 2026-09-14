@@ -13,7 +13,7 @@
 package cc.grepon.relais
 
 import java.math.BigInteger
-import java.net.Inet4Address
+import java.net.Inet6Address
 import java.net.InetAddress
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -112,14 +112,10 @@ internal object RelaisCertMint {
    * platform chose and cannot choose it. Re-adding this needs an API that gives the app the host
    * record, not merely a better name to ask for.
    *
-   * **No IPv6, deliberately — the node's listeners are IPv4-only** (`0.0.0.0:8443` and
-   * `127.0.0.1:8080`), so an IPv6 address in here would certify something no client can reach. That
-   * includes `::1`, which was in this list until it was noticed that it has exactly the same defect
-   * as the LAN addresses: a status page reporting it as covered would be telling the truth about the
-   * certificate and the wrong thing about the node.
-   *
-   * Binding dual-stack and restoring these together is a tracked follow-up. They must land as one
-   * change — either half alone reproduces the same inconsistency from the other side.
+   * IPv6 is included because the HTTPS listener group binds both `0.0.0.0:8443` and `[::]:8443`.
+   * That includes `::1`, which is reachable through the latter listener. This coupling is
+   * load-bearing: changing either the SAN list or listener group separately recreates a certificate
+   * that makes promises the node cannot fulfil.
    *
    * Being first is what makes them safe from [MAX_SANS]: only surplus *real* addresses are ever
    * dropped from a wildly multi-homed device, never loopback.
@@ -133,20 +129,19 @@ internal object RelaisCertMint {
     val fixed =
       listOf(
         GeneralName(GeneralName.iPAddress, "127.0.0.1"),
+        GeneralName(GeneralName.iPAddress, "::1"),
         GeneralName(GeneralName.dNSName, "localhost"),
       )
-    val fixedLiterals = setOf("127.0.0.1")
+    val fixedLiterals = setOf("127.0.0.1", "::1")
     val dynamic =
       addrs
-        // IPv4 only, filtered HERE and not only at the source. `RelaisLanIp.allLanAddresses`
-        // already excludes IPv6, but this is the function that decides what a certificate claims,
-        // so a future caller handing it an IPv6 address must not be able to re-create a certified
-        // address nothing serves: constrain where the mistake is made, not only where today's
-        // caller happens to be.
-        .filterIsInstance<Inet4Address>()
+        // Keep both families here, not only at the source: this function decides what a certificate
+        // claims, and dual-stack HTTPS serves both. Filtering IPv6 here would make an IPv6 client
+        // reachable but unable to verify the certificate.
+        .filter { !(it is Inet6Address && it.isLinkLocalAddress) }
         .mapNotNull { it.hostAddress }
-        // A scope suffix ("fe80::1%wlan0") is not a certificate name. allLanAddresses already drops
-        // link-local, so this is belt-and-braces against a future caller passing a raw address.
+        // A scope suffix ("fe80::1%wlan0") is not a certificate name. Link-local values are rejected
+        // above; trimming this remains belt-and-braces against a future scoped address form.
         .map { it.substringBefore('%') }
         .filter { it.isNotEmpty() && it !in fixedLiterals }
         .distinct()

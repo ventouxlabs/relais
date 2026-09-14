@@ -160,8 +160,10 @@ shared hotspots, guest VLANs) you should additionally use one of:
 ## Verifying the node's certificate
 
 The node mints a **per-node CA** once, and issues itself a short-lived (90-day)
-leaf certificate under it carrying every address the node holds as a
-`subjectAltName`. Verification is therefore possible, which it previously was
+leaf certificate under it carrying every reachable IPv4 or IPv6 address the node holds as a
+`subjectAltName`. HTTPS binds explicit IPv4 and IPv6 sockets on `:8443`, so every advertised IP
+SAN has a matching listener. IPv6 link-local addresses are excluded because their required
+interface scope cannot be encoded in a SAN. Verification is therefore possible, which it previously was
 not: the old certificate had a `CN=relais-node` subject and **no SAN extension at
 all**, and every modern TLS client ignores CN entirely — so `--cacert` failed
 even against a certificate you had explicitly trusted, and `-k` was the only
@@ -172,6 +174,8 @@ Fetch the CA once and pass it per connection:
 ```
 curl -k -o relais-ca.crt https://<phone-ip>:8443/ca.crt   # -k only for this bootstrap fetch
 curl --cacert relais-ca.crt https://<phone-ip>:8443/health
+# IPv6 literals require URL brackets:
+curl --cacert relais-ca.crt https://[<phone-ipv6>]:8443/health
 ```
 
 ### That first fetch is trust-on-first-use

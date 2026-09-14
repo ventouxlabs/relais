@@ -2740,3 +2740,30 @@ internal fun <T : java.net.ServerSocket> bindOrClose(socket: T, bind: (T) -> Uni
   }
   return socket
 }
+
+/**
+ * Starts every listener, or stops every listener which successfully started before a later one
+ * failed. A dual-stack endpoint is only useful as a unit: publishing one family after the other
+ * failed would certify an address that has no server behind it.
+ *
+ * The listener which throws is responsible for closing resources it allocated before throwing
+ * ([RelaisHttpServer.start] does so through [bindOrClose]); this helper owns the listeners that
+ * already returned successfully. Cleanup is best-effort and never hides the bind failure that the
+ * caller needs in order to surface a recoverable startup error.
+ */
+internal fun <T> startAllOrStop(
+  listeners: List<T>,
+  start: (T) -> Unit,
+  stop: (T) -> Unit,
+) {
+  val started = mutableListOf<T>()
+  try {
+    listeners.forEach { listener ->
+      start(listener)
+      started += listener
+    }
+  } catch (failure: Throwable) {
+    started.asReversed().forEach { listener -> runCatching { stop(listener) } }
+    throw failure
+  }
+}

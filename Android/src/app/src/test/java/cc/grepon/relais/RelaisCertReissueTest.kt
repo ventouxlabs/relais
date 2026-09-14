@@ -112,18 +112,14 @@ class RelaisCertReissueTest {
   }
 
   @Test
-  fun `an IPv6 address does not thrash the re-issue check`() {
-    // IPv6 is no longer certified at all (the listeners are IPv4-only), so a node that acquires an
-    // IPv6 address must produce the SAME SAN set as before and NOT re-issue. Getting this wrong
-    // would churn the certificate on every start for any node with IPv6 connectivity — which, on a
-    // modern carrier network, is most of them.
+  fun `an IPv6 address reissues the leaf so the new listener address can verify`() {
     val withIpv6 = RelaisCertMint.buildSanList(addrs("192.168.1.40", "2001:db8::1"))
     val ipv4Only = RelaisCertMint.buildSanList(addrs("192.168.1.40"))
-    // GeneralName compares by DER encoding, so this is an exact set-and-order match.
-    assertEquals("an IPv6 address must not change the certified set", ipv4Only, withIpv6)
 
-    val leaf = mint(withIpv6)
-    assertFalse(RelaisCertMint.needsReissue(leaf, ipv4Only, now))
+    assertFalse("IPv6 must change the certified set", ipv4Only == withIpv6)
+
+    val leaf = mint(ipv4Only)
+    assertTrue(RelaisCertMint.needsReissue(leaf, withIpv6, now))
   }
 
   @Test
