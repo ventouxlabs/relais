@@ -28,7 +28,7 @@ module kill the Worker while unit tests + `--dry-run` stay green (#268, learned 
 ## Data flow
 ```
 LAN client (OpenAI SDK)
-   │ HTTPS :8443 (bearer, self-signed TLS)        loopback HTTP 127.0.0.1:8080
+   │ HTTPS :8443 (explicit IPv4 + IPv6 sockets, bearer, self-signed TLS)  loopback HTTP 127.0.0.1:8080
    ▼
 RelaisHttpServer (2202L, pure parse→gate→dispatch) ───► ~20 handleX(ctx: RequestContext) handlers
    │                                                    + core/ pure seams (Admission, ToolParsing,
@@ -38,7 +38,8 @@ RelaisEngine (1026L) ──► litertlm 0.12.0 AAR — GPU_LITERTLM / NPU_AICORE
    │         └─► native mid-decode cancel (conversation.cancelProcess(), off-thread, issue #165)
    ▼
 side-systems: embed/ (EmbeddingGemma) rerank/ rag/ tts/ (sherpa-onnx+Piper) batch/ imagegen/ nodetools/
-RelaisNodeService (FGS, START_STICKY): provision→engine init→bind HTTP/HTTPS→mDNS→kick workers
+RelaisNodeService (FGS, START_STICKY): provision→engine init→bind HTTP + atomic dual-stack HTTPS→mDNS→kick workers
+  └─ ConnectivityManager callback → stable non-empty LAN snapshot (15s) → same TLS transaction + HTTPS listener owner
 RelaisWatchdog (exact alarm, exp backoff) recovers · ThermalGovernor sheds/truncates
 ```
 

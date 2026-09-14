@@ -37,11 +37,12 @@ Shed order: thermal 503 → queue 429 → auth 401 → run 200. `resolveEmbeddin
 ## Extracted helper files (was inline in the old 1570L god-method)
 | File | Purpose |
 |---|---|
-| RelaisTls.kt | two keystores (CA + leaf), load-or-mint, HTTPS :8443 socket |
-| RelaisCertMint.kt | android-free CA/leaf minting, SAN builder, re-issue predicate |
+| RelaisTls.kt | two keystores (CA + leaf), load-or-mint, HTTPS :8443 socket factory |
+| RelaisCertMint.kt | android-free CA/leaf minting, IPv4/IPv6 SAN builder, re-issue predicate |
 | RelaisCertFingerprint.kt | SPKI-base64 + cert colon-hex formatters |
 | RelaisCertInfo.kt | immutable public-cert snapshot (UI, `GET /`, `/ca.crt`) |
-| RelaisLanIp.kt | LAN IP resolution (dashboard/mDNS) + `allLanAddresses()` for SANs |
+| RelaisLanIp.kt | LAN IP resolution (dashboard/mDNS) + IPv4/IPv6 `allLanAddresses()` for SANs (IPv6 link-local excluded) |
+| RelaisLanRebind.kt | pure stable-address debounce used by the service's live certificate/listener rebind |
 | RelaisHttpIo.kt | request line/body reading, multipart parsing |
 | RelaisAdmission.kt | pure admission-decision types + retry-after scaling |
 | RelaisAdmissionGate.kt | shared-semaphore + exclusive-drain-all gate impl |

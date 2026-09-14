@@ -13,7 +13,7 @@
 package cc.grepon.relais
 
 import java.math.BigInteger
-import java.net.Inet4Address
+import java.net.Inet6Address
 import java.net.InetAddress
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -45,8 +45,9 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
  * churns underneath it whenever the node re-issues, so the import is not invalidated by a re-issue.
  * That is the entire reason for the extra moving part.
  *
- * Note the scope: re-issue is computed at node start, **not** on a live address change. "One import and it always verifies" overstates
- * it — see [RelaisTls].
+ * Re-issue is computed at node start and by the service after a stable live-address observation.
+ * The latter is deliberately a service concern: this Context-free minter must not grow Android
+ * callback or lifecycle state — see [RelaisTls].
  *
  * **This object has no `android.` imports and must keep none.** `RelaisTlsHandshakeTest` runs a
  * real TLS handshake against a cert minted here in the device-free JVM lane, which is only possible
@@ -112,14 +113,10 @@ internal object RelaisCertMint {
    * platform chose and cannot choose it. Re-adding this needs an API that gives the app the host
    * record, not merely a better name to ask for.
    *
-   * **No IPv6, deliberately — the node's listeners are IPv4-only** (`0.0.0.0:8443` and
-   * `127.0.0.1:8080`), so an IPv6 address in here would certify something no client can reach. That
-   * includes `::1`, which was in this list until it was noticed that it has exactly the same defect
-   * as the LAN addresses: a status page reporting it as covered would be telling the truth about the
-   * certificate and the wrong thing about the node.
-   *
-   * Binding dual-stack and restoring these together is a tracked follow-up. They must land as one
-   * change — either half alone reproduces the same inconsistency from the other side.
+   * IPv6 is included because the HTTPS listener group binds both `0.0.0.0:8443` and `[::]:8443`.
+   * That includes `::1`, which is reachable through the latter listener. This coupling is
+   * load-bearing: changing either the SAN list or listener group separately recreates a certificate
+   * that makes promises the node cannot fulfil.
    *
    * Being first is what makes them safe from [MAX_SANS]: only surplus *real* addresses are ever
    * dropped from a wildly multi-homed device, never loopback.
@@ -129,31 +126,34 @@ internal object RelaisCertMint {
    * prints the address, and hostname verification still fails. That failure mode is why
    * `RelaisTlsHandshakeTest` asserts a real handshake rather than inspecting the extension.
    */
-  fun buildSanList(addrs: List<InetAddress>): List<GeneralName> {
+  internal fun sanLiterals(addrs: List<InetAddress>): List<String> {
     val fixed =
       listOf(
-        GeneralName(GeneralName.iPAddress, "127.0.0.1"),
-        GeneralName(GeneralName.dNSName, "localhost"),
+        "127.0.0.1",
+        "::1",
+        "localhost",
       )
-    val fixedLiterals = setOf("127.0.0.1")
+    val fixedLiterals = setOf("127.0.0.1", "::1")
     val dynamic =
       addrs
-        // IPv4 only, filtered HERE and not only at the source. `RelaisLanIp.allLanAddresses`
-        // already excludes IPv6, but this is the function that decides what a certificate claims,
-        // so a future caller handing it an IPv6 address must not be able to re-create a certified
-        // address nothing serves: constrain where the mistake is made, not only where today's
-        // caller happens to be.
-        .filterIsInstance<Inet4Address>()
+        // Keep both families here, not only at the source: this function decides what a certificate
+        // claims, and dual-stack HTTPS serves both. Filtering IPv6 here would make an IPv6 client
+        // reachable but unable to verify the certificate.
+        .filter { !(it is Inet6Address && it.isLinkLocalAddress) }
         .mapNotNull { it.hostAddress }
-        // A scope suffix ("fe80::1%wlan0") is not a certificate name. allLanAddresses already drops
-        // link-local, so this is belt-and-braces against a future caller passing a raw address.
+        // A scope suffix ("fe80::1%wlan0") is not a certificate name. Link-local values are rejected
+        // above; trimming this remains belt-and-braces against a future scoped address form.
         .map { it.substringBefore('%') }
         .filter { it.isNotEmpty() && it !in fixedLiterals }
         .distinct()
         .sorted()
-        .map { GeneralName(GeneralName.iPAddress, it) }
     return (fixed + dynamic).take(MAX_SANS)
   }
+
+  fun buildSanList(addrs: List<InetAddress>): List<GeneralName> =
+    sanLiterals(addrs).mapIndexed { index, literal ->
+      GeneralName(if (index == 2) GeneralName.dNSName else GeneralName.iPAddress, literal)
+    }
 
   /**
    * Mints the self-signed per-node CA: EC P-256, 10 years, `keyCertSign`-only, path length 0 — it

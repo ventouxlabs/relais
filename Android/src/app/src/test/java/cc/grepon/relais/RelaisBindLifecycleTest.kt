@@ -12,8 +12,10 @@
 
 package cc.grepon.relais
 
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -41,6 +43,23 @@ import org.junit.Test
  * not an Android behaviour, so it needs neither a `Context` nor the TLS factory to be real.
  */
 class RelaisBindLifecycleTest {
+
+  @Test
+  fun `a listener which starts then fails is stopped`() {
+    var stopped = false
+
+    val failure =
+      runCatching {
+        startOrClose(
+          resource = "ipv6",
+          start = { throw IOException("accept thread failed after bind") },
+          stop = { stopped = true },
+        )
+      }.exceptionOrNull()
+
+    assertTrue(failure is IOException)
+    assertTrue(stopped)
+  }
 
   @Test
   fun `a successful bind returns an open, bound socket`() {
