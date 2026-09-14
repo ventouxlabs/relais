@@ -28,6 +28,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import java.net.BindException
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -37,7 +38,9 @@ import kotlin.concurrent.thread
 private const val TAG = "RelaisNodeService"
 private const val CHANNEL_ID = "relais_node"
 private const val NOTIFICATION_ID = 4242
-private val HTTPS_BIND_ADDRESSES = listOf("0.0.0.0", "::")
+private const val HTTPS_PORT = 8443
+private const val HTTPS_IPV4_BIND_ADDRESS = "0.0.0.0"
+private const val HTTPS_IPV6_BIND_ADDRESS = "::"
 
 // Idle-TTL poll cadence (#178). Independent of the configured TTL: a short, fixed poll interval
 // (vs. e.g. AlarmManager/WorkManager, whose granularity — 15 min minimum for periodic WorkManager —
@@ -83,8 +86,10 @@ class RelaisNodeService : Service() {
   private val binder = LocalBinder()
   private var httpServer: RelaisHttpServer? = null
   // Keep IPv4 and IPv6 as explicit sockets rather than depending on a platform-default dual-stack
-  // socket: Android/runtime `IPV6_V6ONLY` defaults vary, while the certificate promises both.
+  // socket. If the IPv6 wildcard already serves IPv4, that capability is TLS-verified before it is
+  // accepted in place of a separate IPv4 socket.
   private var httpsServers: List<RelaisHttpServer> = emptyList()
+  private var httpsIpv4CoveredByIpv6 = false
   private var wakeLock: PowerManager.WakeLock? = null
   private var idleTtlExecutor: ScheduledExecutorService? = null
 
@@ -195,6 +200,7 @@ class RelaisNodeService : Service() {
   private fun stopHttpsListeners() {
     httpsServers.asReversed().forEach { server -> runCatching { server.stop() } }
     httpsServers = emptyList()
+    httpsIpv4CoveredByIpv6 = false
   }
 
   /**
@@ -208,8 +214,8 @@ class RelaisNodeService : Service() {
   private fun refreshListenerState(): Boolean {
     val up =
       httpServer?.isListening == true &&
-        httpsServers.size == HTTPS_BIND_ADDRESSES.size &&
-        httpsServers.all { it.isListening }
+        httpsServers.all { it.isListening } &&
+        (httpsServers.size == 2 || (httpsServers.size == 1 && httpsIpv4CoveredByIpv6))
     RelaisLivenessState.publishListenersUp(up)
     return up
   }
@@ -261,7 +267,7 @@ class RelaisNodeService : Service() {
         // Through the single owner, so its failure contract is inherited rather than restated.
         // A false here throws into the catch below, which tears the partial startup down so a
         // later START can retry.
-        check(startHttpsListeners()) { "HTTPS listeners failed to bind :8443" }
+        check(startHttpsListeners()) { "HTTPS listeners failed to bind :$HTTPS_PORT" }
         RelaisDiscovery.register(applicationContext) // advertise _relais._tcp for zero-config LAN discovery
         // Periodic TTL prune for the optional session memory (Feature #5). Idempotent + no-ops when
         // session memory is disabled, so scheduling it unconditionally is a true no-op by default.
@@ -328,12 +334,48 @@ class RelaisNodeService : Service() {
     // be no window in which the group names anything that is not listening.
     stopHttpsListeners()
     return runCatching {
-        val candidates =
-          HTTPS_BIND_ADDRESSES.map { bindAddr ->
-            RelaisHttpServer(applicationContext, port = 8443, tls = true, bindAddr = bindAddr)
+        // One load-or-mint snapshot for both sockets. A network address change between independent
+        // TLS factory calls could otherwise make the families serve different leaf certificates.
+        val factories = RelaisTls.socketFactories(applicationContext)
+        val ipv6 =
+          RelaisHttpServer(
+            applicationContext,
+            port = HTTPS_PORT,
+            tls = true,
+            bindAddr = HTTPS_IPV6_BIND_ADDRESS,
+            socketFactory = factories.server,
+          )
+        val ipv4 =
+          RelaisHttpServer(
+            applicationContext,
+            port = HTTPS_PORT,
+            tls = true,
+            bindAddr = HTTPS_IPV4_BIND_ADDRESS,
+            socketFactory = factories.server,
+          )
+        val started = mutableListOf<RelaisHttpServer>()
+        try {
+          started += ipv6
+          ipv6.start()
+          started += ipv4
+          try {
+            ipv4.start()
+          } catch (bindFailure: BindException) {
+            // A wildcard IPv6 socket may already own the IPv4 port. Do not assume that default:
+            // accept it only when an IPv4 TLS handshake verifies against this node's current leaf.
+            runCatching { ipv4.stop() }
+            started.remove(ipv4)
+            check(RelaisTls.verifiesCurrentLeafAt(factories.localClient, "127.0.0.1", HTTPS_PORT)) {
+              "IPv6 listener blocked IPv4 bind without serving this node's IPv4 TLS endpoint"
+            }
+            httpsIpv4CoveredByIpv6 = true
           }
-        startAllOrStop(candidates, start = { it.start() }, stop = { it.stop() })
-        httpsServers = candidates
+          httpsServers = started
+        } catch (failure: Throwable) {
+          started.asReversed().forEach { server -> runCatching { server.stop() } }
+          httpsIpv4CoveredByIpv6 = false
+          throw failure
+        }
       }
       .onFailure {
         Log.e(TAG, "HTTPS listener failed to bind :8443", it)

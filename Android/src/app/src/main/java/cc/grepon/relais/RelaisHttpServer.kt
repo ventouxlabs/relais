@@ -66,6 +66,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.Executors
 import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLServerSocketFactory
 import javax.net.ssl.SSLProtocolException
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -205,6 +206,7 @@ class RelaisHttpServer(
   private val port: Int = 8080,
   private val tls: Boolean = false,
   private val bindAddr: String = "127.0.0.1", // safe default; callers opt into 0.0.0.0 for TLS (C1)
+  private val socketFactory: SSLServerSocketFactory? = null,
 ) {
   // Volatile: written on the accept thread, read by stop() on whatever thread called it. Without
   // it a stop() racing startup can read a stale null and close nothing.
@@ -267,33 +269,46 @@ class RelaisHttpServer(
     // bindOrClose, not apply: a bind that throws must not leave the socket it created open. The
     // retry below makes that leak unbounded — see the function's KDoc.
     val bound =
-      bindOrClose(RelaisTls.buildServerSocket(context, tls)) {
+      bindOrClose(socketFactory?.createServerSocket() ?: RelaisTls.buildServerSocket(context, tls)) {
         it.reuseAddress = true
         it.bind(InetSocketAddress(bindAddr, port))
       }
-    serverSocket = bound
-    // After the bind, before the thread: a failed bind must not leave `running` true, and the
-    // accept loop must not observe false on its first iteration.
-    running = true
-    Log.i(TAG, "Listening on ${if (tls) "https" else "http"} $bindAddr:$port")
-    acceptThread =
-      Thread(
-        {
-          try {
-            while (running) {
-              val client = bound.accept()
-              pool.execute { handle(client) }
-            }
-          } catch (e: Exception) {
-            if (running) Log.e(TAG, "Server loop error", e)
-          } finally {
-            // The socket is this thread's to release, on every exit path.
-            runCatching { bound.close() }
-          }
+    try {
+      startOrClose(
+        bound,
+        start = {
+          serverSocket = it
+          // After the bind, before the thread: a failed bind must not leave `running` true, and the
+          // accept loop must not observe false on its first iteration.
+          running = true
+          Log.i(TAG, "Listening on ${if (tls) "https" else "http"} $bindAddr:$port")
+          acceptThread =
+            Thread(
+              {
+                try {
+                  while (running) {
+                    val client = it.accept()
+                    pool.execute { handle(client) }
+                  }
+                } catch (e: Exception) {
+                  if (running) Log.e(TAG, "Server loop error", e)
+                } finally {
+                  // The socket is this thread's to release, on every exit path.
+                  runCatching { it.close() }
+                }
+              },
+              "relais-http",
+            )
+              .also { thread -> thread.start() }
         },
-        "relais-http",
+        stop = { it.close() },
       )
-        .also { it.start() }
+    } catch (failure: Throwable) {
+      running = false
+      acceptThread = null
+      if (serverSocket === bound) serverSocket = null
+      throw failure
+    }
   }
 
   // TLS keystore/cert minting moved to [RelaisTls] (#173); LAN-IP discovery to [RelaisLanIp].
@@ -2741,29 +2756,16 @@ internal fun <T : java.net.ServerSocket> bindOrClose(socket: T, bind: (T) -> Uni
   return socket
 }
 
-/**
- * Starts every listener, or stops every listener which successfully started before a later one
- * failed. A dual-stack endpoint is only useful as a unit: publishing one family after the other
- * failed would certify an address that has no server behind it.
- *
- * The listener which throws is responsible for closing resources it allocated before throwing
- * ([RelaisHttpServer.start] does so through [bindOrClose]); this helper owns the listeners that
- * already returned successfully. Cleanup is best-effort and never hides the bind failure that the
- * caller needs in order to surface a recoverable startup error.
- */
-internal fun <T> startAllOrStop(
-  listeners: List<T>,
+/** Runs [start], closing [resource] if a post-bind startup step throws. */
+internal fun <T> startOrClose(
+  resource: T,
   start: (T) -> Unit,
   stop: (T) -> Unit,
 ) {
-  val started = mutableListOf<T>()
   try {
-    listeners.forEach { listener ->
-      start(listener)
-      started += listener
-    }
+    start(resource)
   } catch (failure: Throwable) {
-    started.asReversed().forEach { listener -> runCatching { stop(listener) } }
+    runCatching { stop(resource) }
     throw failure
   }
 }

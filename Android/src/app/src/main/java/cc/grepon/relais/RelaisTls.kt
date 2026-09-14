@@ -29,6 +29,11 @@ import java.security.cert.X509Certificate
 import java.util.Base64
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLParameters
+import javax.net.ssl.SSLServerSocketFactory
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManagerFactory
 import org.bouncycastle.asn1.x509.GeneralName
 
 /**
@@ -140,6 +145,16 @@ internal object RelaisTls {
     !componentExists && siblingExists
 
   /**
+   * The server and locally-trusting client factories constructed from one immutable certificate
+   * snapshot. A dual-stack startup must not call [loadOrMint] twice: DHCP could change the SAN set
+   * between calls, leaving IPv4 serving the old leaf while IPv6 serves the replacement.
+   */
+  internal data class SocketFactories(
+    val server: SSLServerSocketFactory,
+    val localClient: SSLSocketFactory,
+  )
+
+  /**
    * Plain (tls=false) or TLS server socket.
    *
    * A **software** RSA leaf key is used deliberately: AndroidKeyStore keys (RSA and EC) cannot sign
@@ -153,12 +168,37 @@ internal object RelaisTls {
    */
   fun buildServerSocket(context: Context, tls: Boolean): ServerSocket {
     if (!tls) return ServerSocket()
+    return socketFactories(context).server.createServerSocket()
+  }
+
+  /** Builds [SocketFactories] from one load-or-mint transaction. */
+  fun socketFactories(context: Context): SocketFactories {
     val pass = RelaisConfig.tlsKeystorePassword(context).toCharArray()
     val ks = loadOrMint(context, allowMintCa = true, allowMintLeaf = true).keystore
     val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply { init(ks, pass) }
-    val ctx = SSLContext.getInstance("TLS").apply { init(kmf.keyManagers, null, null) }
-    return ctx.serverSocketFactory.createServerSocket()
+    val trustStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+      load(null)
+      setCertificateEntry("relais-ca", ks.getCertificateChain(TLS_KEY_ALIAS).last())
+    }
+    val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(trustStore) }
+    val ctx = SSLContext.getInstance("TLS").apply { init(kmf.keyManagers, tmf.trustManagers, null) }
+    return SocketFactories(server = ctx.serverSocketFactory, localClient = ctx.socketFactory)
   }
+
+  /**
+   * Proves that [host]:[port] is served by the current leaf, including normal IP-SAN hostname
+   * verification. Used only when an IPv6 wildcard prevents a separate IPv4 bind: the bind error is
+   * acceptable only when this handshake proves that the IPv6 socket already accepts IPv4.
+   */
+  fun verifiesCurrentLeafAt(factory: SSLSocketFactory, host: String, port: Int): Boolean =
+    runCatching {
+      (factory.createSocket(host, port) as SSLSocket).use { socket ->
+        socket.soTimeout = 2_000
+        socket.sslParameters =
+          socket.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+        socket.startHandshake()
+      }
+    }.isSuccess
 
   /**
    * Load-**or-mint** the node's certificate state. Reachable only from the node start path.

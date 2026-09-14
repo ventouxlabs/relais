@@ -12,9 +12,9 @@
 
 package cc.grepon.relais
 
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
-import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -45,20 +45,20 @@ import org.junit.Test
 class RelaisBindLifecycleTest {
 
   @Test
-  fun `a failed second listener stops the already bound first listener`() {
-    val stopped = mutableListOf<String>()
+  fun `a listener which starts then fails is stopped`() {
+    var stopped = false
 
     val failure =
       runCatching {
-        startAllOrStop(
-          listeners = listOf("ipv4", "ipv6"),
-          start = { listener -> if (listener == "ipv6") throw IOException("IPv6 bind failed") },
-          stop = { listener -> stopped += listener },
+        startOrClose(
+          resource = "ipv6",
+          start = { throw IOException("accept thread failed after bind") },
+          stop = { stopped = true },
         )
       }.exceptionOrNull()
 
     assertTrue(failure is IOException)
-    assertEquals(listOf("ipv4"), stopped)
+    assertTrue(stopped)
   }
 
   @Test

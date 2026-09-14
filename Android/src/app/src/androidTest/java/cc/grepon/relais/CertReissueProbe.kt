@@ -57,8 +57,15 @@ import org.junit.runner.RunWith
  * openssl s_client -connect <phone-ip>:8443 </dev/null 2>/dev/null \
  *   | openssl x509 -noout -text | grep -A2 "Subject Alternative Name"
  * # then, for EVERY address listed:
- * curl --cacert relais-ca.crt --max-time 5 https://<that-address>:8443/health   # must answer
+ * curl --cacert relais-ca.crt --max-time 5 https://<ipv4-address>:8443/health   # must answer
+ * curl --globoff --cacert relais-ca.crt --max-time 5 \
+ *   'https://[<ipv6-address>]:8443/health'                                      # must answer
  * ```
+ *
+ * Run both commands from a second machine on the same network, not from the device: a local
+ * loopback success cannot prove the LAN listener's IPv4/IPv6 socket behavior. The IPv6 command is
+ * deliberately bracketed and uses `--globoff`; without both, curl treats the literal as a port or
+ * a URL glob instead of exercising the advertised SAN.
  *
  * **Nothing else catches this.** The SAN row on `GET /` reports what the certificate carries, which
  * can be perfectly accurate while nothing serves the address — that is exactly how IPv6 addresses
@@ -119,6 +126,7 @@ class CertReissueProbe {
       )
     }
     assertTrue("loopback must always be covered", before.sanList.contains("127.0.0.1"))
+    assertTrue("IPv6 loopback must be covered", before.sanList.any { it == "::1" || it == "0:0:0:0:0:0:0:1" })
 
     // Re-read after a second load, then prove the identity did not move. This used to force a
     // re-issue through the dynamic-rebind path; that path is not in this release (see the tracked
