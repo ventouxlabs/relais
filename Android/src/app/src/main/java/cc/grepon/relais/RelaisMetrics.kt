@@ -35,7 +35,7 @@ import org.json.JSONObject
  * `relais_restarts_total`.
  *
  * Label hygiene (security M6): only the model *id* and backend name are exposed — never the model
- * filesystem path, the API key, the HF token, or any IP. See `RelaisMetricsLeakTest`.
+ * filesystem path, the API key, the HF token, or any IP.
  */
 object RelaisMetrics {
   private val startMs = System.currentTimeMillis()
