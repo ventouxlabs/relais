@@ -57,7 +57,10 @@ private const val HTTPS_IPV6_BIND_ADDRESS = "::"
 // resident and holding a wake lock.
 private const val IDLE_TTL_POLL_INTERVAL_MS = 60_000L
 private const val LAN_REBIND_STABLE_MS = 15_000L
-private const val LAN_REBIND_EMPTY_RECHECK_MS = 5_000L
+// Default-network callbacks normally carry a DHCP address update, but Android does not promise
+// one for every lease renewal. Keep a small observer alive after a healthy check too, otherwise a
+// successful first observation can permanently blind the service to an address-only handoff.
+private const val LAN_REBIND_OBSERVE_INTERVAL_MS = 5_000L
 
 /**
  * Pure decision behind [RelaisNodeService]'s startup dispatch guard: should a new init attempt be
@@ -462,7 +465,7 @@ class RelaisNodeService : Service() {
     if (delay == null) {
       // onAvailable may precede DHCP and some devices do not reliably send the later callback.
       // Keep observing until an address exists; this is not a one-shot callback that can self-disarm.
-      scheduleLanRebindObservation(LAN_REBIND_EMPTY_RECHECK_MS)
+      scheduleLanRebindObservation(LAN_REBIND_OBSERVE_INTERVAL_MS)
       return
     }
     if (delay > 0L) {
@@ -472,19 +475,22 @@ class RelaisNodeService : Service() {
     synchronized(listenerLifecycleLock) {
       if (serviceDestroyed) return
       if (!RelaisEngine.isReady) {
-        scheduleLanRebindObservation(LAN_REBIND_EMPTY_RECHECK_MS)
+        scheduleLanRebindObservation(LAN_REBIND_OBSERVE_INTERVAL_MS)
         return
       }
       // A failed HTTP listener is a whole-node recovery, not an HTTPS-only rebind. Re-enter the
       // established startup owner rather than accidentally advertising a half-live node.
       if (httpServer?.isListening != true) {
         dispatchStartupIfNeeded()
-        scheduleLanRebindObservation(LAN_REBIND_EMPTY_RECHECK_MS)
+        scheduleLanRebindObservation(LAN_REBIND_OBSERVE_INTERVAL_MS)
         return
       }
       val httpsUp = httpsListenersUp()
       if (httpsUp && !RelaisTls.needsLanReissue(applicationContext, addresses)) {
         synchronized(lanRebindLock) { lanRebindStability.clear() }
+        // Do not depend exclusively on NetworkCallback here. Some DHCP renewals update the
+        // interface address without delivering a LinkProperties callback to this service.
+        scheduleLanRebindObservation(LAN_REBIND_OBSERVE_INTERVAL_MS)
         return
       }
       Log.i(TAG, if (httpsUp) "Stable LAN address change; rebuilding HTTPS listeners" else "Recovering HTTPS listeners")
@@ -495,7 +501,7 @@ class RelaisNodeService : Service() {
         // Keep the stable candidate: the next observation retries the same single owner instead
         // of leaving HTTPS down until an unrelated START command or process restart.
         refreshListenerState()
-        scheduleLanRebindObservation(LAN_REBIND_EMPTY_RECHECK_MS)
+        scheduleLanRebindObservation(LAN_REBIND_OBSERVE_INTERVAL_MS)
       } else {
         // onDestroy writes serviceDestroyed under this same monitor. Check again before the
         // external mDNS side effect, not only before publishing the socket group.
@@ -503,6 +509,7 @@ class RelaisNodeService : Service() {
         RelaisDiscovery.register(applicationContext)
         refreshListenerState()
         synchronized(lanRebindLock) { lanRebindStability.clear() }
+        scheduleLanRebindObservation(LAN_REBIND_OBSERVE_INTERVAL_MS)
       }
     }
   }
