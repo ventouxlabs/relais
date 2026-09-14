@@ -517,7 +517,7 @@ class RelaisNodeService : Service() {
       // This is bounded because lifecycle correctness must not turn Service teardown into an
       // unbounded ANR. The listener lock below is the final fence if a platform TLS call ignores
       // interruption: it cannot publish or outlive the subsequent stop.
-      val joined = runCatching { executor?.awaitTermination(5, TimeUnit.SECONDS) }.getOrDefault(true)
+      val joined = runCatching { executor?.awaitTermination(5, TimeUnit.SECONDS) }.getOrDefault(true) ?: true
       if (!joined) Log.w(TAG, "LAN rebind controller did not stop within teardown bound")
       lanRebindExecutor = null
       lanRebindStability.clear()

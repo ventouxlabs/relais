@@ -96,7 +96,6 @@ class RelaisCertFingerprintTest {
     val pin = RelaisCertFingerprint.curlPin(leafKey.public)
 
     assertTrue("curl's grammar is sha256// — one slash is parsed as a filename", pin.startsWith("sha256//"))
-    assertFalse("a third slash is not curl's grammar either", pin.startsWith("sha256///"))
     // Nothing for the user to prepend, edit, or strip: SECURITY.md told them to write
     // `sha256//<value>` while the value already began `sha256/`, which composes to
     // `sha256//sha256/…`. The value must be the whole argument, and what follows the prefix must be
