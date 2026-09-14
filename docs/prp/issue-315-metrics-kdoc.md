@@ -19,7 +19,7 @@ removed; this documentation-only correction does not add or change runtime behav
 
 ## Validation
 
-- Confirm `RelaisMetricsLeakTest` no longer appears in the repository.
+- Confirm `RelaisMetricsLeakTest` no longer appears in production or test source.
 - Confirm `RelaisMetricsIncrementsTest` remains the existing endpoint-label coverage.
 - Run `git diff --check`.
 
