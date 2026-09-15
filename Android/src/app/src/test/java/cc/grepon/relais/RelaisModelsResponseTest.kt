@@ -47,7 +47,11 @@ class RelaisModelsResponseTest {
     val ref1 = makeRef("litert-community/model-b", RelaisModelRef.SOURCE_HUGGINGFACE)
     val fallback = "litert-community/fallback-should-not-appear"
 
-    val response = buildModelsResponse(listOf(ref0, ref1), fallback)
+    val response = buildModelsResponse(
+      listOf(ref0, ref1),
+      fallback,
+      provisionedIds = setOf(ref0.modelId, ref1.modelId),
+    )
 
     assertEquals("list", response.getString("object"))
     val data = response.getJSONArray("data")
@@ -70,6 +74,26 @@ class RelaisModelsResponseTest {
     assertFalse("fallback id must not appear in curated response", ids.contains(fallback))
   }
 
+  @Test
+  fun `curated response lists only locally provisioned models`() {
+    val absent = makeRef("litert-community/not-on-this-node", RelaisModelRef.SOURCE_ALLOWLIST)
+    val present = makeRef("litert-community/on-this-node", RelaisModelRef.SOURCE_HUGGINGFACE)
+
+    val response = buildModelsResponse(
+      refs = listOf(absent, present),
+      fallbackId = "unused-fallback",
+      provisionedIds = setOf(present.modelId),
+    )
+
+    val data = response.getJSONArray("data")
+    assertEquals("only locally provisioned ids may be advertised", 1, data.length())
+    val item = data.getJSONObject(0)
+    assertEquals(present.modelId, item.getString("id"))
+    assertTrue("all advertised models are usable by the router", item.getBoolean("provisioned"))
+    assertEquals("huggingface", item.getString("owned_by"))
+    assertEquals(0L, item.getLong("created"))
+  }
+
   // Test 1b (#220) — cost-before-commit signals so a client can see what a model will demand
   // BEFORE spending a multi-GB download on it.
   @Test
@@ -79,7 +103,11 @@ class RelaisModelsResponseTest {
     val suspect =
       makeRef("litert-community/DeepSeek-R1-Distill-Qwen-1.5B", RelaisModelRef.SOURCE_ALLOWLIST)
 
-    val data = buildModelsResponse(listOf(gated, verified, suspect), "unused").getJSONArray("data")
+    val data = buildModelsResponse(
+      listOf(gated, verified, suspect),
+      "unused",
+      provisionedIds = setOf(gated.modelId, verified.modelId, suspect.modelId),
+    ).getJSONArray("data")
     val byId = (0 until data.length()).associate { i ->
       data.getJSONObject(i).let { it.getString("id") to it }
     }
@@ -98,7 +126,11 @@ class RelaisModelsResponseTest {
   fun `empty refs returns single fallback entry with owned_by node`() {
     val fallbackId = RelaisConfig.DEFAULT_MODEL_ID
 
-    val response = buildModelsResponse(emptyList<RelaisModelRef>(), fallbackId)
+    val response = buildModelsResponse(
+      emptyList<RelaisModelRef>(),
+      fallbackId,
+      provisionedIds = setOf(fallbackId),
+    )
 
     assertEquals("list", response.getString("object"))
     val data = response.getJSONArray("data")
@@ -111,6 +143,17 @@ class RelaisModelsResponseTest {
     assertEquals(0L, item.getLong("created"))
   }
 
+  @Test
+  fun `offline response is empty when no fallback model is provisioned`() {
+    val response = buildModelsResponse(
+      refs = emptyList(),
+      fallbackId = RelaisConfig.DEFAULT_MODEL_ID,
+      provisionedIds = emptySet(),
+    )
+
+    assertEquals(0, response.getJSONArray("data").length())
+  }
+
   // Test 3 — ID round-trip: ids from /v1/models are accepted verbatim by /v1/chat/completions.
   // Uses both the default id and an arbitrary non-default id to guard the general invariant
   // (not just the constant).
@@ -119,7 +162,11 @@ class RelaisModelsResponseTest {
     val defaultRef = makeRef(RelaisConfig.DEFAULT_MODEL_ID, RelaisModelRef.SOURCE_ALLOWLIST)
     val otherRef = makeRef("litert-community/Qwen3-0.6B", RelaisModelRef.SOURCE_HUGGINGFACE)
 
-    val response = buildModelsResponse(listOf(defaultRef, otherRef), "ignored-fallback")
+    val response = buildModelsResponse(
+      listOf(defaultRef, otherRef),
+      "ignored-fallback",
+      provisionedIds = setOf(defaultRef.modelId, otherRef.modelId),
+    )
 
     val data = response.getJSONArray("data")
     assertEquals(2, data.length())
