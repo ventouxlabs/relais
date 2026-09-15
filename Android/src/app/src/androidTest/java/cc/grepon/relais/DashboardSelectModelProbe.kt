@@ -148,7 +148,14 @@ class DashboardSelectModelProbe {
   @Test
   fun aValidSwitchAnswers303SeeOtherWithALocationHeader() {
     // Uses the CONFIGURED model as the target: always eligible (the dropdown unions it in), and
-    // re-selecting it is the least disruptive thing this probe can ask a live node to do.
+    // re-selecting it is the least disruptive thing this probe can ask a live node to do. The
+    // success route calls applyManualId, which deliberately clears a curated ref; do not let this
+    // wire-format probe erase an operator's ref merely to observe a 303. An id-only configuration
+    // has no ref to clear and is the supported fixture for this isolated success-path check.
+    assumeTrue(
+      "run the 303 probe with an id-only model configuration; it must not clear a curated model ref",
+      RelaisConfig.modelRef(context) == null,
+    )
     val current = RelaisConfig.modelId(context)
     val res = post("model=" + java.net.URLEncoder.encode(current, "UTF-8"))
     // 503 is a legitimate outcome if a swap is already running — the CAS is the arbiter, and the

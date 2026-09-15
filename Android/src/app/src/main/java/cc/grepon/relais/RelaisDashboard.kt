@@ -158,27 +158,41 @@ fun assembleDashboardStatus(
   )
 }
 
+/** Maximum form fields the dashboard's single-field POST will inspect. */
+internal const val MAX_FORM_FIELDS = 64
+
 /**
  * Parses one field out of an `application/x-www-form-urlencoded` body.
  *
- * Splits on `&`, then on the FIRST `=` only, so a value containing `=` survives intact. Both halves
+ * Separates fields on `&`, then on the FIRST `=` only, so a value containing `=` survives intact. Both halves
  * are URL-decoded. Returns null when the key is absent or when either half is malformed — a bad `%`
  * escape makes [java.net.URLDecoder.decode] throw, and a form parser must answer "no" rather than
  * propagate that into the request path.
  *
- * Bounded: the body is already capped by [MAX_BODY_BYTES] at the gate, and the pair split is
- * `limit = 2` so a value full of `=` cannot multiply the work.
+ * Bounded: the body is already capped by [MAX_BODY_BYTES] at the gate, and this parser examines at
+ * most [MAX_FORM_FIELDS] fields. It scans rather than splitting the whole body, so a body full of
+ * `&` cannot allocate one string per empty field. The first `=` in each field remains the separator,
+ * so values containing `=` retain normal form semantics.
  *
  * Pure and Context-free; unit-tested on the JVM ([RelaisDashboardTest]).
  */
 internal fun parseFormField(body: String, key: String): String? {
-  for (pair in body.split('&')) {
-    if (pair.isEmpty()) continue
-    val halves = pair.split('=', limit = 2)
-    if (halves.size != 2) continue
-    val name = runCatching { URLDecoder.decode(halves[0], StandardCharsets.UTF_8.name()) }.getOrNull() ?: continue
-    if (name != key) continue
-    return runCatching { URLDecoder.decode(halves[1], StandardCharsets.UTF_8.name()) }.getOrNull()
+  var fieldStart = 0
+  repeat(MAX_FORM_FIELDS) {
+    val fieldEnd = body.indexOf('&', fieldStart).let { if (it < 0) body.length else it }
+    val separator = body.indexOf('=', fieldStart)
+    if (separator in fieldStart until fieldEnd) {
+      val name =
+        runCatching { URLDecoder.decode(body.substring(fieldStart, separator), StandardCharsets.UTF_8.name()) }
+          .getOrNull()
+      if (name == key) {
+        return runCatching {
+          URLDecoder.decode(body.substring(separator + 1, fieldEnd), StandardCharsets.UTF_8.name())
+        }.getOrNull()
+      }
+    }
+    if (fieldEnd == body.length) return null
+    fieldStart = fieldEnd + 1
   }
   return null
 }

@@ -93,13 +93,13 @@ internal fun handleSelectModel(
         RelaisRuntimeCompat::incompatibleReason,
       )) {
       is SelectionOutcome.Unknown -> {
-        respond(400, selectModelErrorPage("unknown model id — no change applied"), selectModelHeaders())
+        respond(400, selectModelErrorPage(400, "BAD REQUEST", "unknown model id — no change applied"), selectModelHeaders())
         return
       }
       is SelectionOutcome.Incompatible -> {
         respond(
           400,
-          selectModelErrorPage("${outcome.id} cannot be loaded — ${outcome.reason}"),
+          selectModelErrorPage(400, "BAD REQUEST", "${outcome.id} cannot be loaded — ${outcome.reason}"),
           selectModelHeaders(),
         )
         return
@@ -113,7 +113,7 @@ internal fun handleSelectModel(
   if (!RelaisEngine.ensureModelSwapInBackground(context, target)) {
     respond(
       503,
-      selectModelErrorPage("a model swap is already running — retry shortly"),
+      selectModelErrorPage(503, "SERVICE UNAVAILABLE", "a model swap is already running — retry shortly"),
       selectModelHeaders() + "Retry-After: 25",
     )
     return
@@ -151,19 +151,22 @@ private fun selectModelHeaders(): List<String> = dashboardSecurityHeaders()
  * property is a property of `/`, not of every page this feature adds. Same-origin, so the
  * `Referrer-Policy: same-origin` narrowing still omits every cross-origin referrer.
  */
-private fun selectModelErrorPage(message: String): String =
+private fun selectModelErrorPage(status: Int, statusLabel: String, message: String): String =
   """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>RELAIS — Model Switch</title>
+<title>RELAIS — error</title>
 <style>
 :root { --bg:#0B0B0D; --surface:#16171A; --hairline:#2A2B30; --text:#EDEAE3; --muted:#8A8780; --amber:#FFB000; font-family: monospace; }
 *,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px 16px; }
 .wordmark { font-size: 22px; font-weight: bold; letter-spacing: 5px; color: var(--amber); text-transform: uppercase; margin-bottom: 20px; }
 .panel { background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; padding: 14px; }
+.heading { display: flex; gap: 10px; margin-bottom: 10px; font-size: 11px; letter-spacing: 1px; }
+.heading-label { color: var(--muted); }
+.heading-value { color: var(--text); }
 .msg { font-size: 13px; line-height: 1.6; }
 .back { display: inline-block; margin-top: 14px; color: var(--amber); font-size: 12px; text-decoration: none; letter-spacing: 1px; }
 </style>
@@ -171,6 +174,7 @@ body { background: var(--bg); color: var(--text); min-height: 100vh; padding: 24
 <body>
 <div class="wordmark">&#x25CF; RELAIS</div>
 <div class="panel">
+  <div class="heading"><span class="heading-label">$status</span><span class="heading-value">$statusLabel</span></div>
   <div class="msg">${escapeHtml(message)}</div>
   <a class="back" href="/">&#x2039; BACK</a>
 </div>

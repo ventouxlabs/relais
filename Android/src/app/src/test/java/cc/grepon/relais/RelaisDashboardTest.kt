@@ -553,6 +553,19 @@ class RelaisDashboardTest {
   }
 
   @Test
+  fun `parseFormField accepts a field at the configured bound`() {
+    assertEquals(
+      "b",
+      parseFormField("other=x&".repeat(MAX_FORM_FIELDS - 1) + "model=b", "model"),
+    )
+  }
+
+  @Test
+  fun `parseFormField stops before an ampersand flood can create unbounded fields`() {
+    assertNull(parseFormField("&".repeat(MAX_FORM_FIELDS) + "model=b", "model"))
+  }
+
+  @Test
   fun `parseFormField returns null for an empty body`() {
     assertNull(parseFormField("", "model"))
   }

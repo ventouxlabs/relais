@@ -39,6 +39,70 @@ class RelaisDiscoveryTxtTest {
   private val sentinelKey = "SENTINEL_SECRET_abc123def456_DO_NOT_LEAK"
 
   // ---------------------------------------------------------------------------
+  // NSD lifecycle: listener ownership is callback-driven (feature-09 bug 6)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  fun `refresh waits for service-unregistered before registering a replacement`() {
+    val refresh = DiscoveryLifecycle(ownsListener = true).requestRefresh()
+
+    assertEquals(DiscoveryAction.UNREGISTER, refresh.action)
+    assertTrue(refresh.state.ownsListener)
+    assertTrue(refresh.state.unregistering)
+    assertTrue(refresh.state.pendingRegistration)
+
+    val replacement = refresh.state.serviceUnregistered()
+    assertEquals(DiscoveryAction.REGISTER, replacement.action)
+    assertTrue(replacement.state.ownsListener)
+    assertFalse(replacement.state.pendingRegistration)
+  }
+
+  @Test
+  fun `stop cancels a queued refresh so unregistration cannot revive discovery`() {
+    val refreshing = DiscoveryLifecycle(ownsListener = true).requestRefresh().state
+    val stopped = refreshing.requestStop()
+
+    assertEquals(DiscoveryAction.NONE, stopped.action)
+    assertTrue(stopped.state.ownsListener)
+    assertTrue(stopped.state.unregistering)
+    assertFalse(stopped.state.pendingRegistration)
+
+    assertEquals(DiscoveryAction.NONE, stopped.state.serviceUnregistered().action)
+  }
+
+  @Test
+  fun `explicit register while stopping queues replacement after the old listener retires`() {
+    val stopping = DiscoveryLifecycle(ownsListener = true).requestStop().state
+    val restarting = stopping.requestRegistration()
+
+    assertEquals(DiscoveryAction.NONE, restarting.action)
+    assertTrue(restarting.state.pendingRegistration)
+    assertEquals(DiscoveryAction.REGISTER, restarting.state.serviceUnregistered().action)
+  }
+
+  @Test
+  fun `unregistration failure keeps ownership and queued refresh for a later retry`() {
+    val refreshing = DiscoveryLifecycle(ownsListener = true).requestRefresh().state
+    val failed = refreshing.unregistrationFailed()
+
+    assertTrue(failed.ownsListener)
+    assertFalse(failed.unregistering)
+    assertTrue(failed.pendingRegistration)
+    assertEquals(DiscoveryAction.UNREGISTER, failed.requestRefresh().action)
+  }
+
+  @Test
+  fun `registration failure releases only the failed registration ownership`() {
+    val registering = DiscoveryLifecycle().requestRegistration().state
+    val failed = registering.registrationFailed()
+
+    assertFalse(failed.ownsListener)
+    assertFalse(failed.unregistering)
+    assertFalse(failed.pendingRegistration)
+    assertEquals(DiscoveryAction.REGISTER, failed.requestRegistration().action)
+  }
+
+  // ---------------------------------------------------------------------------
   // Which id gets advertised: reality before intent (feature-09 bug 6)
   // ---------------------------------------------------------------------------
 

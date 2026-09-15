@@ -139,6 +139,10 @@ plain-text fallback is the one-liner alone.
 | Heading row | `401` (label) · `UNAUTHORIZED` (value) |
 | Message line | `bearer key required — authenticate with the node api key` |
 | Plain-text fallback body | `401 bearer key required` |
+| HTML-client challenge header | `WWW-Authenticate: Basic realm="Relais", charset="UTF-8"` |
+
+The Basic challenge is sent only on a `401` to a client that explicitly accepts HTML; API clients
+continue to receive a bare `401`.
 
 Never echo the submitted model id, any header, or any key material in an error body.
 
@@ -253,7 +257,7 @@ Rules for any future string on this surface:
 3. **A panel reports; it doesn't chat.** No filler ("please", "oops", "successfully"), no hype,
    no emoji, no exclamation marks. State the fact and, if needed, the operator's next move.
 4. **One line per message.** Join facts with `·`, attach the consequence with `—`
-   (`model set: <id> — restart to apply`).
+   (`model set: <id> — not serving it yet`).
 5. **Never render secrets or identifying data.** Keys masked or absent; no IPs, raw paths, or
    header contents in logs or errors.
 
@@ -271,6 +275,4 @@ For the implementer extending the existing render; normalize these while adding 
 | `%.2f tok/s` | `%.1f tok/s` |
 | Log age `42s ago` | `42s` under an `AGE` header |
 | Empty state `no recent requests` | `no requests yet` |
-| `.warn { color: #FFCC44 }` for 4xx/shed | delete — off-palette; use paper-vs-muted contrast (§2.5) |
-| `.stop` red on 5xx rows and `errors total > 0` | delete — `#FF5247` is destructive-controls-only; render paper |
 | No tagline | add `on-device relay · OpenAI-compatible LAN endpoint` |
