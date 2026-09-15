@@ -13,8 +13,8 @@ immediately receive `404 model_not_found`.
 - When the curated catalog is unavailable, emit the fallback id only if it is provisioned.
 - Return an empty OpenAI list when the node has no provisioned chat model; do not invent an
   unserviceable fallback entry.
-- Update the OpenAPI and model-card descriptions to say that this endpoint lists usable local
-  models, not the downloadable catalog.
+- Update the OpenAPI, model-card, and backend codemap descriptions to say that this endpoint lists
+  usable local models, not the downloadable catalog.
 
 ## TDD plan
 

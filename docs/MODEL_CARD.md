@@ -7,7 +7,7 @@ route-level machine-readable contract, see the OpenAPI spec; for architectural d
 [`docs/CODEMAPS/backend.md`](CODEMAPS/backend.md) and [`docs/CODEMAPS/architecture.md`](CODEMAPS/architecture.md).
 
 Two ways a client can query this at runtime instead of reading a doc:
-- `GET /v1/models` — the resident/curated chat model catalog (OpenAI-compatible shape).
+- `GET /v1/models` — the locally provisioned chat-model list (OpenAI-compatible shape).
 - `GET /v1/clientconfig` — resident model id, capability flags (`multimodal`/`tools`/`reasoning`),
   base URL, and paste-ready client configs. Bearer-gated.
 
@@ -27,8 +27,9 @@ of concurrent client connections, not a public-internet fanout.
 - Runtime: `com.google.ai.edge.litertlm` AAR, **pinned to version 0.12.0** (0.14.0 was tested and
   reverted — it regresses the Tensor G5 TPU lane; see issue #150).
 - Default model id advertised when no catalog entry resolves: `gemma-4-e4b-it`.
-- The actual resident model is operator-selected from a curated allowlist (`GET /v1/models`) or an
-  arbitrary HuggingFace `.litertlm` repo; it can be swapped without a node code change.
+- The actual resident model is operator-selected from a curated allowlist or an arbitrary
+  HuggingFace `.litertlm` repo; `GET /v1/models` then advertises only locally provisioned models.
+  It can be swapped without a node code change.
 - **Modalities in**: text always; image and audio additionally when the selected model is
   multimodal (`RelaisEngine.isMultimodal`, surfaced via `GET /v1/clientconfig`
   `capabilities.multimodal`). A non-multimodal model rejects audio input on
