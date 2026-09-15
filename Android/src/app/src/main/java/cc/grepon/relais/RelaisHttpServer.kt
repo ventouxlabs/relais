@@ -2585,9 +2585,9 @@ private const val MODEL_CREATED_EPOCH = 0L
  * Pure mapping function (no Context dependency) — shapes the OpenAI-compatible GET /v1/models
  * response from the curated catalog refs and the locally-provisioned model ids. Curated refs not
  * present on this node are omitted, so every advertised id can be accepted by the request router.
- * When [refs] is empty (offline), returns [fallbackId] only if it is provisioned; an empty OpenAI
- * list is valid before any chat model has been provisioned. Internal so the unit test can call it
- * directly on the JVM.
+ * When [refs] is empty (offline), returns [fallbackId] only if it is provisioned and compatible
+ * with the pinned runtime; an empty OpenAI list is valid before any serviceable chat model has been
+ * provisioned. Internal so the unit test can call it directly on the JVM.
  *
  * Each entry includes a stable `created` epoch so strict OpenAI clients (older openai-python) that
  * require the field do not reject the response.
@@ -2595,11 +2595,11 @@ private const val MODEL_CREATED_EPOCH = 0L
 internal fun buildModelsResponse(
   refs: List<RelaisModelRef>,
   fallbackId: String,
-  provisionedIds: Set<String> = emptySet(),
+  provisionedIds: Set<String>,
 ): JSONObject {
   val data = JSONArray()
   if (refs.isEmpty()) {
-    if (fallbackId in provisionedIds) {
+    if (fallbackId in provisionedIds && RelaisRuntimeCompat.isOfferable(fallbackId)) {
       data.put(
         JSONObject()
           .put("id", fallbackId)

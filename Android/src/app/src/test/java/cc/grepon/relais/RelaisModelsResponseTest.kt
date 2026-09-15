@@ -94,6 +94,17 @@ class RelaisModelsResponseTest {
     assertEquals(0L, item.getLong("created"))
   }
 
+  @Test
+  fun `curated response is empty when no models are locally provisioned`() {
+    val response = buildModelsResponse(
+      refs = listOf(makeRef("litert-community/not-on-this-node", RelaisModelRef.SOURCE_ALLOWLIST)),
+      fallbackId = "unused-fallback",
+      provisionedIds = emptySet(),
+    )
+
+    assertEquals(0, response.getJSONArray("data").length())
+  }
+
   // Test 1b (#220) — cost-before-commit signals so a client can see what a model will demand
   // BEFORE spending a multi-GB download on it.
   @Test
@@ -149,6 +160,19 @@ class RelaisModelsResponseTest {
       refs = emptyList(),
       fallbackId = RelaisConfig.DEFAULT_MODEL_ID,
       provisionedIds = emptySet(),
+    )
+
+    assertEquals(0, response.getJSONArray("data").length())
+  }
+
+  @Test
+  fun `offline response omits a provisioned fallback known incompatible with the pinned runtime`() {
+    val incompatibleId = "litert-community/Qwen2.5-1.5B-Instruct"
+
+    val response = buildModelsResponse(
+      refs = emptyList(),
+      fallbackId = incompatibleId,
+      provisionedIds = setOf(incompatibleId),
     )
 
     assertEquals(0, response.getJSONArray("data").length())

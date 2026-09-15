@@ -694,10 +694,11 @@ paths:
       tags: [metadata]
       summary: OpenAI-compatible model listing
       description: |
-        Lists only chat models provisioned on this node, so every returned id can be named in a
-        completion request without a `model_not_found` response. If the curated catalog is
-        unavailable offline, the currently-provisioned fallback model is returned when present;
-        otherwise the response is an empty OpenAI list.
+        Lists only provisioned models from the curated chat catalog, so every returned id can be
+        named in a completion request without a `model_not_found` response. A manually configured
+        non-curated HuggingFace model is not included. If the curated catalog is unavailable
+        offline, the currently-provisioned, pinned-runtime-compatible fallback model is returned
+        when present; otherwise the response is an empty OpenAI list.
 
         Models measured to fail engine-create on this node's pinned LiteRT-LM runtime are **not
         listed at all** (#220) — the catalog is upstream and drifts independently of the pinned
