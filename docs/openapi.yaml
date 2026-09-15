@@ -694,14 +694,18 @@ paths:
       tags: [metadata]
       summary: OpenAI-compatible model listing
       description: |
-        Lists the curated model catalog; falls back to a single entry for the currently-provisioned
-        model id if the catalog is unavailable offline.
+        Lists only provisioned models from the curated chat catalog, so every returned id can be
+        named in a completion request without a `model_not_found` response. A manually configured
+        non-curated HuggingFace model is not included. If the curated catalog is unavailable
+        offline, the currently-provisioned, pinned-runtime-compatible fallback model is returned
+        when present; otherwise the response is an empty OpenAI list.
 
         Models measured to fail engine-create on this node's pinned LiteRT-LM runtime are **not
         listed at all** (#220) — the catalog is upstream and drifts independently of the pinned
         runtime, so listing them cost the operator a multi-GB download followed by a dead node.
-        The non-standard `provisioned`, `requires_hf_token` and `runtime_compat` fields let a client
-        see what a listed model will demand *before* committing to that download.
+        The non-standard `provisioned` field is retained for compatibility and is always `true`.
+        `requires_hf_token` and `runtime_compat` describe the listed model's provisioning history
+        and pinned-runtime compatibility.
       responses:
         "200":
           description: Model list.
@@ -723,9 +727,8 @@ paths:
                         provisioned:
                           type: boolean
                           description: >-
-                            Whether the model is downloaded on this device. A chat/messages request
-                            naming a non-provisioned model is answered 404 model_not_found (#180),
-                            so this says which entries can actually be served right now.
+                            Always true. This provisioned-only list contains only chat models that
+                            can be served on this node.
                         requires_hf_token:
                           type: boolean
                           description: >-

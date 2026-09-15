@@ -53,7 +53,7 @@ Shed order: thermal 503 → queue 429 → auth 401 → run 200. `resolveEmbeddin
 
 | Chokepoint | Call |
 |---|---|
-| catalog / `/v1/models` | `RelaisModelCatalog.isNodeRunnable` → `isOfferable` |
+| catalog / `/v1/models` | `RelaisModelCatalog.isNodeRunnable` → `isOfferable`; `handleModels` then intersects catalog refs with the read-pruned provisioned registry, so every listed id is serviceable |
 | provisioner | `refuseIfIncompatible` in **both** `ensureModel` and `resolveModel` (the second read closes a mid-provision selection change) |
 | per-request swap | `resolveModelRequest(incompatibleReason = …)` → `ModelRequestOutcome.Incompatible` → 404 |
 | legacy Gallery download | `DownloadRepository` → `incompatibleReasonForDownloadUrl` (URL-keyed; `Model` carries no id) |
