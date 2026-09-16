@@ -21,6 +21,7 @@ package cc.grepon.relais
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -32,7 +33,9 @@ import org.junit.Test
  *  2. Thermal-label mapping (0..6 -> name, out-of-range -> UNKNOWN)
  *  3. Field pass-through (assembler doesn't drop or reorder values)
  *  4. escapeHtml helper (XSS guard: < > & " ' all escaped)
- *  5. Render smoke (RELAIS wordmark, amber #FFB000, scriptless, no model-switch endpoint injected)
+ *  5. Render smoke (RELAIS wordmark, amber #FFB000, scriptless)
+ *  5b. Model-switch form (options, selected, empty-catalog, lock, escaping, pending hint)
+ *  5c. Form-body parser + model-choice validator
  */
 class RelaisDashboardTest {
 
@@ -417,14 +420,169 @@ class RelaisDashboardTest {
     assertTrue("monospace font must be declared (DESIGN.md)", html.contains("monospace"))
   }
 
+  // ---------------------------------------------------------------------------
+  // 5b. Model-switch form (feature-09 PR-B). This section REPLACES the read-only assertion that
+  //     stood here: the page is no longer read-only, so that test failed by construction.
+  //
+  //     Every row asserts STRUCTURE, never `html.contains("/select-model")` — that substring is
+  //     satisfied by a comment mentioning the path, which would leave the whole section vacuous.
+  // ---------------------------------------------------------------------------
+
+  private fun switchableStatus(
+    available: List<String> = listOf("model-a", "model-b"),
+    configured: String = "model-b",
+    locked: Boolean = false,
+    pending: String? = null,
+  ) = assembleDashboardStatus(
+    engineReady = true,
+    listenersUp = true,
+    startupInProgress = locked,
+    thermalStatus = 0,
+    decodeTokensPerSec = 1.0,
+    currentModelId = configured,
+    uptimeSeconds = 1.0,
+    queueDepth = 0,
+    errorsTotal = 0L,
+    shedTotal = 0L,
+    recentRequests = emptyList(),
+    baseUrl = "https://192.168.1.42:8443/v1",
+    apiKeyMasked = "abcd…wxyz",
+    capabilities = "tools,reasoning",
+    availableModelIds = available,
+    switchLocked = locked,
+    pendingModelId = pending,
+  )
+
   @Test
-  fun `renderDashboardHtml contains no model-switch form or select-model action (read-only scope)`() {
-    val html = renderDashboardHtml(liveStatus())
-    // Per task scope: no model-switch endpoint. The page is read-only display.
-    assertFalse(
-      "no /select-model form: model switching is deferred to a separate PR",
-      html.contains("/select-model"),
+  fun `renderDashboardHtml renders the switch form with one option per available id`() {
+    val html = renderDashboardHtml(switchableStatus())
+    assertTrue("form must POST", html.contains("""method="POST""""))
+    assertTrue("form must target /select-model", html.contains("""action="/select-model""""))
+    assertTrue("select must be named model", html.contains("""name="model""""))
+    assertTrue("option for model-a", html.contains("""<option value="model-a""""))
+    assertTrue("option for model-b", html.contains("""<option value="model-b""""))
+    assertEquals("exactly one option per available id", 2, Regex("<option ").findAll(html).count())
+    assertTrue("submit control must be labelled SET MODEL", html.contains("SET MODEL"))
+  }
+
+  @Test
+  fun `renderDashboardHtml marks only the configured id selected`() {
+    val html = renderDashboardHtml(switchableStatus(configured = "model-b"))
+    assertTrue("configured id must be preselected", html.contains("""<option value="model-b" selected"""))
+    assertFalse("the other id must not be selected", html.contains("""<option value="model-a" selected"""))
+    assertEquals("exactly one selected option", 1, Regex(" selected>").findAll(html).count())
+  }
+
+  @Test
+  fun `renderDashboardHtml renders no form when no models are available`() {
+    val html = renderDashboardHtml(switchableStatus(available = emptyList()))
+    assertFalse("no form element", html.contains("<form"))
+    assertFalse("no orphan submit button", html.contains("SET MODEL"))
+    assertFalse("no orphan select", html.contains("<option "))
+  }
+
+  @Test
+  fun `renderDashboardHtml disables both controls and says so while starting`() {
+    val html = renderDashboardHtml(switchableStatus(locked = true))
+    assertEquals("both the select and the button must be disabled", 2, Regex(" disabled").findAll(html).count())
+    assertTrue("the lock must be explained, not just rendered", html.contains("model locked while starting"))
+  }
+
+  @Test
+  fun `renderDashboardHtml leaves the controls enabled when live`() {
+    val html = renderDashboardHtml(switchableStatus(locked = false))
+    assertFalse("nothing disabled when the node is live", html.contains(" disabled"))
+    assertFalse("no lock hint when unlocked", html.contains("model locked while starting"))
+  }
+
+  @Test
+  fun `renderDashboardHtml escapes model ids in both attribute and text context`() {
+    // A registry id is the one value on this page a download could have influenced, and it is
+    // rendered twice: inside value="…" and as the option's text.
+    val hostile = """x" onfocus="alert(1)"""
+    val html = renderDashboardHtml(switchableStatus(available = listOf(hostile), configured = hostile))
+    assertFalse("raw event handler must not survive escaping", html.contains("""onfocus="alert"""))
+    assertTrue("quote must be escaped", html.contains("&quot;"))
+  }
+
+  @Test
+  fun `renderDashboardHtml renders the pending hint only when config is ahead of the engine`() {
+    val pending = renderDashboardHtml(switchableStatus(pending = "model-b"))
+    assertTrue(
+      "the hint states the fact and predicts nothing: the page cannot tell an in-flight swap from " +
+        "one that bailed, so it must not claim a swap is running",
+      pending.contains("model set: model-b — not serving it yet"),
     )
+    val settled = renderDashboardHtml(switchableStatus(pending = null))
+    assertFalse("no hint when config and engine agree", settled.contains("not serving it yet"))
+  }
+
+  @Test
+  fun `the switch form does not cost the scriptless invariant`() {
+    // The form is a plain POST for exactly this reason — it needs no JS.
+    assertFalse("page must stay scriptless", renderDashboardHtml(switchableStatus()).contains("<script"))
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5c. Form-body parser and validator (feature-09 Task 6)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  fun `parseFormField decodes percent escapes`() {
+    assertEquals("a/b", parseFormField("model=a%2Fb", "model"))
+  }
+
+  @Test
+  fun `parseFormField returns null for an absent key`() {
+    assertNull(parseFormField("other=x", "model"))
+  }
+
+  @Test
+  fun `parseFormField returns null for a malformed escape rather than throwing`() {
+    assertNull(parseFormField("model=%ZZ", "model"))
+  }
+
+  @Test
+  fun `parseFormField splits on the first equals only`() {
+    assertEquals("a=b", parseFormField("model=a=b", "model"))
+  }
+
+  @Test
+  fun `parseFormField finds a key that is not first`() {
+    assertEquals("b", parseFormField("other=x&model=b", "model"))
+  }
+
+  @Test
+  fun `parseFormField accepts a field at the configured bound`() {
+    assertEquals(
+      "b",
+      parseFormField("other=x&".repeat(MAX_FORM_FIELDS - 1) + "model=b", "model"),
+    )
+  }
+
+  @Test
+  fun `parseFormField stops before an ampersand flood can create unbounded fields`() {
+    assertNull(parseFormField("&".repeat(MAX_FORM_FIELDS) + "model=b", "model"))
+  }
+
+  @Test
+  fun `parseFormField returns null for an empty body`() {
+    assertNull(parseFormField("", "model"))
+  }
+
+  @Test
+  fun `validateModelChoice accepts a known id`() {
+    assertEquals("b", validateModelChoice("b", listOf("a", "b")))
+  }
+
+  @Test
+  fun `validateModelChoice rejects an unknown id`() {
+    assertNull(validateModelChoice("zzz", listOf("a", "b")))
+  }
+
+  @Test
+  fun `validateModelChoice rejects null`() {
+    assertNull(validateModelChoice(null, listOf("a", "b")))
   }
 
   // ---------------------------------------------------------------------------

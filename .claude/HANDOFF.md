@@ -6,7 +6,327 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-12 — ⏩ START HERE. **feature-09 PR-A implemented on `feat/dashboard-auth-refresh`. Not pushed, no PR. Six plan-review rounds preceded it.**
+## 2026-09-12 21:40 EDT — ⏩ START HERE. **#318 and #323 MERGED. feature-09 PR-B implemented; codex found two defects, both FIXED in `80d106f6`. Unpushed. Codex re-review and all hardware checks still outstanding.**
+
+`main` = `62050b83`. Two feature-09 PRs shipped this session, both hardware-verified on rango:
+
+| PR | SHA | What |
+|---|---|---|
+| [#318](https://github.com/ventouxlabs/relais/pull/318) | `cf316146` | per-node EC P-256 CA (10 y) signing an RSA-2048 SAN'd leaf (90 d) — LAN clients can drop `curl -k` |
+| [#323](https://github.com/ventouxlabs/relais/pull/323) | `62050b83` | HTTP Basic + cross-site guard + dashboard auto-refresh + request-log hygiene (feature-09 Tasks 1-3) |
+
+### ⚠ Before believing any status claim in this section — including this one
+
+**This worktree's state and the messages describing it went out of sync three separate times today**,
+in both directions: my `d4a26f67` described an uncommitted tree that had been committed minutes
+earlier, and two executor reports crossed with my replies to them. Every one of those claims was
+written in good faith by someone who had actually looked.
+
+**Run `git log --oneline --date=format:'%H:%M:%S' --format='%h %cd %s' -8` and `wc -l` before you
+trust a SHA, a tree state, or a line count written here.** Measure, don't quote. This is the same rule
+CLAUDE.md states about `RelaisHttpServer.kt`'s line count, which has now been stale six times; the
+general form is that **any number in a document is a historical note.**
+
+### The tree you are inheriting
+
+Branch `feat/dashboard-model-selector`, **unpushed**. Below the eight plan-revision commits sit four
+implementation commits — feature-09 **PR-B (Tasks 4-10, the model selector)**:
+
+| SHA | |
+|---|---|
+| `42d3afb0` | Tasks 4-5 data half — `DashboardStatus` +3 fields; `dashboardSecurityHeaders`, `availableModelIdsFor`, `pendingModelIdFor` as top-level pure functions; single-read of `startupInProgress` and the configured id |
+| `938ef780` | Tasks 5-6 render half — the form, the lock, the pending hint, `parseFormField`, `validateModelChoice` |
+| `a3a40554` | Task 7 — `ensureModelSwapInBackground: Boolean`, `advertisedModelId`, bug 6 |
+| `009912ed` | Tasks 8-9 — `RelaisHttpPages.kt`, the route arm, `reason(303)`, the `endpointLabel` arm, both probes, copy doc |
+| `d4a26f67` | this handoff (not the executor's) |
+
+**Verified by the executor, on the final tree:** three-flavor JVM lane with `--rerun-tasks`, 1349
+tests × 3 flavors = **4047, 0 failures**, every `test*UnitTest` line printed *without* `UP-TO-DATE`.
+`compileFullOpenDebugAndroidTestKotlin` green. **Mutation table 17/17 KILLED, 0 SURVIVED** — and the
+harness asserts the file actually changed before running a row, so no SURVIVED can be a mutation that
+never applied (the trap that nearly got a correct test declared worthless last week). It also dumped
+the rendered page and checked tag balance rather than trusting the assertions alone.
+
+**Not verified, and not verifiable without hardware:** both probes are instrumented, so CI compiles
+and never runs them. `DashboardHeadersProbe` is the **only** thing that fails if `handleDashboard`
+stops calling `dashboardSecurityHeaders()` — the JVM tests pass unchanged under that rewiring.
+`DashboardSelectModelProbe` is the only observation point for `reason(303)`, the `endpointLabel` arm,
+and the four metered response paths. Bug 6's TXT re-publish and its `swapped` guard need a real swap
+plus `dumpsys nsd` and a cleared logcat window (manual check 10). **Until those run on rango, that
+surface is unverified** — the same shape as PR-A's `BasicAuthGateProbe`, which sat un-run for days.
+
+### Where PR-B is in the pipeline
+
+`plan → N review rounds → implement → my review → codex the diff → hardware on rango → PR → merge`
+
+Done through **implement**. The plan (`.claude/PRPs/plans/feature-09-web-dashboard.plan.md`, Tasks
+4-10 per its `:371`) took **8 rounds and 29 findings**; round 8 returned `[P1] None. [P2] None.`,
+which fired the stop rule. **Nothing in the plan proved wrong under implementation.**
+
+**Codex has now run and FAILED the gate** — see the red section below. Still untouched after that:
+the fixes, a re-run of codex, and every device check.
+
+### Open review items — three raised by the executor, one by me
+
+Flagged rather than buried, which is the right instinct; none contradict the plan:
+
+1. **`handleDashboard` now calls `provisionedOnDisk()` every 10 s** via the auto-refresh
+   (`RelaisHttpServer.kt:965`). New repeating I/O the plan never costed: one cached SharedPreferences
+   read plus one `File.exists()` per provisioned model, so microseconds at 1-3 models, and the same
+   call already runs on every model-naming `/v1` request. Judged cheap enough to ship.
+2. **The 303 sends an empty body with `Content-Type: text/html`** — harmless, consistent with
+   `respondText`'s signature, and exactly the kind of thing a reviewer stops on. Decide once.
+3. **Task 9's HANDOFF section was deliberately skipped** because this file had a live concurrent
+   editor. Correct call — and this section is that update, so Task 9 is satisfied, not outstanding.
+
+`reason(303)` landed with a comment generalizing PR-A's `403 ERR` lesson: *a new status literal is not
+finished until `reason()` has an arm for it.* That is the rule, stated where the next person adding a
+status will read it, rather than in a retrospective. Keep that habit.
+
+### The fourth item — a real miss, found and FIXED (`aa57c3cc`)
+
+**Resolved.** `RelaisHttpServer.kt` measures **2750** (`wc -l`), i.e. **+37** over `main` for the whole
+feature, and `RelaisHttpPages.kt` is 241. The fix was a relocation-only commit, and I verified its
+purity rather than taking the claim: sorting the removed and added lines and diffing them shows **the
+only textual deltas are comment lines** — not one code line changed. The history below is kept because
+the *cause* outlasts the fix.
+
+**`RelaisHttpServer.kt` had grown +115 (2713 → 2828) and 78 of that did not have to land there.**
+Exact accounting, from the executor after I asked it to account for the number:
+
+| Net | What | Needs the class's privates? |
+|---|---|---|
+| **+78** | the three extracted pure functions + their KDoc | **No** |
+| +26 | the `/select-model` router arm | Yes — `readBody`, `provisionedOnDisk`, `respondText`, `ctx.*` |
+| +4 / +3 | `endpointLabel` arm, `reason(303)` arm | Yes — private members |
+| +4 | single-read locals; inline header list deleted | Yes |
+
+**37 justified, 78 not.** The three functions moved from a *private member* to *top-level in the same
+file* — which bought the testability the review rounds wanted and **zero** file-size relief. They are
+`internal` and `RelaisHttpPages.kt` is the same package, so relocating them was pure movement: no
+visibility change, no imports, and `RelaisHttpDashboardTest` is same-package so it needed no edit.
+`RelaisHttpPages.kt`'s own lines are genuinely new code and offset nothing — that part was never
+avoidable. **The sweep for the bad instruction found it live in five places in the plan, not one**,
+because the executor grepped the shortest fragment (`2197`) rather than the full phrase; two
+disposition rows that repeat the old wording are struck in place rather than rewritten.
+
+**Two things here are worth more than the 78 lines.**
+
+**The plan named a location when it meant a property.** It said "top-level after the class closes at
+`:2197`". The load-bearing half was *top-level, not a member* — an `internal` member needs an
+instance, which needs a `Context`. The **file was never the constraint**; any file in the package
+satisfies it. The plan over-specified, the executor followed it literally, and **eight review rounds
+missed it because every round checked whether those functions were _reachable_, never where the lines
+_landed_.** This is the motion-versus-evidence failure one level up: a plan specifying a *coordinate*
+is satisfied at that coordinate even when the coordinate was incidental, and every reviewer checking
+the real property will correctly pass it. The check wasn't skipped — it was aimed right and still
+blind. **When a plan states a location, make it state the property and the reason.**
+
+**I offered a justification and it was declined on evidence.** I told the executor that if the answer
+was "route arm, form render, CSP, and they genuinely need the class's privates" I'd record that and
+move on. Wrong on the facts: form render is in `RelaisDashboard.kt` (+121/−3, not the server at all),
+and the CSP sits *inside* the unconstrained +78. **Offering a pre-written justification invites it to
+be taken** — it converts a review question into a multiple-choice with an exit. Ask for the
+accounting; don't draft the excuse. The executor refusing the exoneration is the same disagree-upward
+move as its round-7 `endpointLabel` decline, pointed at the lead this time.
+
+### ✅ `/codex review` found two defects — both now FIXED in `80d106f6`. Re-review BLOCKED on quota.
+
+**Status after the fix:** 4065 tests (1355 × 3 flavors), 0 failures, `--rerun-tasks`, no test task
+`UP-TO-DATE`; probe suite compiles. **P2 proven RED** — reintroducing the filtered-list membership
+check fails exactly one test, the regression test, with the other five still green (the mutation
+asserted the file changed before running). **P1 measured as UNCOVERED** — neutering it to
+`resolvedPath = null` passes all 1355 tests, so it is recorded as manual check 11 in
+`DashboardSelectModelProbe` rather than left implied.
+
+**The codex re-run is a fail-closed GATE: FAIL, not a pass** — `codex exit 1`, *"You've hit your
+usage limit … try again at 1:40 PM"*. Nothing was reviewed. **Re-run
+`--base f15dc74d` after the quota resets** before treating the fix as independently checked; fix
+commits are this repo's highest-risk diff and a finding landing inside the previous fix is its most
+common shape.
+
+What the fix does is below; the original findings and their evidence chains are kept because the
+cause outlasts them.
+
+---
+
+#### Original finding record — GATE: FAIL, two defects CONFIRMED (now fixed)
+
+Run at 21:05 on `--base c94f1441` (implementation only, excluding the 8 already-reviewed plan
+commits). CLI 0.154.0, model `gpt-6-astra`, exit 0. **Both are now fixed in `80d106f6`** — the record
+below is kept for the cause, not the status.
+I re-derived both against the tree rather than relaying them — the verdict below reflects my reading,
+and it corrects codex on two points.
+
+Full working notes: `scratchpad/codex-review-verdict.md` (session-local; the substance is here).
+
+---
+
+#### [P1] The swap persists the model ID but never the model PATH
+
+`RelaisHttpPages.kt:110-115` · `RelaisEngine.kt:441-497` · `ModelSwitch.kt:48-51`
+
+Evidence chain, every link read:
+
+1. `handleSelectModel` step 4 calls `ModelSwitch.applyManualId(context, id)` = `clearModelRef` +
+   `setModelId`. **Id only.**
+2. The swap reloads via `ensureInitialized(context, modelPath = path, modelId = configuredModelId)`,
+   which sets `residentModelId` / `residentModelPath` **in memory only** (`RelaisEngine.kt:374-375`).
+3. `grep -rn 'remember(\|setModelPath'` across `RelaisEngine.kt`, `RelaisHttpPages.kt`,
+   `ModelSwitch.kt` → **zero hits**. No swap path updates `RelaisModelProvisioner.cachedPath` or the
+   persisted `RelaisConfig.modelPath`.
+4. `shutdown()` (`:1002`) nulls `engine`; `isReady` is `engine?.isInitialized() == true`
+   (`:348-349`), engine alone — so an idle unload does make the reload fire.
+5. The reload calls `ensureInitialized(context)` with DEFAULTS:
+   `modelPath = cachedPathOrDefault(context)` (`:446-449`) and `modelId = RelaisConfig.modelId(context)`.
+
+**Result after a dashboard swap A → B, then an idle unload: A's weights load stamped with B's id.**
+Requests naming B silently receive A's output. No error, no log, no failing test.
+
+**Correction 1 — restart needs no allowlist.** Codex said a restart "requires allowlist resolution,
+which fails offline". It does not. `RelaisConfig.modelPath` still holds A's path and `File(A).exists()`
+is true, so the offline fast path at `RelaisModelProvisioner.kt:287-297` takes it and calls
+`remember(context, A, persistForId = idAtStart = B)` — **re-persisting A's path under id B.** Same
+wrong-model outcome, but the divergence is self-reinforcing rather than self-correcting.
+
+**Correction 2 — ⚠ THE OBVIOUS FIX IS INERT. Read this before patching.** The tempting fix is to
+route the swap's successful transition through
+`RelaisModelProvisioner.remember(context, path, persistForId = id)`, citing `remember`'s own `:422`
+comment that it is "the ONE funnel". **That does nothing on this path.** `remember` persists only
+when `shouldPersistPath(provisionedForId, currentId)` holds — `:380-381`,
+`provisionedForId == null || provisionedForId == currentId` — and it reads
+`currentId = RelaisConfig.modelId(context)` at `:419`. The swap thread runs **before**
+`applyManualId` writes the new id, so `currentId` is still A while `persistForId` is B. Mismatch, no
+persist. `cachedPath` (assigned unconditionally at `:416`) *would* update, so **the idle-reload
+symptom disappears while the restart symptom silently survives** — a fix that makes the bug harder to
+find than leaving it alone.
+
+**The real constraint:** the id and the path must become durable in the same ordering relation to the
+dispatch. The fix is a decision about *where that pairing lives*, not a second write next to the
+existing one. And `shouldPersistPath`'s drift guard exists for issue #11 (operator changes model
+mid-download) — it is doing its job here and must not be defeated by passing `persistForId = null`.
+
+**Why this is new in PR-B, though the swap is #180's.** The #180 per-request swap has the identical
+path-not-updated behavior and is safe anyway, because it **never persists the id**: config and the
+persisted path stay consistent (both A) and the divergence dies with the process. PR-B is the first
+caller that makes the operator's choice durable, and persisting the id without the path is what makes
+the pair incoherent across a restart. This is the executor's own rule from `RelaisHttpPages.kt:61-65`
+— *"The precedent is right; this destination does not preserve what made it safe"* — which it wrote
+about the resident-check short-circuit and then missed one call lower, at the persist.
+
+---
+
+#### [P2] The compatibility branch in `handleSelectModel` is unreachable
+
+`RelaisHttpServer.kt:460-465` · `RelaisHttpPages.kt:84-97` · `RelaisHttpPages.kt:222-227`
+
+`available = availableModelIdsFor(onDisk, configured, ::incompatibleReason)`, and that function is
+`(provisionedIds + configured).filter { incompatibleReason(it) == null }.sorted()` — **the filter
+covers the configured id too**. So `available` can never contain an incompatible id, and step 1's
+`validateModelChoice` rejects every one with *"unknown model id — no change applied"*. Step 2 is dead
+code, and its own comment asserts the opposite ("a page rendered before a model became known-bad can
+still POST it").
+
+Operator impact: selecting a provisioned-but-incompatible model reports the file as unknown instead
+of naming the runtime reason it cannot load.
+
+**Fix direction:** validate membership against the UNFILTERED provisioned ids + configured id, then
+apply the compatibility check. Keep the filter for the rendered dropdown only.
+
+---
+
+#### What this says about the 17/17 mutation table
+
+Every mutant killed, and neither defect was caught. **Mutation coverage measures the assertions you
+wrote, not the branches those assertions can reach.** P2 lives in a branch nothing reaches; P1 needs
+a reload after an unload, which no JVM test can observe. Both sat under a green three-flavor lane,
+4047 passing tests, and eight rounds of plan review.
+
+### What PR-B closes, and what it changes on the wire
+
+- **#313** (mDNS TXT `model=` goes stale after every #180 hot-swap) — closed by this diff. New pure
+  `advertisedModelId(resident, configured)` in `RelaisDiscovery.kt` publishes **what the engine is
+  serving**, falling back to configuration; `RelaisEngine.ensureModelSwapInBackground` now calls
+  `RelaisDiscovery.updateModel` on a *successful* transition only. `updateModel` had **no callers at
+  all** before this, and its KDoc claimed a switch "currently requires a process restart … so the TXT
+  is always fresh" — false since #180. The doc is corrected in place, old claim quoted and struck.
+- **`ensureModelSwapInBackground` now returns `Boolean`** — `true` iff *this* call won the
+  `swapDispatching` CAS and started a thread, **not** that the swap succeeded. Callers that persist an
+  operator's choice must dispatch FIRST and persist only on `true`; the CAS is the only atomic arbiter,
+  so check-then-act on any other flag races it. A `false` is the caller's cue to answer "busy, retry".
+  This return value is the distilled output of three separate review rounds — do not simplify it away.
+- First **browser form** in the codebase (`POST /select-model`), so the dashboard CSP gains
+  `form-action 'self'` (it does **not** inherit from `default-src`) and the dashboard's
+  `Referrer-Policy` narrows off `no-referrer`. `/experiments` keeps `form-action 'none'` — leave it.
+
+### Next actions, in order
+
+1. **Re-run `/codex review --base f15dc74d`** once the quota resets (1:40 PM). The first attempt
+   exited 1 on a usage limit and reviewed nothing — that is a fail-closed gate result, not a pass.
+2. **Run both probes on rango**, plus manual check 10 (real swap → `dumpsys nsd` → cleared logcat)
+   **and the new manual check 11** (swap A→B, then force BOTH an idle unload and a restart — they
+   fail independently — and confirm the served model is actually B). Check 11 is the only cover P1
+   has, by measurement: the defect passes 1355 JVM tests.
+3. PR → merge. Then step 5 of the implementation order below.
+
+**Model note for the next codex run:** the default `gpt-6-astra` works on **CLI 0.154.0**
+(`_gstack_codex_model_probe` → `MODEL_OK`). The `gpt-5.6-terra` workaround in older notes was for the
+0.151.0 400 and is no longer needed — but probe rather than assume, which is how this was found.
+
+### Filed this session, still open
+
+| # | |
+|---|---|
+| #320 | bind dual-stack AND restore IPv6 SANs — one change, not two |
+| #321 | restore the boot-race LAN rebind (feature-18 T5b), cut from PR-A |
+| #322 | liveness signals should be one immutable snapshot, not separate volatile fields |
+| #324 | a failed TLS handshake is recorded as a 500, and auto-refresh floods the log with them |
+
+**#311** (`GET /experiments` 401s on plain browser navigation) is still open but #323 almost certainly
+resolved it incidentally — Basic auth made the page reachable. Verify and close, or say why not.
+
+### Remaining implementation order after PR-B
+
+step 5 = #22 idle-unload · step 6 = #17 Ollama compat · step 7 = #19 power metrics · step 8 = #21 Home
+Assistant. BouncyCastle 1.78.1 → 1.85 is sequenced after the R8 baseline and needs an on-device
+*inference* check, not just a build (CI runs no R8, so it catches none of this).
+
+### The transferable finding — where prose review stops paying
+
+Eight rounds, 29 findings, and the curve flattened exactly the way PR-A's six rounds did. The
+executor's own account of why is the useful part:
+
+> My decline was cheap to get right because the mechanism was three greps deep and entirely local.
+> The findings that were hardest for both of us needed two threads or a rendered mockup — resolutions
+> neither of us reaches by reading one function.
+
+**Local mechanisms are cheap to verify by reading and expensive to get wrong by guessing. Cross-thread
+interleavings and re-wrapped text in diagrams are the opposite** — and those are precisely what a
+compiler, a test run and a device answer in seconds. Eight rounds approximating that is the honest
+cost. It bought real defects (the CAS return value above is one), and it is also the argument for
+stopping at round 8 rather than round 12.
+
+Also earned, and already in agent memory: a reviewer's finding gets re-derived like anyone else's.
+Round 7's P1 claimed `recordRequest` re-normalizes through a second `endpointLabel`; the executor
+traced it, found `RelaisMetrics.kt:147` stores the label as handed, and **declined**. Applying it
+would have added dead code contradicting that function's documented cardinality-guard invariant. I
+had relayed that finding as verified after running a `sed` whose output contained the falsifying fact.
+
+**And the same failure recurred inside this very section, an hour later.** The first version of it
+described a dirty working tree with "zero implementation committed" — written from a `git status` taken
+several tool calls earlier. By commit time the executor had landed all four commits, and my own
+`git add && git status && git commit` printed `M .claude/HANDOFF.md` **and nothing else**: a clean
+tree, the fact that falsified the section I was committing, rendered in the same output as the commit.
+I read that line as *"my file is staged"* rather than *"everything else is gone from this list."*
+
+> **A snapshot of a tree another agent is writing to expires between the survey and the commit.**
+> Re-read the state in the same breath as the write, and when a status listing is *shorter* than you
+> expected, that absence is the finding. Confirmation-shaped reading doesn't announce itself — both
+> times the disproof was already on screen, and both times it looked like the thing I came to see.
+
+---
+
+## 2026-09-12 (earlier) — feature-09 PR-A implemented on `feat/dashboard-auth-refresh`. (superseded above — it was pushed, reviewed and MERGED as #323 / `62050b83`; `BasicAuthGateProbe.kt`, called out below as never run, has since been run on rango and passed.)
 
 Branch `feat/dashboard-auth-refresh`, based on `cf316146` (#318). Tasks 1-3 of
 `.claude/PRPs/plans/feature-09-web-dashboard.plan.md` (= PR-A). PR-B (Tasks 4-10, the model selector)
@@ -143,8 +463,8 @@ step says so.
 | 1 | ✅ **DONE** — merged `61008dd8` (#316). `feat(metrics): TTFT + decode-start latency` — **#20 B0 + B1-A** | B0 (static gate, needs `:app:assembleFullOpenDebug` once to grep the AAR), B1-A1–A4 | — | rango: B1-A4 measures the `convStartNs`→`sendStartNs` gap and writes it to `docs/litertlm-native-api.md` | Smallest diff, touches the `RelaisEngine.kt:663-706` seam and the response objects that #17 and #19 both edit — landing first means they rebase onto one stable shape |
 | 2a | ✅ **DONE** — merged `5b1d8407` (#317). Shipped `RelaisHttpGate.decide` with **four** suppliers, not the three the plan described: `exemptRateLimitOk` was added, and `Reject` gained `EXEMPT_RATE_LIMITED`. Step 3 must build on that shape, not the plan's. `fix(security): extract HTTP gate` — **#18 T2 only** | T2 (`RelaisHttpGate.decide` + `RelaisHttpGateTest`, SECURITY.md Δ7 wording) | **Q2** exempt-route rate-limit budget; accept unmetered failed-auth or file follow-up | comet smoke: `/health`, a 401, a 429 | Closes bug 2. Ships alone because #09 and every later HTTP change assume the new `authorized()` shape |
 | 2b | ✅ **DONE** — merged `cf316146` (#318), 35 commits, 21 codex rounds. Q5 REVERSED (NameConstraints dropped), `relais-node.local` dropped from the SAN set (`NsdServiceInfo` has no `setHostname()`), and a **pre-existing** LIVE-while-unreachable defect fixed across four surfaces — found by the partial-listener hardware check on its first ever run, after 20 review rounds found nothing there. Follow-ups #320/#321/#322. QR trust (T7) did **not** ship — it is PR-B, still blocked on the QR/zxing decisions. `feat(tls): per-node CA + SAN leaf + QR trust` — **#18 rest** | T1, T3–T12 | **Q5** NameConstraints, **Q8** RFC1918 SAN opt-out | rango: `CertTrustProbe` (conscrypt accepts EC-CA-signed RSA leaf — plan is gated on it), boot-before-DHCP re-mint, then a **release-build inference check** (BouncyCastle may need R8 keep rules — [[relais-r8-minification-ci-blindspot]]) | 43 files, the biggest step. Must precede #09 because #09 edits `authorized()`/`recordRequest` on top of T2 and #18 mirrors `handleDashboard` lines #09 no longer moves |
-| 3 | 🔄 **PR #323 OPEN** — code complete, CI running, **merge gated on two hardware checks** that need an unlocked rango: the key-gated matrix (valid Basic + cross-site → 403, Basic + same-origin → 200, Bearer + cross-site → 200, the dashboard HTML, and bare-key rejection — which is *vacuous without a real key*, since a wrong bare key 401s either way) and the browser meta-refresh check. Four hardware checks already PASS on a release-signed R8 build, including the two no JVM test can reach: the conditional HTML-401 `WWW-Authenticate` challenge (present with `Accept: text/html`, absent without) and auth-before-CSRF (unauthenticated cross-site POST → **401, not 403**). Six plan-review rounds preceded any code — 26 findings, P1s per round many→3→2→1→1→0. `feat(dashboard): Basic auth, auto-refresh, log hygiene` — **#09 PR-A** | **tasks 1–3** (corrected 2026-09-12; this cell read "tasks 2–6", which predated the renumbering when the plan's *original* Task 1 — handler extraction — was cut. The plan itself is authoritative at its `:371`: "PR-A = Tasks 1-3. PR-B = Tasks 4-10." The step *title* was always right: log hygiene = T1, auto-refresh = T2, Basic auth = T3. Following the old numbers would have built the model selector into PR-A and skipped the log hygiene this step is named for.) | — | comet browser check: first address-bar visit (`Sec-Fetch-Site: none`) allowed, meta-refresh reload allowed, cross-site POST 403 | Closes bug 1 (`/experiments` 401). Gate-wide `Sec-Fetch-Site` guard depends on 2a's `AuthScheme?` |
-| 4 | `feat(dashboard): model selector` — **#09 PR-B** | **tasks 4–10** (corrected 2026-09-12, same renumbering as step 3) | amend `docs/dashboard-copy.md:95` (hot-swap, not restart) and §1.4 L93 (lexicographic order — catalog order is a blocking fetch) | rango: select a known-incompatible model → refused; double-submit during swap → second is a no-op *before* persist; swap smoke | Touches the swap path — fold **bug 6** (`RelaisDiscovery.updateModel` re-register after swap) in here, it is the same call site |
+| 3 | ✅ **DONE** — merged `62050b83` (#323), 17 commits. Six plan-review rounds ran **before any code** (26 findings; P1s per round many→3→2→1→1→0), then two codex passes and a critic pass on the diff. Fully hardware-verified: 11/11 key-gated wire checks, cross-site GET → 403 with same-origin GET → 200 as control, and a real browser confirming the credential prompt appears and the 10s refresh does not 403 the page. **Three traps worth carrying into step 4.** (1) `adb shell am start -a VIEW` is **not** a substitute for a user navigating — an externally-initiated navigation is labelled `cross-site` by Chrome, which produced a reproducible 403 that looked exactly like a real defect; a typed address-bar navigation sends `none` and works. (2) A **default parameter value is an untested constant** — the 14-row authority table ran every row at its helper's default `POST`, so hoisting a GET short-circuit would have deleted cross-site-GET protection with the suite green. (3) A **mutation that never applied reports SURVIVED**, which reads as "your test is vacuous"; assert the file actually changed before trusting the result. Follow-ups: **#322** (single immutable liveness snapshot), **#324** (failed TLS handshakes counted as 500s — this one *re-fills the request log that step 3's log-hygiene change exists to protect*, so it matters more than its severity suggests). `feat(dashboard): Basic auth, auto-refresh, log hygiene` — **#09 PR-A** | **tasks 1–3** (corrected 2026-09-12; this cell read "tasks 2–6", which predated the renumbering when the plan's *original* Task 1 — handler extraction — was cut. The plan itself is authoritative at its `:371`: "PR-A = Tasks 1-3. PR-B = Tasks 4-10." The step *title* was always right: log hygiene = T1, auto-refresh = T2, Basic auth = T3. Following the old numbers would have built the model selector into PR-A and skipped the log hygiene this step is named for.) | — | comet browser check: first address-bar visit (`Sec-Fetch-Site: none`) allowed, meta-refresh reload allowed, cross-site POST 403 | Closes bug 1 (`/experiments` 401). Gate-wide `Sec-Fetch-Site` guard depends on 2a's `AuthScheme?` |
+| 4 | `feat(dashboard): model selector` — **#09 PR-B** | **tasks 4–10** (corrected 2026-09-12, same renumbering as step 3) | amend `docs/dashboard-copy.md:95` (hot-swap, not restart) and §1.4 L93 (lexicographic order — catalog order is a blocking fetch) | rango: select a known-incompatible model → refused; double-submit during swap → second is a no-op *before* persist; swap smoke; **`dumpsys nsd` before/after a swap for bug 6, watching for an NSD unregister/re-register race** | Touches the swap path — fold **bug 6** (`RelaisDiscovery.updateModel` re-register after swap) in here. **Correction (2026-09-12, PR-B plan review): ~~it is the same call site~~ — it is NOT.** `handleSelectModel` dispatches the swap *before* it persists, so at dispatch time `RelaisConfig.modelId(context)` still returns the OLD id — and `updateModel` → `register` → `buildServiceInfo` reads live config (`RelaisDiscovery.kt:57`), so calling it there re-publishes the model already advertised. Calling it after the persist advertises the new id while the engine is still serving the old one. **The site is the swap thread in `RelaisEngine.kt`, right after the `synchronized(lock)` block closes at `:490`** — and *not* the `finally` at `:493-495`, which also runs on the file-missing `return@thread`. Full reasoning, the rollback-path residual, and the port-defaults/NSD-race traps are in the plan's **Task 7**, which now carries it (not a "Task 4b" — the edit is inside `ensureModelSwapInBackground`, which Task 7 already changes). `updateModel` has **zero** callers today and its KDoc at `:100-109` still claims a switch needs a process restart; both are part of this step |
 | 5 | `feat(engine): idle-unload gaps` — **#22** | tasks 1–3, 5–8 (4 is cut) | **stepper ladder** (1/5/15/30/60 vs floor→5); **audio transcriptions** bounded-hold or 503 (needs an on-device number — measure it in this step's probe first); whether **gap 6** gets its own plan | rango: `IdleUnloadProbe` incl. forced reload failure → `/health` reads ERROR not IDLE | Rebases on 3/4 (`assembleDashboardStatus`) and 2a/2b (`handleHealth`). Adds `NodeState.IDLE` that #23 keys on |
 | 6 | `feat(api): Ollama-compatible /api/*` — **#17** | tasks 1–12 | **Q6** single-object framing on `format`+`stream:false`; **bug 3** `/v1/models` provisioned-only (affects `/api/tags` parity) | desktop: real `ollama serve` for Task 10's four wire-field checks (`stream` default is *undocumented* — prove it empirically first); comet: `OllamaCompatProbe`, thermal 503 through the Ollama envelope | Rebases on 1 (response objects) and 3 (sole owner of `RequestContext` widening). Largest test count (30) |
 | 7 | `feat(metrics): battery/power/energy` — **#19** | A1–A11 | — | **on battery, unplugged**: A7 perfetto cross-check gates A11's README figure; plugged-in nodes must show `_valid=0` and no per-1k gauge | Closes bug 4. Rebases on 1 (`:706` seam, `resetIncrementsForTest`) and 5 (metrics adjacency). Last engine-touching step |

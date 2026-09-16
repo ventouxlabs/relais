@@ -31,11 +31,101 @@ import org.junit.Test
  * test the pure source of the TXT attributes — [RelaisClientConfig.buildDiscoveryTxt] — which is the
  * exact map [RelaisDiscovery.register]/`updateModel` iterate into `setAttribute(...)`. This pins the
  * secret-leakage invariant and the worst-case length cap at the boundary that actually produces the
- * broadcast values.
+ * broadcast values. Note that `buildDiscoveryTxt` takes the model id as a PARAMETER, so these tests
+ * are unaffected by where its caller sources that id — which [advertisedModelId] below now decides.
  */
 class RelaisDiscoveryTxtTest {
 
   private val sentinelKey = "SENTINEL_SECRET_abc123def456_DO_NOT_LEAK"
+
+  // ---------------------------------------------------------------------------
+  // NSD lifecycle: listener ownership is callback-driven (feature-09 bug 6)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  fun `refresh waits for service-unregistered before registering a replacement`() {
+    val refresh = DiscoveryLifecycle(ownsListener = true).requestRefresh()
+
+    assertEquals(DiscoveryAction.UNREGISTER, refresh.action)
+    assertTrue(refresh.state.ownsListener)
+    assertTrue(refresh.state.unregistering)
+    assertTrue(refresh.state.pendingRegistration)
+
+    val replacement = refresh.state.serviceUnregistered()
+    assertEquals(DiscoveryAction.REGISTER, replacement.action)
+    assertTrue(replacement.state.ownsListener)
+    assertFalse(replacement.state.pendingRegistration)
+  }
+
+  @Test
+  fun `stop cancels a queued refresh so unregistration cannot revive discovery`() {
+    val refreshing = DiscoveryLifecycle(ownsListener = true).requestRefresh().state
+    val stopped = refreshing.requestStop()
+
+    assertEquals(DiscoveryAction.NONE, stopped.action)
+    assertTrue(stopped.state.ownsListener)
+    assertTrue(stopped.state.unregistering)
+    assertFalse(stopped.state.pendingRegistration)
+
+    assertEquals(DiscoveryAction.NONE, stopped.state.serviceUnregistered().action)
+  }
+
+  @Test
+  fun `explicit register while stopping queues replacement after the old listener retires`() {
+    val stopping = DiscoveryLifecycle(ownsListener = true).requestStop().state
+    val restarting = stopping.requestRegistration()
+
+    assertEquals(DiscoveryAction.NONE, restarting.action)
+    assertTrue(restarting.state.pendingRegistration)
+    assertEquals(DiscoveryAction.REGISTER, restarting.state.serviceUnregistered().action)
+  }
+
+  @Test
+  fun `unregistration failure keeps ownership and queued refresh for a later retry`() {
+    val refreshing = DiscoveryLifecycle(ownsListener = true).requestRefresh().state
+    val failed = refreshing.unregistrationFailed()
+
+    assertTrue(failed.ownsListener)
+    assertFalse(failed.unregistering)
+    assertTrue(failed.pendingRegistration)
+    assertEquals(DiscoveryAction.UNREGISTER, failed.requestRefresh().action)
+  }
+
+  @Test
+  fun `registration failure releases only the failed registration ownership`() {
+    val registering = DiscoveryLifecycle().requestRegistration().state
+    val failed = registering.registrationFailed()
+
+    assertFalse(failed.ownsListener)
+    assertFalse(failed.unregistering)
+    assertFalse(failed.pendingRegistration)
+    assertEquals(DiscoveryAction.REGISTER, failed.requestRegistration().action)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Which id gets advertised: reality before intent (feature-09 bug 6)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  fun `advertised id is the RESIDENT model, not the configured one`() {
+    // A discovery record answers "what will this node serve me". Sourcing it from configuration
+    // alone advertises a model the engine is not running for the whole duration of a swap — and
+    // makes the published value depend on whether the caller's persist won a race against the swap
+    // thread, which is the defect this ordering removes rather than mitigates.
+    assertEquals("resident-model", advertisedModelId(resident = "resident-model", configured = "configured-model"))
+  }
+
+  @Test
+  fun `advertised id falls back to configured only before any successful init`() {
+    // At boot RelaisNodeService initialises the engine BEFORE it registers, so this fallback is for
+    // a node whose init never ran or failed — where the configured id is the only answer available.
+    assertEquals("configured-model", advertisedModelId(resident = null, configured = "configured-model"))
+  }
+
+  @Test
+  fun `advertised id is stable when config and engine agree`() {
+    assertEquals("same", advertisedModelId(resident = "same", configured = "same"))
+  }
 
   @Test
   fun `txt attribute keys are exactly the advertised routing set`() {

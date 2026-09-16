@@ -18,6 +18,9 @@
 
 package cc.grepon.relais
 
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
+
 /**
  * One row in the bounded recent-request log.
  *
@@ -58,6 +61,25 @@ data class DashboardStatus(
    * Public certificate material only; see [RelaisCertInfo].
    */
   val cert: RelaisCertInfo? = null,
+  /**
+   * Model ids offered by the switch form, already filtered and ordered — see [availableModelIdsFor].
+   * EMPTY means render no form at all (not an empty dropdown): a node with nothing to switch to
+   * should not show a control that cannot do anything.
+   */
+  val availableModelIds: List<String> = emptyList(),
+  /**
+   * True while the node is starting, which disables both form controls. Must be derived from the
+   * SAME `startupInProgress` read that produced [statusLabel] — two reads can straddle a swap and
+   * render `LIVE` beside a disabled form.
+   */
+  val switchLocked: Boolean = false,
+  /**
+   * The configured model id when it differs from the resident one, else null — see [pendingModelIdFor].
+   * Non-null means config is ahead of the engine: a swap is running, or one ran and did not take
+   * effect. The page cannot tell those apart, which is why the hint it renders states the fact and
+   * predicts nothing.
+   */
+  val pendingModelId: String? = null,
 )
 
 /**
@@ -97,6 +119,12 @@ fun assembleDashboardStatus(
   capabilities: String,
   /** The node's certificate identity (feature-18), or null before the node has ever minted. */
   cert: RelaisCertInfo? = null,
+  /** Model ids the switch form offers; empty renders no form. See [availableModelIdsFor]. */
+  availableModelIds: List<String> = emptyList(),
+  /** Disables both form controls. Pass the SAME [startupInProgress] value this call received. */
+  switchLocked: Boolean = false,
+  /** Configured id when it differs from the resident one. See [pendingModelIdFor]. */
+  pendingModelId: String? = null,
 ): DashboardStatus {
   // [engineReady] answers "did the model load?"; only [listenersUp] answers "can anyone reach this
   // node?". A bind failure leaves the engine deliberately resident with both listeners torn down, so
@@ -124,8 +152,60 @@ fun assembleDashboardStatus(
     apiKeyMasked = apiKeyMasked,
     capabilities = capabilities,
     cert = cert,
+    availableModelIds = availableModelIds,
+    switchLocked = switchLocked,
+    pendingModelId = pendingModelId,
   )
 }
+
+/** Maximum form fields the dashboard's single-field POST will inspect. */
+internal const val MAX_FORM_FIELDS = 64
+
+/**
+ * Parses one field out of an `application/x-www-form-urlencoded` body.
+ *
+ * Separates fields on `&`, then on the FIRST `=` only, so a value containing `=` survives intact. Both halves
+ * are URL-decoded. Returns null when the key is absent or when either half is malformed — a bad `%`
+ * escape makes [java.net.URLDecoder.decode] throw, and a form parser must answer "no" rather than
+ * propagate that into the request path.
+ *
+ * Bounded: the body is already capped by [MAX_BODY_BYTES] at the gate, and this parser examines at
+ * most [MAX_FORM_FIELDS] fields. It scans rather than splitting the whole body, so a body full of
+ * `&` cannot allocate one string per empty field. The first `=` in each field remains the separator,
+ * so values containing `=` retain normal form semantics.
+ *
+ * Pure and Context-free; unit-tested on the JVM ([RelaisDashboardTest]).
+ */
+internal fun parseFormField(body: String, key: String): String? {
+  var fieldStart = 0
+  repeat(MAX_FORM_FIELDS) {
+    val fieldEnd = body.indexOf('&', fieldStart).let { if (it < 0) body.length else it }
+    val separator = body.indexOf('=', fieldStart)
+    if (separator in fieldStart until fieldEnd) {
+      val name =
+        runCatching { URLDecoder.decode(body.substring(fieldStart, separator), StandardCharsets.UTF_8.name()) }
+          .getOrNull()
+      if (name == key) {
+        return runCatching {
+          URLDecoder.decode(body.substring(separator + 1, fieldEnd), StandardCharsets.UTF_8.name())
+        }.getOrNull()
+      }
+    }
+    if (fieldEnd == body.length) return null
+    fieldStart = fieldEnd + 1
+  }
+  return null
+}
+
+/**
+ * Returns [requested] iff it is one of [available], else null.
+ *
+ * The dropdown is client-supplied input: a page rendered before a model was removed or became
+ * known-incompatible can still POST that id, so membership is re-checked server-side rather than
+ * trusted from the form. Pure and Context-free; unit-tested on the JVM.
+ */
+internal fun validateModelChoice(requested: String?, available: List<String>): String? =
+  requested?.takeIf { it in available }
 
 /**
  * Maps Android [android.os.PowerManager] THERMAL_STATUS_* integers (0..6) to human labels.
@@ -172,8 +252,9 @@ fun escapeHtml(text: String): String =
  *  - Dark-only, label-left / value-right rows on hairline dividers
  *  - Status dot pulses (CSS @keyframes) only when LIVE — pure CSS, no JS
  *  - SCRIPTLESS — the page contains no <script> tags; CSP script-src 'none' is enforced by
- *    the HTTP layer via extraHeaders on the GET / response
- *  - READ-ONLY — no model-switch form or /select-model action (deferred to a separate PR)
+ *    the HTTP layer via extraHeaders on the GET / response. The model-switch form is a plain
+ *    POST precisely so this stays true: it needs no JS, and `form-action 'self'` on the same
+ *    response is what bounds where it may submit.
  *  - All dynamic values are HTML-escaped via [escapeHtml] before interpolation
  */
 fun renderDashboardHtml(status: DashboardStatus): String {
@@ -262,6 +343,57 @@ fun renderDashboardHtml(status: DashboardStatus): String {
   </table>
 </div>
 """
+    } ?: ""
+
+  // Model-switch form. Omitted wholesale when there is nothing to offer — an empty <select> with a
+  // live SET MODEL button is a control that cannot do anything, which reads as broken rather than
+  // as "no other models provisioned".
+  //
+  // Every id goes through escapeHtml INCLUDING inside value="…": that is attribute context, and a
+  // registry id is the one value on this page that a download could have influenced.
+  val switchRows =
+    if (status.availableModelIds.isEmpty()) "" else {
+      val disabled = if (status.switchLocked) " disabled" else ""
+      val lockedStyle = if (status.switchLocked) " opacity:0.5;" else ""
+      val options = buildString {
+        for (id in status.availableModelIds) {
+          // `selected` marks the CONFIGURED id, not the resident one: the dropdown shows what the
+          // operator has chosen, and the pending hint below says when the engine has not caught up.
+          val sel = if (id == status.currentModelId) " selected" else ""
+          append("""<option value="${escapeHtml(id)}"$sel>${escapeHtml(id)}</option>""")
+        }
+      }
+      val lockNote =
+        if (!status.switchLocked) "" else {
+          """
+    <tr>
+      <td class="label" colspan="2" style="color:#8A8780;font-size:11px">${escapeHtml("model locked while starting")}</td>
+    </tr>"""
+        }
+      """
+    <tr>
+      <td class="label">switch model</td>
+      <td class="value">
+        <form method="POST" action="/select-model" style="display:flex;gap:8px;justify-content:flex-end;align-items:center;$lockedStyle">
+          <select name="model" id="model"$disabled style="background:#0B0B0D;color:#EDEAE3;border:1px solid #2A2B30;border-radius:6px;padding:6px 8px;font-family:monospace;font-size:12px">$options</select>
+          <button type="submit"$disabled style="background:#FFB000;color:#0B0B0D;border:none;border-radius:6px;padding:7px 12px;font-family:monospace;font-size:11px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;cursor:pointer">SET MODEL</button>
+        </form>
+      </td>
+    </tr>$lockNote"""
+    }
+
+  // Pending hint. Rendered whenever config is ahead of the engine — which happens both while a swap
+  // is running AND after one that bailed or rolled back. The page has no swap-liveness signal to
+  // tell those apart, so the copy states the fact and predicts nothing: an operator who sees this
+  // persist has a real problem, and a "node restarts itself" reassurance would be false exactly then.
+  val pendingRow =
+    status.pendingModelId?.let { pending ->
+      """
+    <tr>
+      <td class="label" colspan="2" style="color:#8A8780;font-size:11px">${escapeHtml(
+        "model set: $pending — not serving it yet",
+      )}</td>
+    </tr>"""
     } ?: ""
 
   val recentRows = buildString {
@@ -376,7 +508,7 @@ tr:last-child td { border-bottom: none; }
     <tr>
       <td class="label">shed total</td>
       <td class="value ${if (status.shedTotal > 0L) "" else "muted"}">${status.shedTotal}</td>
-    </tr>
+    </tr>$switchRows$pendingRow
   </table>
 </div>
 

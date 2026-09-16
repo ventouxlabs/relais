@@ -464,6 +464,30 @@ class RelaisHttpServer(
 
           method == "GET" && path == "/" -> handleDashboard(ctx)
 
+          // The dashboard's model switch. Everything the handler needs is resolved HERE, at the
+          // call site, so the handler itself needs none of this class's private members:
+          //  - the body, via the private readBody
+          //  - both model lists, RE-DERIVED now rather than trusted from the submitting page
+          //  - a responder closing over the private respondText, which — unlike `reply` — does NOT
+          //    record a metric, so the recordRequest lives inside the lambda. One site, all four
+          //    response paths; otherwise the /select-model series would contain only the gate's 403s
+          //    and show the route failing 100% of the time while every success stayed invisible.
+          method == "POST" && path == "/select-model" -> {
+            // The registry and the configured id go in RAW. The handler derives what a POST may
+            // name via selectableModelIdsFor; passing the compat-FILTERED availableModelIdsFor here
+            // is what made the handler's compatibility branch unreachable, and the parameter that
+            // allowed it is gone.
+            handleSelectModel(
+              context = context,
+              body = readBody(reader, contentLength),
+              provisioned = provisionedOnDisk(),
+              configured = RelaisConfig.modelId(context),
+            ) { status, html, extraHeaders ->
+              RelaisMetrics.recordRequest(ctx.endpoint, status)
+              respondText(ctx.sock, status, html, "text/html; charset=utf-8", extraHeaders)
+            }
+          }
+
           method == "GET" && path == "/experiments" -> handleExperiments(ctx)
 
           method == "GET" && path.startsWith("/metrics") -> handleMetrics(ctx)
@@ -938,14 +962,20 @@ class RelaisHttpServer(
     RelaisMetrics.recordRequest(ctx.endpoint, 200, inRecentLog = false)
     val metricsJson = RelaisMetrics.renderJson(context)
     val dashCaps = RelaisClientConfig.Capabilities(multimodal = RelaisEngine.isMultimodal, tools = true, reasoning = true)
+    // SINGLE READ of each volatile the page derives two things from. `startupInProgress` feeds both
+    // statusLabel and switchLocked, and the configured id feeds three fields — reading either twice
+    // lets a swap land in between and render a self-contradicting page (LIVE beside a disabled form,
+    // or a dropdown whose `selected` id is not the one the hint names).
     val liveness = RelaisLivenessState.snapshot
+    val startingNow = liveness.startupInProgress
+    val configuredId = RelaisConfig.modelId(context)
     val dashStatus = assembleDashboardStatus(
       engineReady = RelaisEngine.isReady,
       listenersUp = liveness.listenersUp,
-      startupInProgress = liveness.startupInProgress,
+      startupInProgress = startingNow,
       thermalStatus = ThermalGovernor.statusValue,
       decodeTokensPerSec = metricsJson.optDouble("decode_tokens_per_second", 0.0),
-      currentModelId = RelaisConfig.modelId(context),
+      currentModelId = configuredId,
       uptimeSeconds = metricsJson.optDouble("uptime_seconds", 0.0),
       queueDepth = RelaisMetrics.queueDepth(),
       errorsTotal = metricsJson.optLong("errors_total", 0L),
@@ -958,16 +988,14 @@ class RelaisHttpServer(
       capabilities = dashCaps.toCapsString(),
       // Load-only (feature-18): rendering a status page must never mint key material.
       cert = RelaisTls.certInfoOrNull(context),
+      availableModelIds =
+        availableModelIdsFor(provisionedOnDisk(), configuredId, RelaisRuntimeCompat::incompatibleReason),
+      switchLocked = startingNow,
+      pendingModelId = pendingModelIdFor(configuredId, RelaisEngine.residentModelId),
     )
     respondText(
       ctx.sock, 200, renderDashboardHtml(dashStatus), "text/html; charset=utf-8",
-      listOf(
-        // Scriptless page — no script-src at all; default-src 'none' blocks everything else.
-        "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
-        "X-Content-Type-Options: nosniff",
-        "X-Frame-Options: DENY",
-        "Referrer-Policy: no-referrer",
-      ),
+      dashboardSecurityHeaders(),
     )
   }
 
@@ -2120,6 +2148,10 @@ class RelaisHttpServer(
       // Same predicate as the auth exemption and the dispatch branch — see [RelaisHttpGate.isCaCertPath].
       RelaisHttpGate.isCaCertPath(path) -> "/ca.crt"
       path == "/" -> "/"
+      // Exact match, like the `/` arm above it — ordering between the two is immaterial, but both
+      // must precede the startsWith arms. Without this the switch collapses to "other" and the
+      // dashboard's own route disappears from its own request log.
+      path == "/select-model" -> "/select-model"
       path.startsWith("/experiments") -> "/experiments"
       path.startsWith("/metrics") -> "/metrics"
       path.startsWith("/generate") -> "/generate"
@@ -2161,6 +2193,9 @@ class RelaisHttpServer(
   private fun reason(status: Int): String =
     when (status) {
       200 -> "OK"
+      // POST/Redirect/GET after the model switch. Added with the first 303 in this tree — a new
+      // status literal is not finished until reason() has an arm for it, or the wire reads "303 ERR".
+      303 -> "See Other"
       400 -> "Bad Request"
       401 -> "Unauthorized"
       403 -> "Forbidden"

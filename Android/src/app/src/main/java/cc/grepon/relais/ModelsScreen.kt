@@ -186,7 +186,9 @@ fun ModelsScreen() {
       onPickManualId = { id ->
         // Entering a raw id is an explicit "resolve this via the allowlist" intent; [ModelSwitch]
         // drops any curated ref first so the pinned ref can't keep overriding allowlist resolution.
-        ModelSwitch.applyManualId(ctx, id)
+        // resolvedPath = null: an explicit allowlist-resolution intent, so resolveModel runs and
+        // remembers the path itself. Nothing here bypasses resolution.
+        ModelSwitch.applyManualId(ctx, id, resolvedPath = null)
         modelRef = null
         modelId = id
         showSheet = false
