@@ -18,13 +18,22 @@
 
 package cc.grepon.relais
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.IBinder
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.work.WorkManager
+import cc.grepon.relais.data.RelaisModelRef
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -38,6 +47,17 @@ import org.junit.runner.RunWith
  *
  *   adb shell am instrument -w -e class cc.grepon.relais.DashboardSelectModelProbe \
  *     -e RELAIS_PROBE 1 com.ventouxlabs.relais.izzy.test/androidx.test.runner.AndroidJUnitRunner
+ *
+ * To drive a real node instead of this probe's loopback fixture, add
+ * `-e externalNode 1 -e retainNode 1 -e port 8080 -e targetModel <provisioned-id>` and select only
+ * `aValidSwitchAnswers303SeeOtherWithALocationHeader`. The probe starts and binds the node itself:
+ * instrumentation resets the target app before each invocation, so a separate held node cannot
+ * reliably survive until this test starts. `retainNode` retains a successfully swapped node only so
+ * a host can capture the mDNS callbacks in a separate logcat read; clean it up afterwards with
+ * `adb shell am instrument -w -e class cc.grepon.relais.DashboardSelectModelProbe#cleanupRetainedNode
+ * -e RELAIS_PROBE 1 -e cleanupRetainedNode 1 -e restoreShouldRun <prior-value> <test-runner>`.
+ * This opt-in mode also cancels only the queued model-download work for its configured fixture
+ * before startup, preventing an interrupted fixture provisioning job from resuming during the proof.
  *
  * ## What only hardware can answer here
  *
@@ -90,19 +110,49 @@ class DashboardSelectModelProbe {
 
   private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
   private val args = InstrumentationRegistry.getArguments()
-  private val port = 18096
+  private val port = args.getString("port")?.toIntOrNull() ?: 18096
+  private val externalNode = args.getString("externalNode") == "1"
+  private val retainNode = args.getString("retainNode") == "1"
   private var server: RelaisHttpServer? = null
+  private var nodeConnection: ServiceConnection? = null
+  private var nodeBound = false
+  private var nodeWasRunning = false
+  private var realSwapComplete = false
 
   @Before
   fun setUp() {
     assumeTrue("On-device probe; pass -e RELAIS_PROBE 1 to run", args.getString("RELAIS_PROBE") == "1")
-    server = RelaisHttpServer(context, port = port, tls = false, bindAddr = "127.0.0.1").also { it.start() }
-    Thread.sleep(300)
+    if (!externalNode) {
+      server = RelaisHttpServer(context, port = port, tls = false, bindAddr = "127.0.0.1").also { it.start() }
+      Thread.sleep(300)
+    } else {
+      WorkManager.getInstance(context).cancelUniqueWork(fixtureDownloadWorkName()).result.get(10, TimeUnit.SECONDS)
+      nodeWasRunning = RelaisConfig.shouldRun(context)
+      assumeTrue(
+        "model fixture missing at ${RelaisEngine.defaultModelPath(context)}",
+        File(RelaisEngine.defaultModelPath(context)).exists(),
+      )
+      val binder = startAndBindNode()
+      val deadline = System.currentTimeMillis() + 180_000
+      while (!binder.isReady && System.currentTimeMillis() < deadline) Thread.sleep(500)
+      assertTrue("real node engine did not become ready", binder.isReady)
+      assertTrue("real node listener did not open on :$port", waitForListener())
+    }
   }
 
   @After
   fun tearDown() {
-    server?.stop()
+    if (!externalNode) server?.stop()
+    if (nodeBound) nodeConnection?.let { context.unbindService(it) }
+    nodeBound = false
+    nodeConnection = null
+    if (externalNode && !(retainNode && realSwapComplete)) {
+      // This probe owns the node it starts. Avoid leaving a foreground service/watchdog enabled on
+      // a device that had the node off before the test, while restoring an operator's prior intent.
+      RelaisNodeService.stop(context)
+      if (nodeWasRunning) RelaisNodeService.start(context)
+      nodeWasRunning = false
+    }
     server = null
   }
 
@@ -145,32 +195,53 @@ class DashboardSelectModelProbe {
     )
   }
 
+  /** Clears a node retained for an external mDNS observation and restores its prior run intent. */
+  @Test
+  fun cleanupRetainedNode() {
+    assumeTrue("On-device probe; pass -e RELAIS_PROBE 1 to run", args.getString("RELAIS_PROBE") == "1")
+    assumeTrue("pass -e cleanupRetainedNode 1 to run cleanup", args.getString("cleanupRetainedNode") == "1")
+    val restoreShouldRun = args.getString("restoreShouldRun") == "1"
+    RelaisNodeService.stop(context)
+    if (restoreShouldRun) RelaisNodeService.start(context)
+    assertEquals("cleanup must restore the requested node-run intent", restoreShouldRun, RelaisConfig.shouldRun(context))
+  }
+
   @Test
   fun aValidSwitchAnswers303SeeOtherWithALocationHeader() {
-    // Uses the CONFIGURED model as the target: always eligible (the dropdown unions it in), and
-    // re-selecting it is the least disruptive thing this probe can ask a live node to do. The
-    // success route calls applyManualId, which deliberately clears a curated ref; do not let this
-    // wire-format probe erase an operator's ref merely to observe a 303. An id-only configuration
-    // has no ref to clear and is the supported fixture for this isolated success-path check.
+    // Fixture mode uses the configured model because it is the least disruptive isolated target.
+    // The success route calls applyManualId, which deliberately clears a curated ref; keep that
+    // fixture id-only so a wire-format check cannot erase an operator's ref. External mode is an
+    // explicit manual fixture and intentionally clears its staged A ref while persisting B.
     assumeTrue(
-      "run the 303 probe with an id-only model configuration; it must not clear a curated model ref",
-      RelaisConfig.modelRef(context) == null,
+      "fixture-mode 303 probe requires an id-only model configuration",
+      externalNode || RelaisConfig.modelRef(context) == null,
     )
-    val current = RelaisConfig.modelId(context)
-    val res = post("model=" + java.net.URLEncoder.encode(current, "UTF-8"))
-    // 503 is a legitimate outcome if a swap is already running — the CAS is the arbiter, and the
-    // probe must not pretend that is a failure.
-    assertTrue(
-      "expected 303 or 503 (swap busy), got: ${res.statusLine}",
-      res.statusLine.contains(" 303 ") || res.statusLine.contains(" 503 "),
-    )
-    if (res.statusLine.contains(" 303 ")) {
+    val target = args.getString("targetModel") ?: RelaisConfig.modelId(context)
+    val res = post("model=" + java.net.URLEncoder.encode(target, "UTF-8"))
+    val is303 = res.statusLine.contains(" 303 ")
+    if (externalNode) {
+      // This mode started a clean node and is a manual proof of a real handoff, not a contention
+      // probe. A 503 therefore proves nothing here and must fail rather than be accepted.
+      assertTrue("expected 303 from a clean real node, got: ${res.statusLine}", is303)
+    } else {
+      // Fixture mode is permitted to observe the single-flight busy response too.
+      assertTrue("expected 303 or 503 (swap busy), got: ${res.statusLine}", is303 || res.statusLine.contains(" 503 "))
+    }
+    if (is303) {
       assertTrue(
         "reason() must have a 303 arm or the wire reads \"303 ERR\" — it is private, so this " +
           "status line is the only place that is observable. Got: ${res.statusLine}",
         res.statusLine.contains("See Other"),
       )
       assertTrue("a 303 must carry Location: /", res.headers.lowercase().contains("location: /"))
+      if (externalNode) {
+        assertTrue("real node did not finish switching to $target", waitForResidentModel(target))
+        realSwapComplete = true
+        // The engine calls RelaisDiscovery.updateModel only after this transition. Give that async
+        // callback chain a brief head start; retainNode then preserves the clean log window for the
+        // caller's separate observation instead of adding teardown unregistration noise.
+        Thread.sleep(2_000)
+      }
     } else {
       assertTrue("a busy swap must tell the client when to retry", res.headers.contains("Retry-After"))
     }
@@ -186,6 +257,58 @@ class DashboardSelectModelProbe {
   }
 
   private data class HttpResult(val statusLine: String, val headers: String, val body: String)
+
+  private fun startAndBindNode(): RelaisNodeService.LocalBinder {
+    RelaisNodeService.start(context)
+    val latch = CountDownLatch(1)
+    var bound: RelaisNodeService.LocalBinder? = null
+    val conn =
+      object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+          bound = service as RelaisNodeService.LocalBinder
+          latch.countDown()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {}
+      }
+    val accepted = context.bindService(Intent(context, RelaisNodeService::class.java), conn, Context.BIND_AUTO_CREATE)
+    if (accepted) {
+      nodeConnection = conn
+      nodeBound = true
+    }
+    assertTrue("real node service refused bind", accepted)
+    assertTrue("real node service did not bind", latch.await(20, TimeUnit.SECONDS))
+    return bound!!
+  }
+
+  private fun waitForListener(): Boolean {
+    val deadline = System.currentTimeMillis() + 30_000
+    while (System.currentTimeMillis() < deadline) {
+      if (runCatching {
+          Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 1_000) }
+        }.isSuccess
+      ) return true
+      Thread.sleep(250)
+    }
+    return false
+  }
+
+  private fun waitForResidentModel(modelId: String): Boolean {
+    val deadline = System.currentTimeMillis() + 60_000
+    while (System.currentTimeMillis() < deadline) {
+      if (RelaisEngine.isReady && RelaisEngine.residentModelId == modelId) return true
+      Thread.sleep(500)
+    }
+    return false
+  }
+
+  /** Mirrors RelaisModelProvisioner's Model.name choice, which is its WorkManager unique-work key. */
+  private fun fixtureDownloadWorkName(): String {
+    val ref = requireNotNull(RelaisConfig.modelRef(context)) {
+      "external-node fixture requires a model ref to identify its provision work"
+    }
+    return if (ref.source == RelaisModelRef.SOURCE_HUGGINGFACE) ref.modelId else ref.displayName
+  }
 
   private fun request(raw: String): HttpResult {
     Socket().use { sock ->
