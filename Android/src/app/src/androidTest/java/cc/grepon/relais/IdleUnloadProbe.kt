@@ -118,6 +118,7 @@ class IdleUnloadProbe {
   private var nodeConnection: ServiceConnection? = null
   private var nodeBound = false
   private var nodeWasRunning = false
+  private var owned = false
 
   @Before
   fun setUp() {
@@ -126,29 +127,30 @@ class IdleUnloadProbe {
     assumeTrue("no staged model at $modelPath — provision one before running this probe", File(modelPath).exists())
 
     nodeWasRunning = RelaisConfig.shouldRun(context)
-    try {
-      val binder = startAndBindNode()
-      val readyDeadline = System.currentTimeMillis() + 180_000
-      while (!binder.isReady && System.currentTimeMillis() < readyDeadline) Thread.sleep(500)
-      assertTrue("node engine did not become ready within 180s", binder.isReady)
-      assertTrue("node http listener did not open on :8080", waitForListener())
-      // isReady flips before the service tears listeners down and rebinds (RelaisNodeService's
-      // init thread) — wait for the whole attempt to settle, not just the socket accepting.
-      awaitNodeSettled()
+    // @After always runs — even when @Before throws or skips via assumeTrue above (JUnit's
+    // RunAfters wraps RunBefores in a finally) — so ownership, not a try/catch here, is what gates
+    // tearDown() into actually touching the node: only from this point on has this probe started
+    // mutating the node's run state that tearDown() must undo.
+    owned = true
+    val binder = startAndBindNode()
+    val readyDeadline = System.currentTimeMillis() + 180_000
+    while (!binder.isReady && System.currentTimeMillis() < readyDeadline) Thread.sleep(500)
+    assertTrue("node engine did not become ready within 180s", binder.isReady)
+    assertTrue("node http listener did not open on :8080", waitForListener())
+    // isReady flips before the service tears listeners down and rebinds (RelaisNodeService's
+    // init thread) — wait for the whole attempt to settle, not just the socket accepting.
+    awaitNodeSettled()
 
-      // See the class KDoc "Watchdog ownership" section: take exclusive control of watchdog timing.
-      RelaisWatchdog.cancel(context)
-    } catch (t: Throwable) {
-      // JUnit skips @After when @Before throws — restore node-off/default-TTL ourselves so a
-      // readiness/settle timeout doesn't leave rango running with shouldRun=true against the
-      // operator's prior intent.
-      tearDown()
-      throw t
-    }
+    // See the class KDoc "Watchdog ownership" section: take exclusive control of watchdog timing.
+    RelaisWatchdog.cancel(context)
   }
 
   @After
   fun tearDown() {
+    // JUnit runs @After unconditionally, including when setUp() skipped via assumeTrue or threw
+    // before taking ownership — in either case there is nothing to undo, and touching the node here
+    // would mean this probe stops (or leaves off) a node it never started.
+    if (!owned) return
     if (nodeBound) nodeConnection?.let { context.unbindService(it) }
     nodeBound = false
     nodeConnection = null
@@ -159,6 +161,7 @@ class IdleUnloadProbe {
     if (nodeWasRunning) RelaisNodeService.start(context)
     RelaisEngine.lastInitFailed = false
     nodeWasRunning = false
+    owned = false
   }
 
   @Test

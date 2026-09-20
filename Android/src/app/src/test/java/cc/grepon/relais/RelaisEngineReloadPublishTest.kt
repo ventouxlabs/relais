@@ -14,7 +14,10 @@
 package cc.grepon.relais
 
 import android.content.ContextWrapper
+import android.content.SharedPreferences
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -113,16 +116,39 @@ class RelaisEngineReloadPublishTest {
 
   private class ProbeStop : RuntimeException("probe: stop the attempt here")
 
+  /**
+   * `ensureInitializedInBackground` publishes `startupInProgress` on the CALLER before the spawned
+   * thread exists — but with no staged model the thread's own `ensureInitialized` fails fast at
+   * `require(File(modelPath).exists())`, and a fast-enough worker can run its own begin/end pair
+   * PLUS the outer thread's `finally` (which ends the caller-side begin too) before this test's next
+   * line reads the snapshot back — a genuine scheduling race, not a hypothetical one. Pin it
+   * deterministically by holding the worker at the first `Context` call `ensureInitialized`'s
+   * default arguments make (`RelaisModelProvisioner.cachedPathOrDefault` / `RelaisConfig.modelId`
+   * both resolve through `RelaisConfig`'s private `prefs(context)`, i.e. `getSharedPreferences` —
+   * whichever of the two resolves first, that is always the first Context touch) — well before the
+   * worker can even enter `ensureInitialized`'s body, let alone its own begin/end pair.
+   */
   @Test fun `the background reload publishes STARTING on the caller before returning`() {
     RelaisLivenessState.publishIdleUnloaded(true)
 
-    RelaisEngine.ensureInitializedInBackground(ctx)
+    val releaseLatch = CountDownLatch(1)
+    val probing = object : ContextWrapper(ctx) {
+      override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
+        releaseLatch.await(5, TimeUnit.SECONDS) // bounded: a stuck release must not hang the suite
+        return super.getSharedPreferences(name, mode)
+      }
+    }
+
+    RelaisEngine.ensureInitializedInBackground(probing)
 
     // Observed on the CALLER, immediately: a kick-then-wait caller (ModelSwitch.awaitReload, the
-    // widget worker) must never race the spawned thread's first statement.
+    // widget worker) must never race the spawned thread's first statement. Deterministic here
+    // because the worker is held above before it can run any part of ensureInitialized, including
+    // its own begin/end pair or the outer thread's finally.
     val onReturn = RelaisLivenessState.snapshot
     assertTrue("startupInProgress must be published before ensureInitializedInBackground returns", onReturn.startupInProgress)
 
+    releaseLatch.countDown()
     awaitStartupEnded()
     val settled = RelaisLivenessState.snapshot
     assertFalse("the thread's finally must end the caller's begin", settled.startupInProgress)
