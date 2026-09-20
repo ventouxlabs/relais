@@ -6,7 +6,7 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. PR-A BUILT + reviewed on `feat/22-idle-unload-a` (14 commits, unpushed); next = probe on rango, then push PR-A.**
+## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. PR-A BUILT, reviewed, probe PASSED on rango (reload 19.8 s → Task 6 = no code), PR opened; next = codex review of the PR-A diff, merge, then PR-B.**
 
 `main` = `2d25736a` (#332). Everything the two 2026-09-12 sections below describe as pending has since
 shipped: #323 (PR-A), #325 (#324 TLS-handshake 500s), #326 (#319 auto-start), #327 (#322 atomic
@@ -80,7 +80,23 @@ is the artefact to implement from. What happened to it today, in order:
 **Decisions JD made (2026-09-20, all four approved):** split step 5 into PR-A/PR-B as proposed; push
 the docs branch (PR **#338**, open); file the five defects (**#333–#337**); build PR-A now.
 
-### PR-A — BUILT, reviewed, NOT pushed, probe NOT run
+### PR-A — BUILT, reviewed, **probe RUN on rango (4/4 PASS)**, pushed as a PR
+
+**Probe run 2026-09-20 11:21–11:26 EDT on rango** (`IdleUnloadProbe`, 297 s, `OK (4 tests)`, no
+`AndroidRuntime` errors, node restored to off): `RELOAD_TO_FIRST_TOKEN_MS = 19 836` (E2B, G5);
+watchdog shielded during a real synchronous reload, no duplicate load recorded; forced failure read
+`ERROR`, watchdog recovered to `LIVE`; 5 unload/reload cycles with native heap flat at 433 MiB and
+zero close failures. **Task 6 is therefore decided: document the hold, build nothing; audio keeps its
+503** — recorded in the plan. Logs: `probe-logcat.txt` / `probe-instrument.txt` in the SDD workspace.
+
+**Install trap, new (2026-09-20):** with `XDG_CONFIG_HOME` set, AGP signs debug builds with
+`$XDG_CONFIG_HOME/.android/debug.keystore` (`dbdc…`), but rango's install carries
+`~/.android/debug.keystore` (`55e9…`) → `INSTALL_FAILED_UPDATE_INCOMPATIBLE` (non-destructive: adb
+refuses, nothing is uninstalled). Fix: `./gradlew --stop`, then `ANDROID_USER_HOME=/home/user/.android
+./gradlew :app:installFullOpenDebug` and verify the APK cert with `apksigner verify --print-certs`
+BEFORE installing. `BUILD SUCCESSFUL` piped through `tail` hid the failure — check the device's
+`lastUpdateTime`, not the build log.
+
 
 Branch **`feat/22-idle-unload-a`** in worktree `.claude/worktrees/f22-a`, **14 commits over `2d25736a`**
 (23 files, +1651/−68), head `730555a7`. Built by subagent-driven development: one implementer per task
