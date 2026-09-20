@@ -17,9 +17,10 @@ package cc.grepon.relais
  * reachable, still starting, or idle.
  *
  * [idleUnloaded] is true iff the last engine close was an idle-TTL release (#178):
- * `RelaisEngine.releaseIfIdle` publishes true immediately BEFORE it closes the engine (so no
- * reader ever observes the engine gone without the flag), every other close — `shutdown()`, i.e.
- * STOP and the swap thread — publishes false after its close, and the start of every real init
+ * `RelaisEngine.releaseIfIdle` publishes true immediately BEFORE it closes the engine (so the
+ * writer's state sequence never has an instant with the engine gone and the flag clear; a reader's
+ * own two-read tear remains — see the comment in `releaseIfIdle`), every other close —
+ * `shutdown()`, i.e. STOP and the swap thread — publishes false after its close, and the start of every real init
  * attempt clears it too (`beginStartup(clearIdleUnloaded = true)`, which flips both facts in ONE
  * snapshot). It lives here rather than as a separately-read volatile for the reason #322/#327
  * exist: lifecycle facts combined across separate reads tear.

@@ -256,8 +256,9 @@ object RelaisEngine {
   /**
    * True iff the engine's current not-ready state is a graceful idle-TTL unload ([releaseIfIdle],
    * #178), not a crash — i.e. **true iff the last close was an idle release**. Set by
-   * [releaseIfIdle] immediately BEFORE it closes the engine, so no reader ever observes the engine
-   * gone without the flag; cleared by every other [shutdown] (so STOP clears it —
+   * [releaseIfIdle] immediately BEFORE it closes the engine, so the writer's state sequence never
+   * has an instant with the engine gone and the flag clear; a reader's own two-read tear remains —
+   * see the comment in [releaseIfIdle]. Cleared by every other [shutdown] (so STOP clears it —
    * `RelaisInference`'s self-heal keys a background reload on this flag as proof the foreground
    * service is alive, and after idle → STOP there is no service behind it) and by
    * [ensureInitialized]'s real-init branch at ATTEMPT START (any reason — idle-TTL, watchdog, an
@@ -454,8 +455,9 @@ object RelaisEngine {
           // bare thread an uncaught Error kills the WHOLE node process (the swap path's own reason).
           Log.w(TAG, "background idle-reload failed: ${t.message}")
         } finally {
-          RelaisLivenessState.endStartup()
-          backgroundReloadDispatching.set(false)
+          backgroundReloadDispatching.set(false) // release single-flight FIRST …
+          RelaisLivenessState.endStartup() // … so endStartup() stays the LAST write: a kick that
+          // observes startupInProgress=false then finds the guard already open, never a lost kick.
         }
       }
     } catch (t: Throwable) {
@@ -1066,9 +1068,12 @@ object RelaisEngine {
    * [lock] after the close (feature-22): the flag means exactly "the last shutdown was an idle
    * release", so this clears it and only [releaseIfIdle] sets it. Without that, idle survived STOP
    * and `RelaisInference`'s self-heal would spawn a multi-GB reload with no foreground service
-   * behind it. Close-then-clear is safe HERE because both callers are shielded on another fact
-   * (`onDestroy` runs with `shouldRun = false`; the swap thread holds `startupInProgress`); the
-   * idle path in [releaseIfIdle] has no such shield and uses the opposite order — see there.
+   * behind it. Close-then-clear is safe HERE because both callers are shielded on another fact:
+   * `onDestroy` calls `stopListeners()` before this, so `listenersUp = false` throughout and the
+   * watchdog's idle branch cannot shield regardless of the flag (the outcome is then restart iff
+   * `shouldRun`, which is right for both STOP and a system-initiated destroy); the swap thread
+   * holds `startupInProgress`. The idle path in [releaseIfIdle] has no such shield and uses the
+   * opposite order — see there.
    */
   fun shutdown() {
     synchronized(lock) {

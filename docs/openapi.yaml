@@ -85,11 +85,15 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [status, ready, thermal_state]
+                required: [status, ready, thermal_state, state]
                 properties:
                   status: { type: string, enum: [ok] }
                   ready: { type: boolean, description: Whether the resident engine has finished loading a model. }
                   thermal_state: { type: string, description: "Current ThermalGovernor status label (e.g. nominal, hot, shedding)." }
+                  state:
+                    type: string
+                    enum: [OFF, STARTING, LIVE, HOT, ERROR, IDLE]
+                    description: "Coarse node state. `IDLE` = the engine was released by idle-TTL and warms on the next request — `ready:false` with `state:IDLE` is a healthy node, not a dead one."
 
   /metrics:
     get:
