@@ -13,12 +13,20 @@
 package cc.grepon.relais
 
 /**
- * The two lifecycle facts that must be observed together when deciding whether a node is reachable
- * or still starting.
+ * The three lifecycle facts that must be observed together when deciding whether a node is
+ * reachable, still starting, or idle.
+ *
+ * [idleUnloaded] is true iff the last [cc.grepon.relais.RelaisEngine.shutdown] was an idle-TTL
+ * release (#178): every `shutdown()` publishes false under the engine lock and `releaseIfIdle`
+ * re-publishes true right after its own (so STOP clears it); the start of every real init attempt
+ * clears it too (`beginStartup(clearIdleUnloaded = true)`, which flips both facts in ONE
+ * snapshot). It lives here rather than as a separately-read volatile for the reason #322/#327
+ * exist: lifecycle facts combined across separate reads tear.
  */
 data class RelaisLiveness(
   val listenersUp: Boolean = false,
   val startupInProgress: Boolean = false,
+  val idleUnloaded: Boolean = false,
 )
 
 /**
@@ -36,10 +44,26 @@ internal class RelaisLivenessPublisher(initial: RelaisLiveness = RelaisLiveness(
     current = current.copy(listenersUp = value)
   }
 
+  /**
+   * [clearIdleUnloaded] is passed ONLY by `RelaisEngine.ensureInitialized`'s real-init branch — the
+   * one place that is, by construction, a real init attempt. Every other owner (the service's init
+   * thread, the model-swap thread, `ensureInitializedInBackground`'s caller-side publish) begins
+   * startup before it knows whether an init will happen at all: the swap thread bails on a missing
+   * file and ends startup with nothing attempted, and clearing idle there would make a healthy idle
+   * node read STARTING, trip the stall detector, and get restarted for a failed operator action.
+   */
   @Synchronized
-  fun beginStartup() {
+  fun beginStartup(clearIdleUnloaded: Boolean = false) {
     activeStartupOperations += 1
-    current = current.copy(startupInProgress = true)
+    current = current.copy(
+      startupInProgress = true,
+      idleUnloaded = if (clearIdleUnloaded) false else current.idleUnloaded,
+    )
+  }
+
+  @Synchronized
+  fun publishIdleUnloaded(value: Boolean) {
+    current = current.copy(idleUnloaded = value)
   }
 
   @Synchronized
@@ -51,8 +75,9 @@ internal class RelaisLivenessPublisher(initial: RelaisLiveness = RelaisLiveness(
 }
 
 /**
- * Process-wide node-liveness publication. A fresh process starts with both facts false: no listener
- * is bound and no lifecycle operation is underway until the service or engine publishes one.
+ * Process-wide node-liveness publication. A fresh process starts with all three facts false: no
+ * listener is bound, no lifecycle operation is underway, and nothing has been idle-released until
+ * the service or engine publishes one.
  *
  * Readers must take [snapshot] once before deriving a composite state. Reading separate volatile
  * fields used to permit a poll to combine `listenersUp=false` from before a bind with
@@ -65,7 +90,9 @@ object RelaisLivenessState {
 
   fun publishListenersUp(value: Boolean) = publisher.publishListenersUp(value)
 
-  fun beginStartup() = publisher.beginStartup()
+  fun beginStartup(clearIdleUnloaded: Boolean = false) = publisher.beginStartup(clearIdleUnloaded)
+
+  fun publishIdleUnloaded(value: Boolean) = publisher.publishIdleUnloaded(value)
 
   fun endStartup() = publisher.endStartup()
 }
