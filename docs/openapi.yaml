@@ -89,7 +89,7 @@ paths:
                 properties:
                   status: { type: string, enum: [ok] }
                   ready: { type: boolean, description: Whether the resident engine has finished loading a model. }
-                  thermal_state: { type: string, description: "Current ThermalGovernor status label (e.g. nominal, hot, shedding)." }
+                  thermal_state: { type: integer, description: "ThermalGovernor.statusValue — the raw PowerManager.THERMAL_STATUS_* code (0-6), not a label." }
                   state:
                     type: string
                     enum: [OFF, STARTING, LIVE, HOT, ERROR, IDLE]

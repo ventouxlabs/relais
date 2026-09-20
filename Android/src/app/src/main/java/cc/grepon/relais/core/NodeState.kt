@@ -39,9 +39,13 @@ private const val THERMAL_HOT_THRESHOLD = 3
  *    — and since every real init attempt publishes its own startup, a request-driven reload after an
  *    idle unload reads STARTING here too, not IDLE;
  *  - only a node asked-to-run whose last init failed and is NOT currently retrying reads ERROR —
- *    and ERROR stays **above** IDLE as defence in depth: `lastInitFailed && idleUnloaded` is
- *    unreachable once every attempt clears [idleUnloaded] at its start, but if it were ever observed
- *    the failure must win, because IDLE is exactly the state the watchdog leaves alone;
+ *    and ERROR stays **above** IDLE deliberately, not as defence against an impossible state:
+ *    `lastInitFailed && [idleUnloaded]` alone IS reachable (a bind-failed node whose service-side
+ *    catch sets [lastInitFailed] *after* the attempt cleared idle, later evicted by the TTL —
+ *    `releaseIfIdle` never touches [lastInitFailed] — always with `listenersUp=false`). Only the
+ *    three-way `lastInitFailed && [idleUnloaded] && [listenersUp]` is unreachable. Either way this
+ *    row is load-bearing, not redundant: it is what makes that node read ERROR instead of falling
+ *    through to STARTING, because IDLE is exactly the state the watchdog leaves alone;
  *  - a node asked-to-run **whose listeners are up** and whose engine was released by idle-TTL reads
  *    IDLE. It requires [listenersUp] for the same reason LIVE does: IDLE promises "reachable, will
  *    warm on the next request", and an unloaded engine behind torn-down listeners is not that — it

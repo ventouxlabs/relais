@@ -149,9 +149,13 @@ class NodeStateTest {
   }
 
   @Test fun `a failed init beats idle — error stays above idle`() {
-    // Slot 4 stays above 5, as defence in depth: `lastInitFailed && idleUnloaded` is unreachable
-    // once every real attempt clears idleUnloaded at start, but if it were ever observed the
-    // failure must win — an idle label on a broken node would hide it behind the watchdog shield.
+    // Slot 4 stays above 5, and not just as defence against an impossible state: `lastInitFailed
+    // && idleUnloaded` alone IS reachable — a bind-failed node's service-side catch sets
+    // lastInitFailed after the attempt cleared idle, and the TTL later sets idleUnloaded without
+    // touching it (the #333 lane) — always with listenersUp=false. This test's default
+    // listenersUp=true is the one combination (all three flags) the machine cannot produce.
+    // Either way this row is load-bearing: it's what RelaisWatchdog's comment means by "the ERROR
+    // computeNodeState reports" for that node, not a label for a state nothing can reach.
     assertEquals(NodeState.ERROR, state(shouldRun = true, lastInitFailed = true, idleUnloaded = true))
   }
 

@@ -87,8 +87,10 @@ class RelaisEngineIdleReleaseTest {
 
   @Test fun `releaseIfIdle returns true, leaves idle-unloaded published and the engine gone`() {
     injectResidentEngine()
-    // lastActivityAtMs is private; it was stamped no later than now, so any nowMs one TTL past
-    // now satisfies shouldUnloadIdleEngine for a resident engine with nothing in flight.
+    // lastActivityAtMs is private and stays at Task 2's 0L sentinel here — injectResidentEngine
+    // sets the engine field directly via reflection and never stamps it. The arithmetic still
+    // holds: nowMs (now + 60s) minus the 0L sentinel is far past any 1ms ttlMs, so
+    // shouldUnloadIdleEngine is satisfied for a resident engine with nothing in flight regardless.
     val released = RelaisEngine.releaseIfIdle(ttlMs = 1L, nowMs = System.currentTimeMillis() + 60_000L)
 
     assertTrue("a resident, idle engine must be released", released)
