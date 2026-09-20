@@ -169,7 +169,7 @@ class RelaisLivenessStateTest {
     assertEquals(RelaisLiveness(startupInProgress = false, idleUnloaded = false), publisher.snapshot)
   }
 
-  @Test fun `a fresh process starts with all three facts false`() {
+  @Test fun `the snapshot's defaults are all three facts false`() {
     assertEquals(RelaisLiveness(listenersUp = false, startupInProgress = false, idleUnloaded = false), RelaisLiveness())
   }
 }

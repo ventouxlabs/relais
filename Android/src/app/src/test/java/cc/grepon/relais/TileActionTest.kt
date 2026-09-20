@@ -44,6 +44,9 @@ class TileActionTest {
     // when an idle node read STARTING. Never RUN_PROMPT — the engine is not resident.
     assertEquals(TileAction.STOP, tileAction(NodeState.IDLE, templateId = "t", ready = false))
     assertEquals(TileAction.STOP, tileAction(NodeState.IDLE, templateId = null, ready = false))
+    // The tile reads state and isReady() in two separate reads, so IDLE + ready=true is reachable
+    // by tear; it must still STOP, never RUN_PROMPT (the STARTING row's shape).
+    assertEquals(TileAction.STOP, tileAction(NodeState.IDLE, templateId = "t", ready = true))
   }
 
   @Test fun `LIVE with a configured template and a ready engine runs the canned prompt`() {

@@ -62,7 +62,7 @@ class TilePresentationTest {
     assertEquals("engine released — wakes on request", p.subtitle)
   }
 
-  @Test fun `live and hot are the only active states`() {
+  @Test fun `live and hot are among the active states`() {
     val active = NodeState.entries.filter { tilePresentation(it).tileState == TileState.ACTIVE }.toSet()
     // STARTING and IDLE are also ACTIVE (a lit tile that's coming up / a lit node whose engine is
     // released on purpose), so assert the resident-engine pair is a subset.
