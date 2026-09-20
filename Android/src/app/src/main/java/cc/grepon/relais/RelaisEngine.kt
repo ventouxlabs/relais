@@ -1089,9 +1089,10 @@ object RelaisEngine {
    * [Engine.close] failures stop further auto-unload attempts rather than risking a repeated native
    * resource leak — see [shouldUnloadIdleEngine]'s KDoc). Called periodically by [RelaisNodeService]
    * (see its idle-TTL ticker); a subsequent request reloads the engine lazily via [ensureInitialized]
-   * (a short cold-start, as intended by #178 — see [shouldUnloadIdleEngine]'s KDoc). Sets
-   * [wasIdleUnloaded] on a successful release so [RelaisWatchdogReceiver] doesn't mistake the
-   * graceful unload for a crash.
+   * (a short cold-start, as intended by #178 — see [shouldUnloadIdleEngine]'s KDoc). Publishes
+   * `idleUnloaded` (read as [wasIdleUnloaded], and off the liveness snapshot by every composite
+   * reader) on a successful release so [RelaisWatchdogReceiver] doesn't mistake the graceful
+   * unload for a crash — right after the [shutdown] that cleared it, under the same [lock].
    *
    * RACE SAFETY (the highest-risk part of #178): this takes the SAME [lock] that [generate] now
    * holds for its entire "resolve the resident engine -> use it" span (see the comment there). Two
