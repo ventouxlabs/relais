@@ -255,15 +255,22 @@ object RelaisEngine {
 
   /**
    * True iff the engine's current not-ready state is a graceful idle-TTL unload ([releaseIfIdle],
-   * #178), not a crash. [RelaisWatchdogReceiver] checks this BEFORE treating `!isReady` as a
-   * failure — without it, the watchdog's own ~60s heartbeat would see the freshly-unloaded engine,
-   * conclude the node is dead, escalate its failure-backoff step, and force a restart, undoing the
-   * idle-unload within about one poll cycle (discovered auditing every [isReady] call site; see
-   * #178 review). Set true by [releaseIfIdle] right after a successful [shutdown]; cleared by
-   * [ensureInitialized] on the next successful init (any reason — idle-TTL, watchdog, an ordinary
-   * request — restores normal "not ready" semantics once a real init attempt is underway).
+   * #178), not a crash — i.e. **true iff the last [shutdown] was an idle release**. Set by
+   * [releaseIfIdle] right after its [shutdown]; cleared by *every* [shutdown] (so STOP clears it —
+   * `RelaisInference`'s self-heal keys a background reload on this flag as proof the foreground
+   * service is alive, and after idle → STOP there is no service behind it) and by
+   * [ensureInitialized]'s real-init branch at ATTEMPT START (any reason — idle-TTL, watchdog, an
+   * ordinary request — restores normal "not ready" semantics the moment a real attempt begins, in
+   * the same snapshot that publishes `startupInProgress`).
+   *
+   * Read-only here and delegating (feature-22): the fact lives in [RelaisLivenessState.snapshot]
+   * beside `listenersUp`/`startupInProgress`, so readers deriving a composite state take the
+   * snapshot ONCE rather than combining this with the other two across separate reads (#322/#327).
+   * [RelaisWatchdogReceiver] reads it off its own snapshot; this accessor exists for the callers
+   * that need the one fact alone (`RelaisInference`).
    */
-  @Volatile var wasIdleUnloaded: Boolean = false
+  val wasIdleUnloaded: Boolean
+    get() = RelaisLivenessState.snapshot.idleUnloaded
 
   /** Guards [ensureInitializedInBackground] so a burst of requests during an idle-reload dispatches at most one thread. */
   private val backgroundReloadDispatching = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -278,9 +285,21 @@ object RelaisEngine {
     private set
 
   /**
-   * True when the most recent init attempt threw (set by [RelaisNodeService]'s init thread). Lets
+   * True when the most recent init attempt threw: set by [RelaisNodeService]'s init thread (which
+   * also covers provisioning and listener-bind failures) **or** by [ensureInitialized] when a real
+   * init attempt throws (feature-22 — a request-driven reload after an idle unload that fails must
+   * read ERROR, not IDLE forever behind the watchdog's shield). Lets
    * [cc.grepon.relais.core.computeNodeState] surface ERROR rather than an indefinite STARTING when
-   * provisioning/init fails. Cleared on a successful init.
+   * provisioning/init fails. Cleared at the START of every attempt (both writers), so a retry never
+   * reads as failed while it loads — `computeControlPanelState`'s STARTING-over-failure arm needs
+   * `ready`, which a cold reload cannot offer, so a stale `true` there would show OFFLINE + "start
+   * failed" for the whole load.
+   *
+   * The one behaviour the second writer widens: a bind-failed node (engine resident, listeners
+   * down, flag true from the service's catch) whose in-process reload starts clears the flag and
+   * reads STARTING instead of ERROR until the watchdog restarts it (≤ 60 s; the service's init
+   * thread clears it at its own attempt start anyway). The control panel still says "endpoints
+   * down" via its `unreachable` predicate. Accepted.
    */
   @Volatile var lastInitFailed: Boolean = false
 
@@ -344,6 +363,19 @@ object RelaisEngine {
   /**
    * Idempotent. Initializes the resident GPU multimodal engine if not already up. Defaults to the
    * path resolved by [RelaisModelProvisioner] (falling back to [defaultModelPath] pre-provision).
+   *
+   * The real-init branch is the ONE choke point every reload goes through — the service's init
+   * thread, the swap thread, [ensureInitializedInBackground], and a request's synchronous reload in
+   * [generate] — so it publishes its own startup (feature-22): `beginStartup(clearIdleUnloaded =
+   * true)` before the `try`, `endStartup()` in the `finally` as the LAST write of the attempt. What
+   * that buys: a synchronous reload reads STARTING on every surface instead of IDLE or "stalled";
+   * the watchdog stays out of every reload for the same reason it stays out of the service's;
+   * `ensureInitializedInBackground` stops dispatching a redundant thread behind [lock];
+   * `ModelSwitch.awaitReload` actually waits. The publisher nests, so an outer owner (service, swap)
+   * wrapping this pair is fine — the outer `endStartup()` is what finally clears the flag.
+   *
+   * Lock order: engine [lock] → publisher monitor (a leaf `@Synchronized`), never the reverse;
+   * `listenerLifecycleLock` is never nested with [lock].
    */
   @OptIn(ExperimentalApi::class)
   fun ensureInitialized(
@@ -354,20 +386,38 @@ object RelaisEngine {
     if (isReady) return
     synchronized(lock) {
       if (isReady) return
-      require(File(modelPath).exists()) { "Model not found: $modelPath" }
-      // NOTE: the former Pixel-10/Tensor-G5 pre-flight gate that refused gemma-4-E4B is gone —
-      // E4B was verified to init + serve (text, sustained decode, and vision) on G5 with no SIGSEGV
-      // on litertlm 0.12.0 (2026-07-12, on rango), so the model×SoC crash it guarded is resolved.
-      val cacheDir = context.getExternalFilesDir(null)?.absolutePath
-      // Speculative decoding is SUPPORTED by E4B (Capabilities.hasSpeculativeDecodingSupport()=true)
-      // but MEASURED A REGRESSION on this E4B/GPU/Tensor-G4 config: ~2.56 tok/s with it on vs
-      // ~5.63 tok/s off (draft overhead > gains, no draft model bundled). Left OFF deliberately.
-      ExperimentalFlags.enableSpeculativeDecoding = false
-      engine = buildResidentEngine(modelPath, cacheDir, context.applicationInfo.nativeLibraryDir)
-      residentModelId = modelId // #180: the source of truth for what the resident engine is serving
-      residentModelPath = modelPath
-      lastActivityAtMs = System.currentTimeMillis() // idle-TTL clock (#178): init counts as activity
-      wasIdleUnloaded = false // a real init attempt is underway; restore normal not-ready semantics
+      // BEFORE the try: endStartup() `check`s its pairing, so a throw between try-entry and an inner
+      // begin would turn the finally into a second exception masking the first. Clearing idle in
+      // the same snapshot means no reader can see startupInProgress=true beside a stale idle.
+      RelaisLivenessState.beginStartup(clearIdleUnloaded = true)
+      // Cleared at ATTEMPT START, exactly as the service's init thread does — a retry must not read
+      // as failed while it loads.
+      lastInitFailed = false
+      // The panel's phase line otherwise says "starting node…" for a reload.
+      RelaisNodeProgress.phase = ProvisionPhase.LOADING_ENGINE
+      try {
+        require(File(modelPath).exists()) { "Model not found: $modelPath" }
+        // NOTE: the former Pixel-10/Tensor-G5 pre-flight gate that refused gemma-4-E4B is gone —
+        // E4B was verified to init + serve (text, sustained decode, and vision) on G5 with no SIGSEGV
+        // on litertlm 0.12.0 (2026-07-12, on rango), so the model×SoC crash it guarded is resolved.
+        val cacheDir = context.getExternalFilesDir(null)?.absolutePath
+        // Speculative decoding is SUPPORTED by E4B (Capabilities.hasSpeculativeDecodingSupport()=true)
+        // but MEASURED A REGRESSION on this E4B/GPU/Tensor-G4 config: ~2.56 tok/s with it on vs
+        // ~5.63 tok/s off (draft overhead > gains, no draft model bundled). Left OFF deliberately.
+        ExperimentalFlags.enableSpeculativeDecoding = false
+        engine = buildResidentEngine(modelPath, cacheDir, context.applicationInfo.nativeLibraryDir)
+        residentModelId = modelId // #180: the source of truth for what the resident engine is serving
+        residentModelPath = modelPath
+        lastActivityAtMs = System.currentTimeMillis() // idle-TTL clock (#178): init counts as activity
+      } catch (t: Throwable) {
+        // Throwable, not Exception: a native engine-create surfaces UnsatisfiedLinkError or
+        // OutOfMemoryError (the swap path's own reason), and RAM pressure is why idle-unload exists.
+        // Rethrown — this only records the outcome; the caller decides what a failed init means.
+        lastInitFailed = true
+        throw t
+      } finally {
+        RelaisLivenessState.endStartup() // the LAST write of every attempt — see computeNodeState's read-order rule
+      }
     }
   }
 
@@ -382,20 +432,37 @@ object RelaisEngine {
    * specifically proves the foreground service is alive right now, since idle-TTL only runs from
    * within it; [RelaisInference]'s own contract must still never blind-cold-start when the engine was
    * simply never initialized, since then the service might not be running at all).
+   *
+   * Publishes `startupInProgress` **synchronously on the caller, before the thread exists**
+   * (feature-22): every "kick then wait" caller — `ModelSwitch.awaitReload`, the widget worker,
+   * the poll loop — then sees STARTING on return instead of racing the spawned thread's first
+   * statement and exiting immediately on a snapshot the thread has not written yet. The thread's
+   * `finally` still ends it; if thread creation itself throws, the begun startup is ended and the
+   * CAS reset here, so nothing can latch `startupInProgress` true with no thread to clear it.
    */
   fun ensureInitializedInBackground(context: Context) {
     if (isReady || RelaisLivenessState.snapshot.startupInProgress) return
     if (!backgroundReloadDispatching.compareAndSet(false, true)) return // a reload is already dispatching
-    thread(name = "relais-idle-reload") {
-      try {
-        RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead"
-        ensureInitialized(context)
-      } catch (e: Exception) {
-        Log.w(TAG, "background idle-reload failed: ${e.message}")
-      } finally {
-        RelaisLivenessState.endStartup()
-        backgroundReloadDispatching.set(false)
+    RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead" — on the CALLER, see KDoc
+    try {
+      thread(name = "relais-idle-reload") {
+        try {
+          ensureInitialized(context) // publishes its own nested pair and sets lastInitFailed on a throw
+        } catch (t: Throwable) {
+          // Throwable: ensureInitialized rethrows an Error from a native engine-create, and on a
+          // bare thread an uncaught Error kills the WHOLE node process (the swap path's own reason).
+          Log.w(TAG, "background idle-reload failed: ${t.message}")
+        } finally {
+          RelaisLivenessState.endStartup()
+          backgroundReloadDispatching.set(false)
+        }
       }
+    } catch (t: Throwable) {
+      // Thread.start() failed (e.g. OOM creating a native thread) — the body never ran, so its
+      // finally never will. Undo the caller-side begin and release the single-flight guard.
+      RelaisLivenessState.endStartup()
+      backgroundReloadDispatching.set(false)
+      throw t
     }
   }
 
@@ -992,6 +1059,14 @@ object RelaisEngine {
       }
     }
 
+  /**
+   * Closes the resident engine. Publishes `idleUnloaded = false` under [lock] (feature-22): the
+   * flag means exactly "the last shutdown was an idle release", so every other shutdown — STOP via
+   * the service's `onDestroy`, the swap thread's close-before-reload — clears it, and only
+   * [releaseIfIdle] re-publishes true right after its own call. Without this, idle survived STOP
+   * and `RelaisInference`'s self-heal would spawn a multi-GB reload with no foreground service
+   * behind it.
+   */
   fun shutdown() {
     synchronized(lock) {
       try {
@@ -1002,6 +1077,7 @@ object RelaisEngine {
         consecutiveCloseFailures++
       } finally {
         engine = null
+        RelaisLivenessState.publishIdleUnloaded(false)
       }
     }
   }
@@ -1047,8 +1123,12 @@ object RelaisEngine {
         return false
       }
       Log.i(TAG, "idle TTL exceeded (${nowMs - lastActivityAtMs}ms >= ${ttlMs}ms) — releasing resident engine")
-      shutdown()
-      wasIdleUnloaded = true // tell RelaisWatchdogReceiver this is a graceful unload, not a crash
+      shutdown() // publishes idleUnloaded=false …
+      // … and this re-publishes true, same lock: a graceful unload, not a crash. A watchdog tick
+      // that lands between the two reads !isReady && !idleUnloaded && !startupInProgress and bumps
+      // one backoff step; start() then no-ops via shouldDispatchStartup and the next healthy tick
+      // resets it — the same known, benign tear the watchdog KDoc already accepts.
+      RelaisLivenessState.publishIdleUnloaded(true)
       return true
     }
   }
