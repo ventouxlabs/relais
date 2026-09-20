@@ -6,7 +6,7 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. PR-A BUILT, reviewed, probe PASSED on rango (reload 19.8 s → Task 6 = no code), PR opened; next = codex review of the PR-A diff, merge, then PR-B.**
+## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. PR-A = #339, CI running, codex ×3 applied, probe 2× PASS on rango (reload ~19.5 s → Task 6 = no code); next = merge #339, then PR-B.**
 
 `main` = `2d25736a` (#332). Everything the two 2026-09-12 sections below describe as pending has since
 shipped: #323 (PR-A), #325 (#324 TLS-handshake 500s), #326 (#319 auto-start), #327 (#322 atomic
@@ -80,7 +80,23 @@ is the artefact to implement from. What happened to it today, in order:
 **Decisions JD made (2026-09-20, all four approved):** split step 5 into PR-A/PR-B as proposed; push
 the docs branch (PR **#338**, open); file the five defects (**#333–#337**); build PR-A now.
 
-### PR-A — BUILT, reviewed, **probe RUN on rango (4/4 PASS)**, pushed as a PR
+### PR-A — **PR #339 open, CI running; codex ×3 applied; probe 2× on rango; merge is the next click**
+
+Head `03d9584d`, 17 commits. Three `/codex review` rounds on the diff, each GATE PASS (P2-only), each
+applied and pushed — see the PR comment for the list. The one that matters for every future probe:
+**JUnit 4 runs `@After` after a failed or `assumeTrue`-skipped `@Before`** (`RunAfters` wraps
+`RunBefores` in a `finally`) — three Claude review lanes and I accepted the opposite; codex read the
+runtime. And **`am instrument` force-stops the target process on start and on finish**, so *no*
+probe can be run against a node you want to keep up, flag or not; the watchdog brings it back in
+60 s if `should_run` is true (observed). Second probe run: `OK (4 tests)`, reload 19 410 ms. rango was
+left node-off (`should_run=false`, via a prefs write + `am force-stop`, since a tile tap on a LIVE
+node with a template configured is `RUN_PROMPT`, not STOP).
+
+**Next:** wait for CI on #339 → merge (squash) → PR-B (Tasks 3, 4(c)(e)(f), 7; #336) from a fresh
+branch off `main`. The SDD workspace under `.claude/worktrees/f22-a/.superpowers/` holds every review
+and both probe logs; delete the worktree after merge.
+
+
 
 **Probe run 2026-09-20 11:21–11:26 EDT on rango** (`IdleUnloadProbe`, 297 s, `OK (4 tests)`, no
 `AndroidRuntime` errors, node restored to off): `RELOAD_TO_FIRST_TOKEN_MS = 19 836` (E2B, G5);
