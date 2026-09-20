@@ -156,8 +156,18 @@ class RelaisEngineReloadPublishTest {
     assertTrue("a failed background reload is recorded — ERROR, not IDLE forever", RelaisEngine.lastInitFailed)
 
     // The single-flight CAS was released: a second kick dispatches again rather than no-oping.
-    RelaisEngine.ensureInitializedInBackground(ctx)
+    // Same race as the first kick (the worker fails fast at `require` and can end the pair before
+    // the next line reads the snapshot), so it gets its own held context, not the raw `ctx`.
+    val releaseSecond = CountDownLatch(1)
+    val probingSecond = object : ContextWrapper(ctx) {
+      override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
+        releaseSecond.await(5, TimeUnit.SECONDS)
+        return super.getSharedPreferences(name, mode)
+      }
+    }
+    RelaisEngine.ensureInitializedInBackground(probingSecond)
     assertTrue("CAS must be reset after the thread finishes", RelaisLivenessState.snapshot.startupInProgress)
+    releaseSecond.countDown()
     awaitStartupEnded()
   }
 
