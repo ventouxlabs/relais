@@ -39,6 +39,13 @@ class TileActionTest {
     assertEquals(TileAction.STOP, tileAction(NodeState.HOT, templateId = "t", ready = true))
   }
 
+  @Test fun `IDLE stops — parity with the STARTING an idle node used to read (PR-B makes it WARM)`() {
+    // feature-22 PR-A: the node is running, so the tap cancels the intent-to-run exactly as it did
+    // when an idle node read STARTING. Never RUN_PROMPT — the engine is not resident.
+    assertEquals(TileAction.STOP, tileAction(NodeState.IDLE, templateId = "t", ready = false))
+    assertEquals(TileAction.STOP, tileAction(NodeState.IDLE, templateId = null, ready = false))
+  }
+
   @Test fun `LIVE with a configured template and a ready engine runs the canned prompt`() {
     assertEquals(TileAction.RUN_PROMPT, tileAction(NodeState.LIVE, templateId = "terse-coder", ready = true))
   }

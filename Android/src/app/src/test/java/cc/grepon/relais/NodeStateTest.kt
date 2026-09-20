@@ -27,7 +27,19 @@ class NodeStateTest {
     lastInitFailed: Boolean = false,
     listenersUp: Boolean = true,
     thermalStatus: Int = 0,
-  ) = computeNodeState(shouldRun, ready, listenersUp, startupInProgress, lastInitFailed, thermalStatus)
+    idleUnloaded: Boolean = false,
+  ) = computeNodeState(
+    // Named, not positional: this helper's own parameter order already differs from the function's
+    // (listenersUp/startupInProgress are swapped), and a seventh same-typed Boolean appended
+    // positionally is exactly how one flag lands silently in another's slot.
+    shouldRun = shouldRun,
+    ready = ready,
+    listenersUp = listenersUp,
+    startupInProgress = startupInProgress,
+    lastInitFailed = lastInitFailed,
+    thermalStatus = thermalStatus,
+    idleUnloaded = idleUnloaded,
+  )
 
   /**
    * A resident engine is not a reachable node (codex round 18).
@@ -111,5 +123,46 @@ class NodeStateTest {
   @Test fun `active retry shows starting not error`() {
     // A retry in progress (startupInProgress) after a prior failure should read STARTING, not ERROR.
     assertEquals(NodeState.STARTING, state(shouldRun = true, startupInProgress = true, lastInitFailed = true))
+  }
+
+  // ---- feature-22 (#178 idle-TTL): IDLE is "reachable and gracefully unloaded", slot 5 of 7 ----
+
+  @Test fun `idle when running, reachable and gracefully unloaded`() {
+    // Slot 5: shouldRun && listenersUp && idleUnloaded. The `false` twin in the same test is what
+    // makes the `true` row discriminate — a defaulted flag that only ever runs at its default is an
+    // untested constant.
+    assertEquals(NodeState.IDLE, state(shouldRun = true, listenersUp = true, idleUnloaded = true))
+    assertEquals(NodeState.STARTING, state(shouldRun = true, listenersUp = true, idleUnloaded = false))
+  }
+
+  @Test fun `idle requires listeners — an unloaded node nothing can reach reads starting`() {
+    // IDLE promises "reachable, will warm on the next request"; #327's argument for LIVE applies
+    // verbatim. Without listenersUp the row falls through to slot 6 (STARTING), which is what lets
+    // the watchdog's `idleUnloaded && listenersUp` shield drop and the retry dispatch.
+    assertEquals(NodeState.STARTING, state(shouldRun = true, listenersUp = false, idleUnloaded = true))
+  }
+
+  @Test fun `ready beats a stale idle-unloaded flag`() {
+    // Slot 2 stays above 5: a ready, reachable engine is LIVE even if idleUnloaded lags one poll.
+    assertEquals(NodeState.LIVE, state(shouldRun = true, ready = true, idleUnloaded = true))
+    assertEquals(NodeState.HOT, state(shouldRun = true, ready = true, idleUnloaded = true, thermalStatus = 3))
+  }
+
+  @Test fun `a failed init beats idle — error stays above idle`() {
+    // Slot 4 stays above 5, as defence in depth: `lastInitFailed && idleUnloaded` is unreachable
+    // once every real attempt clears idleUnloaded at start, but if it were ever observed the
+    // failure must win — an idle label on a broken node would hide it behind the watchdog shield.
+    assertEquals(NodeState.ERROR, state(shouldRun = true, lastInitFailed = true, idleUnloaded = true))
+  }
+
+  @Test fun `an in-flight reload beats idle — a synchronous warm reads starting`() {
+    // Slot 3 stays above 5: a request-driven reload publishes startupInProgress itself, so every
+    // surface reads STARTING (not IDLE, not "stalled") for the whole load.
+    assertEquals(NodeState.STARTING, state(shouldRun = true, startupInProgress = true, idleUnloaded = true))
+  }
+
+  @Test fun `stopped node never shows idle even with a stale idle-unloaded flag`() {
+    // IDLE requires shouldRun; STOP clears the flag anyway, but a stopped node reads OFF regardless.
+    assertEquals(NodeState.OFF, state(shouldRun = false, listenersUp = true, idleUnloaded = true))
   }
 }
