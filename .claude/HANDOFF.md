@@ -6,7 +6,53 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-12 21:40 EDT — ⏩ START HERE. **#318 and #323 MERGED. feature-09 PR-B implemented; codex found two defects, both FIXED in `80d106f6`. Unpushed. Codex re-review and all hardware checks still outstanding.**
+## 2026-09-20 — ⏩ START HERE. **Build-order steps 0–4 all MERGED. Tree clean, no open PRs, no stray branches. Next = step 5, feature-22 idle-unload.**
+
+`main` = `2d25736a` (#332). Everything the two 2026-09-12 sections below describe as pending has since
+shipped: #323 (PR-A), #325 (#324 TLS-handshake 500s), #326 (#319 auto-start), #327 (#322 atomic
+snapshot), #328 (#320 dual-stack + IPv6 SANs), #329 (#321 boot-race rebind), #330, #331 (#312
+provisioned-only `/v1/models`), #332 (PR-B model selector, incl. the #313 `updateModel` re-register).
+Read them as history, not as instructions.
+
+### Housekeeping done this session (2026-09-20)
+
+- Closed #311 / #313 / #320 / #321 — each verified against **`origin/main`**, not the PR body
+  (`HTTPS_IPV6_BIND_ADDRESS = "::"`; `NetworkCallback`+`LinkProperties` in `RelaisNodeService`;
+  `RelaisEngine.kt:507` calls `updateModel` and its KDoc is rewritten; Basic auth reaches
+  `/experiments`). None of the four PRs carried a `Closes #n`, which is why they sat open.
+- Removed the two dead worktrees (`f18-cert` on merged `feat/dashboard-model-selector`, `f18-gate` on
+  a 9-behind `main`), fast-forwarded local `main`, deleted 30 squash-merged local branches (every one
+  gated on `gh pr list --head … --state merged`; all still on `origin`).
+- `AGENTS.md` is now a **symlink to `CLAUDE.md`**. It had been an untracked, already-drifted copy
+  pointing Codex at `.Codex/HANDOFF.md` — a path that does not exist (`.codex/` is empty), so Codex
+  was reading a stale file with a dead pointer. One source of truth; nothing to keep in sync.
+
+### Still open, carried forward
+
+- **BouncyCastle 1.78.1 → 1.85** (`build.gradle.kts:283`): sequenced after the R8 baseline, needs an
+  on-device *inference* check — CI runs no R8 ([[relais-r8-minification-ci-blindspot]]).
+- **`RelaisHttpServer.kt` = 2809 lines** (`wc -l`, this tree). `CLAUDE.md` now says the next change
+  to it must *extract*, not append. Step 5 touches `handleHealth`/`assembleDashboardStatus` — plan
+  the extraction into the step, do not bolt on.
+- Six issues open, none blocking: #300 #288 #122 #102 #97 (Play Console / decisions only JD can make),
+  #69 (image-gen, parked on G5).
+
+### Next: step 5 — `feat(engine): idle-unload gaps` (feature-22, tasks 1–3, 5–8; 4 is cut)
+
+The 09-07 rules still apply: fresh `critic` + `/codex review` on the plan *before* cutting the branch,
+`/codex review` the diff before merge and after every fix commit, hardware smoke on rango
+(`IdleUnloadProbe`, incl. forced reload failure → `/health` reads ERROR not IDLE). **But the plan is
+dated 09-07 and names seams that #323/#327/#331/#332 have since rewritten** (`assembleDashboardStatus`,
+`handleHealth`, `NodeState`, the resident-model id/path persistence PR-B's P1 fixed). Reconcile the
+plan's file/line claims against `origin/main` **first**, then review — otherwise the review rounds
+re-find what the merges already resolved ([[grep-before-inventing]]).
+
+Decision still needed from JD, cannot be made from a desk: `/v1/audio/transcriptions` on the idle
+path — bounded-hold vs 503 — needs an on-device number (measure it in this step's probe first).
+
+---
+
+## 2026-09-12 21:40 EDT — (superseded above — PR-B was re-reviewed, hardware-checked and MERGED as #332 / `2d25736a`) #318 and #323 MERGED. feature-09 PR-B implemented; codex found two defects, both FIXED in `80d106f6`.
 
 `main` = `62050b83`. Two feature-09 PRs shipped this session, both hardware-verified on rango:
 
