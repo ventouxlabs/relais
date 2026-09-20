@@ -255,8 +255,9 @@ object RelaisEngine {
 
   /**
    * True iff the engine's current not-ready state is a graceful idle-TTL unload ([releaseIfIdle],
-   * #178), not a crash — i.e. **true iff the last [shutdown] was an idle release**. Set by
-   * [releaseIfIdle] right after its [shutdown]; cleared by *every* [shutdown] (so STOP clears it —
+   * #178), not a crash — i.e. **true iff the last close was an idle release**. Set by
+   * [releaseIfIdle] immediately BEFORE it closes the engine, so no reader ever observes the engine
+   * gone without the flag; cleared by every other [shutdown] (so STOP clears it —
    * `RelaisInference`'s self-heal keys a background reload on this flag as proof the foreground
    * service is alive, and after idle → STOP there is no service behind it) and by
    * [ensureInitialized]'s real-init branch at ATTEMPT START (any reason — idle-TTL, watchdog, an
@@ -1060,14 +1061,24 @@ object RelaisEngine {
     }
 
   /**
-   * Closes the resident engine. Publishes `idleUnloaded = false` under [lock] (feature-22): the
-   * flag means exactly "the last shutdown was an idle release", so every other shutdown — STOP via
-   * the service's `onDestroy`, the swap thread's close-before-reload — clears it, and only
-   * [releaseIfIdle] re-publishes true right after its own call. Without this, idle survived STOP
+   * Closes the resident engine for every reason EXCEPT an idle release — STOP via the service's
+   * `onDestroy`, the swap thread's close-before-reload. Publishes `idleUnloaded = false` under
+   * [lock] after the close (feature-22): the flag means exactly "the last shutdown was an idle
+   * release", so this clears it and only [releaseIfIdle] sets it. Without that, idle survived STOP
    * and `RelaisInference`'s self-heal would spawn a multi-GB reload with no foreground service
-   * behind it.
+   * behind it. Close-then-clear is safe HERE because both callers are shielded on another fact
+   * (`onDestroy` runs with `shouldRun = false`; the swap thread holds `startupInProgress`); the
+   * idle path in [releaseIfIdle] has no such shield and uses the opposite order — see there.
    */
   fun shutdown() {
+    synchronized(lock) {
+      closeEngine()
+      RelaisLivenessState.publishIdleUnloaded(false)
+    }
+  }
+
+  /** The close itself, no liveness publication: [shutdown] and [releaseIfIdle] order the publish differently. */
+  private fun closeEngine() {
     synchronized(lock) {
       try {
         engine?.close()
@@ -1077,7 +1088,6 @@ object RelaisEngine {
         consecutiveCloseFailures++
       } finally {
         engine = null
-        RelaisLivenessState.publishIdleUnloaded(false)
       }
     }
   }
@@ -1091,8 +1101,10 @@ object RelaisEngine {
    * (see its idle-TTL ticker); a subsequent request reloads the engine lazily via [ensureInitialized]
    * (a short cold-start, as intended by #178 — see [shouldUnloadIdleEngine]'s KDoc). Publishes
    * `idleUnloaded` (read as [wasIdleUnloaded], and off the liveness snapshot by every composite
-   * reader) on a successful release so [RelaisWatchdogReceiver] doesn't mistake the graceful
-   * unload for a crash — right after the [shutdown] that cleared it, under the same [lock].
+   * reader) so [RelaisWatchdogReceiver] doesn't mistake the graceful unload for a crash — BEFORE
+   * the close, under the same [lock], so there is no instant in which the engine is gone and the
+   * flag is not yet set (the comment at the publish site names the property). Goes through
+   * [closeEngine], not [shutdown], because [shutdown] clears the flag.
    *
    * RACE SAFETY (the highest-risk part of #178): this takes the SAME [lock] that [generate] now
    * holds for its entire "resolve the resident engine -> use it" span (see the comment there). Two
@@ -1124,12 +1136,18 @@ object RelaisEngine {
         return false
       }
       Log.i(TAG, "idle TTL exceeded (${nowMs - lastActivityAtMs}ms >= ${ttlMs}ms) — releasing resident engine")
-      shutdown() // publishes idleUnloaded=false …
-      // … and this re-publishes true, same lock: a graceful unload, not a crash. A watchdog tick
-      // that lands between the two reads !isReady && !idleUnloaded && !startupInProgress and bumps
-      // one backoff step; start() then no-ops via shouldDispatchStartup and the next healthy tick
-      // resets it — the same known, benign tear the watchdog KDoc already accepts.
+      // Publish BEFORE closing. The property: no instant on the idle path has
+      // `!ready && !startupInProgress && !idleUnloaded` — the one combination that drops the
+      // watchdog's shield and dispatches a full restart (shouldDispatchStartup(ready=false, …) is
+      // true, so it is a cold reload plus a listener bounce, not the benign no-op tear). Between
+      // the publish and the close a reader sees `ready && idleUnloaded`, which every surface's
+      // precedence already resolves to LIVE, and RelaisInference's self-heal keys on `!isReady`
+      // first, so it no-ops. The residual is the reader's own: a snapshot taken before this line
+      // combined with an `isReady` read after the close — the enumerated read-order tear, never
+      // a state the writer was actually in.
       RelaisLivenessState.publishIdleUnloaded(true)
+      closeEngine()
+      // feature-22 Task 2: recordEngineUnload() (the unload counter) goes here, after the close.
       return true
     }
   }

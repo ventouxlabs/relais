@@ -149,10 +149,10 @@ class RelaisEngineReloadPublishTest {
 
   @Test fun `every shutdown clears idle-unloaded — STOP after an idle release must not read idle`() {
     // With no resident engine `engine?.close()` is a no-op, so this is the flag write alone. The
-    // flag means exactly "the last shutdown was an idle release": releaseIfIdle re-publishes true
-    // right after its own shutdown(); every other shutdown (onDestroy's STOP, the swap thread's
-    // close-before-reload) must leave it false, or RelaisInference's self-heal would spawn a
-    // multi-GB reload with no foreground service behind it after idle → STOP.
+    // flag means exactly "the last close was an idle release": releaseIfIdle publishes true before
+    // its own close (RelaisEngineIdleReleaseTest); every other shutdown (onDestroy's STOP, the swap
+    // thread's close-before-reload) must leave it false, or RelaisInference's self-heal would
+    // spawn a multi-GB reload with no foreground service behind it after idle → STOP.
     RelaisLivenessState.publishIdleUnloaded(true)
 
     RelaisEngine.shutdown()

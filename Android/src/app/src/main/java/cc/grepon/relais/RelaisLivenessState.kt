@@ -16,10 +16,11 @@ package cc.grepon.relais
  * The three lifecycle facts that must be observed together when deciding whether a node is
  * reachable, still starting, or idle.
  *
- * [idleUnloaded] is true iff the last [cc.grepon.relais.RelaisEngine.shutdown] was an idle-TTL
- * release (#178): every `shutdown()` publishes false under the engine lock and `releaseIfIdle`
- * re-publishes true right after its own (so STOP clears it); the start of every real init attempt
- * clears it too (`beginStartup(clearIdleUnloaded = true)`, which flips both facts in ONE
+ * [idleUnloaded] is true iff the last engine close was an idle-TTL release (#178):
+ * `RelaisEngine.releaseIfIdle` publishes true immediately BEFORE it closes the engine (so no
+ * reader ever observes the engine gone without the flag), every other close — `shutdown()`, i.e.
+ * STOP and the swap thread — publishes false after its close, and the start of every real init
+ * attempt clears it too (`beginStartup(clearIdleUnloaded = true)`, which flips both facts in ONE
  * snapshot). It lives here rather than as a separately-read volatile for the reason #322/#327
  * exist: lifecycle facts combined across separate reads tear.
  */
