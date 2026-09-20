@@ -45,6 +45,7 @@ object RelaisMetrics {
   private val tokensTotal = AtomicLong(0)
   private val shedTotal = AtomicLong(0)
   private val queueRejectedTotal = AtomicLong(0)
+  private val engineUnloadsTotal = AtomicLong(0)
   private val errorsTotal = AtomicLong(0)
   private val inFlight = AtomicInteger(0)
 
@@ -208,6 +209,14 @@ object RelaisMetrics {
   fun recordShed() = shedTotal.incrementAndGet()
 
   fun recordQueueReject() = queueRejectedTotal.incrementAndGet()
+
+  /**
+   * Idle-TTL eviction of the resident engine (feature-22, [RelaisEngine.releaseIfIdle]). Called
+   * after the close attempt, so it counts a logical eviction (engine slot cleared) even when the
+   * native close() itself failed — see [RelaisEngine.consecutiveCloseFailures]. M6: counter only,
+   * no labels.
+   */
+  fun recordEngineUnload() = engineUnloadsTotal.incrementAndGet()
 
   fun incInFlight() = inFlight.incrementAndGet()
 
@@ -393,7 +402,7 @@ object RelaisMetrics {
     v.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
 
   /** Prometheus text exposition. Authenticated endpoint (sits behind the API-key gate). */
-  fun renderProm(context: Context): String {
+  fun renderProm(context: Context, idleSecondsSupplier: () -> Double? = { RelaisEngine.idleSeconds }): String {
     val now = System.currentTimeMillis()
     val sb = StringBuilder(2048)
     fun line(s: String) = sb.append(s).append('\n')
@@ -413,6 +422,19 @@ object RelaisMetrics {
     line("# HELP relais_engine_ready Whether the resident engine is initialized (1) or not (0).")
     line("# TYPE relais_engine_ready gauge")
     line("relais_engine_ready ${if (RelaisEngine.isReady) 1 else 0}")
+
+    // Omitted entirely (no HELP/TYPE/value) while null — a freshly-started process that has never
+    // loaded or served has no meaningful idle duration yet. See RelaisEngine.idleSeconds' KDoc.
+    val idleSeconds = idleSecondsSupplier()
+    if (idleSeconds != null) {
+      line(
+        "# HELP relais_engine_idle_seconds Seconds since the resident engine was last active (a " +
+          "request, or a load). Nonzero on a healthy node; the engine is unloaded only while " +
+          "relais_engine_ready is 0.",
+      )
+      line("# TYPE relais_engine_idle_seconds gauge")
+      line("relais_engine_idle_seconds $idleSeconds")
+    }
 
     line("# HELP relais_requests_total Requests by endpoint and HTTP status.")
     line("# TYPE relais_requests_total counter")
@@ -434,6 +456,13 @@ object RelaisMetrics {
     line("# HELP relais_queue_rejected_total Requests rejected (429) because the admission queue was full.")
     line("# TYPE relais_queue_rejected_total counter")
     line("relais_queue_rejected_total ${queueRejectedTotal.get()}")
+
+    line(
+      "# HELP relais_engine_unloads_total Idle-TTL evictions of the resident engine (engine slot " +
+        "cleared). Counts a release whose native close() failed as well — see consecutiveCloseFailures.",
+    )
+    line("# TYPE relais_engine_unloads_total counter")
+    line("relais_engine_unloads_total ${engineUnloadsTotal.get()}")
 
     line("# HELP relais_tokens_generated_total Total decoded tokens served.")
     line("# TYPE relais_tokens_generated_total counter")
@@ -592,7 +621,7 @@ object RelaisMetrics {
   }
 
   /** JSON view for the in-app HUD; includes precomputed p50/p95 (not exposed via Prometheus). */
-  fun renderJson(context: Context): JSONObject {
+  fun renderJson(context: Context, idleSecondsSupplier: () -> Double? = { RelaisEngine.idleSeconds }): JSONObject {
     val now = System.currentTimeMillis()
     val (p50, p95) =
       synchronized(histLock) { quantile(0.50) to quantile(0.95) }
@@ -602,7 +631,7 @@ object RelaisMetrics {
       synchronized(engineLoadHistLock) {
         bucketQuantile(0.50, engineLoadCount, engineLoadBucketCounts, engineLoadBucketBoundsSec)
       }
-    return JSONObject()
+    val json = JSONObject()
       .put("uptime_seconds", (now - startMs) / 1000.0)
       .put("model_id", RelaisConfig.modelId(context))
       .put("backend", lastBackend)
@@ -611,6 +640,7 @@ object RelaisMetrics {
       .put("errors_total", errorsTotal.get())
       .put("shed_total", shedTotal.get())
       .put("queue_rejected_total", queueRejectedTotal.get())
+      .put("engine_unloads_total", engineUnloadsTotal.get())
       .put("webhook_delivered_total", webhookDeliveredTotal.get())
       .put("webhook_failed_total", webhookFailedTotal.get())
       .put("decode_tokens_per_second", lastDecodeTokS)
@@ -623,6 +653,9 @@ object RelaisMetrics {
       .put("memory_rss_bytes", rssBytes())
       .put("queue_depth", inFlight.get())
       .put("restarts_total", RelaisConfig.restartCount(context))
+    // Omitted entirely (no key at all) while null — mirrors the Prometheus render's series omission.
+    idleSecondsSupplier()?.let { json.put("idle_seconds", it) }
+    return json
   }
 
   /**

@@ -250,8 +250,23 @@ object RelaisEngine {
    * Written under [lock] on init (in [ensureInitialized]) and unconditionally in [generate]'s outer
    * `finally` (every outcome — success, timeout, error — counts as activity, matching how
    * [RelaisMetrics.recordLatency] already treats "every outcome" elsewhere in this file).
+   *
+   * Sentinel `0L` means "never served" (feature-22) — a freshly-started process before its first
+   * real init, distinct from any real timestamp. [idleSeconds] reads the sentinel as "no gauge value
+   * yet" rather than a multi-decade idle duration. [shouldUnloadIdleEngine] never observes the
+   * sentinel: it checks `ready` first and returns `false` before reading this field, and every real
+   * init ([ensureInitialized]'s success path) stamps a real value before `isReady` can report true.
    */
-  @Volatile private var lastActivityAtMs: Long = System.currentTimeMillis()
+  @Volatile private var lastActivityAtMs: Long = 0L
+
+  /**
+   * Seconds since [lastActivityAtMs] (a request finishing, or a load) — the `relais_engine_idle_seconds`
+   * gauge (feature-22). Null while the sentinel `0L` holds (process never served/loaded), so the
+   * caller renders no series rather than a nonsensical multi-decade duration. Narrow read-only
+   * accessor rather than widening [lastActivityAtMs] itself.
+   */
+  val idleSeconds: Double?
+    get() = lastActivityAtMs.takeIf { it > 0L }?.let { (System.currentTimeMillis() - it) / 1000.0 }
 
   /**
    * True iff the engine's current not-ready state is a graceful idle-TTL unload ([releaseIfIdle],
@@ -1157,7 +1172,9 @@ object RelaisEngine {
       // a state the writer was actually in.
       RelaisLivenessState.publishIdleUnloaded(true)
       closeEngine()
-      // feature-22 Task 2: recordEngineUnload() (the unload counter) goes here, after the close.
+      // Counts the logical eviction (engine slot cleared), including a release whose native close()
+      // failed — closeEngine()'s finally still nulls the field either way. See the HELP text.
+      RelaisMetrics.recordEngineUnload()
       return true
     }
   }
