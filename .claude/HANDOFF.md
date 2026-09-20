@@ -6,7 +6,143 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-12 21:40 EDT — ⏩ START HERE. **#318 and #323 MERGED. feature-09 PR-B implemented; codex found two defects, both FIXED in `80d106f6`. Unpushed. Codex re-review and all hardware checks still outstanding.**
+## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. PR-A BUILT, reviewed, probe PASSED on rango (reload 19.8 s → Task 6 = no code), PR opened; next = codex review of the PR-A diff, merge, then PR-B.**
+
+`main` = `2d25736a` (#332). Everything the two 2026-09-12 sections below describe as pending has since
+shipped: #323 (PR-A), #325 (#324 TLS-handshake 500s), #326 (#319 auto-start), #327 (#322 atomic
+snapshot), #328 (#320 dual-stack + IPv6 SANs), #329 (#321 boot-race rebind), #330, #331 (#312
+provisioned-only `/v1/models`), #332 (PR-B model selector, incl. the #313 `updateModel` re-register).
+Read them as history, not as instructions.
+
+### Housekeeping done this session (2026-09-20)
+
+- Closed #311 / #313 / #320 / #321 — each verified against **`origin/main`**, not the PR body
+  (`HTTPS_IPV6_BIND_ADDRESS = "::"`; `NetworkCallback`+`LinkProperties` in `RelaisNodeService`;
+  `RelaisEngine.kt:507` calls `updateModel` and its KDoc is rewritten; Basic auth reaches
+  `/experiments`). None of the four PRs carried a `Closes #n`, which is why they sat open.
+- Removed the two dead worktrees (`f18-cert` on merged `feat/dashboard-model-selector`, `f18-gate` on
+  a 9-behind `main`), fast-forwarded local `main`, deleted 30 squash-merged local branches (every one
+  gated on `gh pr list --head … --state merged`; all still on `origin`).
+- `AGENTS.md` is now a **symlink to `CLAUDE.md`**. It had been an untracked, already-drifted copy
+  pointing Codex at `.Codex/HANDOFF.md` — a path that does not exist (`.codex/` is empty), so Codex
+  was reading a stale file with a dead pointer. One source of truth; nothing to keep in sync.
+
+### Still open, carried forward
+
+- **BouncyCastle 1.78.1 → 1.85** (`build.gradle.kts:283`): sequenced after the R8 baseline, needs an
+  on-device *inference* check — CI runs no R8 ([[relais-r8-minification-ci-blindspot]]).
+- **`RelaisHttpServer.kt` = 2809 lines** (`wc -l`, this tree). `CLAUDE.md` now says the next change
+  to it must *extract*, not append. Step 5 touches `handleHealth`/`assembleDashboardStatus` — plan
+  the extraction into the step, do not bolt on.
+- Six issues open, none blocking: #300 #288 #122 #102 #97 (Play Console / decisions only JD can make),
+  #69 (image-gen, parked on G5).
+
+### Step 5 — feature-22 idle-unload: plan reconciled and review-hardened, NOT yet built
+
+`.claude/PRPs/plans/feature-22-idle-unload.plan.md` is at **rev 3** (`7bfe773a`), 844 lines, and it
+is the artefact to implement from. What happened to it today, in order:
+
+1. **Reconciled against `main`** (`e36e84fa`). The 09-07 plan's anchors were re-checked against the
+   tree — ~70 line numbers, three claims that were false (`/health` is one of *two* open routes;
+   `RelaisDiscovery.updateModel` has a caller since #332; feature-09 had merged so
+   `assembleDashboardStatus` was settled, not "in flight"), and the HANDOFF's "tasks 1–3, 5–8 (4 is
+   cut)" was pre-renumbering — all seven tasks are in scope.
+2. **Two review rounds, `critic` (Opus) + `codex` (gpt-6-astra) each time**, 20 then 21 findings, five
+   found by both each round, every one verified against source and applied (`cf3f7776`, `7bfe773a`).
+   The record with dispositions is in the plan's *Notes → Review round 2 / 3*. Verdict from both
+   after round 2: P3-only; **round 4 must be a build + the probe, not prose**.
+
+**What the reviews changed, that the next session must not re-derive:**
+
+- Task 4 is a **state-model change with six reader surfaces**, not a `/health` field. The 09-07 plan
+  counted three health derivations; `grep -rn startupInProgress` finds six, and the three it missed
+  are the in-app ones: `RelaisShellViewModel.kt:129-130`'s stall detector reads an idle node as
+  **"node not running · press START"**, Configure locks the MODEL row "while starting", `/experiments`
+  says OFFLINE. Files 17 → 35.
+- The fix for "IDLE sticks through a failing reload" was wrong **three times** before it was right:
+  09-07 "clear the flag at attempt start" (exposed the synchronous in-lock reload to the watchdog —
+  `RelaisWatchdog.kt:135` was never read); rev 1 "clear on completion" (protected that reload,
+  exposed the next retry, and rested on "the publisher cannot nest" — a sentence I wrote without
+  opening `RelaisLivenessState.kt`; the counter is at `:30`); rev 2 "publish startup from
+  `ensureInitialized`, clear idle on every `beginStartup`" (a swap that bails at `:462` would have
+  restarted a healthy idle node). Rev 3: `beginStartup(clearIdleUnloaded = true)` **only** from the
+  real-init branch; `lastInitFailed` cleared at attempt start like `:270`; `shutdown()` clears
+  `idleUnloaded` (it survived STOP); `ensureInitializedInBackground` publishes startup on the caller;
+  `Throwable` at both background callers. Recorded in memory as [[grep-before-inventing]] instance 7.
+- Pre-existing defects the plan now fixes, none previously filed: a bind-failed node that idles out is
+  unrecoverable (watchdog shield lacks `listenersUp`); an idle node never follows a LAN address change
+  (`RelaisNodeService.kt:477` gates the rebind on `isReady`); idle survives STOP so
+  `RelaisInference.kt:69`'s self-heal can reload with no FGS; tile `START` on any not-ready node
+  bounces both listeners. And one **not** fixed, filed as a follow-up in the plan: Configure's MODEL
+  pick while idle only persists the ref — an idle reload would pair the cached path with the new id
+  (the #332 P1, on the other surface). The row stays locked.
+
+**Decisions JD made (2026-09-20, all four approved):** split step 5 into PR-A/PR-B as proposed; push
+the docs branch (PR **#338**, open); file the five defects (**#333–#337**); build PR-A now.
+
+### PR-A — BUILT, reviewed, **probe RUN on rango (4/4 PASS)**, pushed as a PR
+
+**Probe run 2026-09-20 11:21–11:26 EDT on rango** (`IdleUnloadProbe`, 297 s, `OK (4 tests)`, no
+`AndroidRuntime` errors, node restored to off): `RELOAD_TO_FIRST_TOKEN_MS = 19 836` (E2B, G5);
+watchdog shielded during a real synchronous reload, no duplicate load recorded; forced failure read
+`ERROR`, watchdog recovered to `LIVE`; 5 unload/reload cycles with native heap flat at 433 MiB and
+zero close failures. **Task 6 is therefore decided: document the hold, build nothing; audio keeps its
+503** — recorded in the plan. Logs: `probe-logcat.txt` / `probe-instrument.txt` in the SDD workspace.
+
+**Install trap, new (2026-09-20):** with `XDG_CONFIG_HOME` set, AGP signs debug builds with
+`$XDG_CONFIG_HOME/.android/debug.keystore` (`dbdc…`), but rango's install carries
+`~/.android/debug.keystore` (`55e9…`) → `INSTALL_FAILED_UPDATE_INCOMPATIBLE` (non-destructive: adb
+refuses, nothing is uninstalled). Fix: `./gradlew --stop`, then `ANDROID_USER_HOME=/home/user/.android
+./gradlew :app:installFullOpenDebug` and verify the APK cert with `apksigner verify --print-certs`
+BEFORE installing. `BUILD SUCCESSFUL` piped through `tail` hid the failure — check the device's
+`lastUpdateTime`, not the build log.
+
+
+Branch **`feat/22-idle-unload-a`** in worktree `.claude/worktrees/f22-a`, **14 commits over `2d25736a`**
+(23 files, +1651/−68), head `730555a7`. Built by subagent-driven development: one implementer per task
+(4 → 1 → 2 → 5), a task review after each, a whole-branch review + a security pass at the end, one fix
+wave, one scoped re-review. **Every review's verdict is on disk** in
+`.claude/worktrees/f22-a/.superpowers/sdd/feature-22-idle-unload.plan/` (git-ignored — `progress.md` is
+the ledger with every controller ruling; `task-*-review.md`, `final-review.md`, `security-review.md`).
+Final verdict: **mergeable after the probe run on rango.** Evidence: the three-flavor JVM lane green after every task, the count growing
+with it — 1406 (Task 4) → 1411 (Task 1) → 1417 (Task 2) per flavor (`--rerun-tasks`, XML-verified), 21 + 4 + 3 + 4 + 4 mutations all killed,
+`compileFullOpenDebugAndroidTestKotlin` green; `RelaisHttpServer.kt` is now **2828** lines.
+
+What shipped, in one line each: `idleUnloaded` in the `RelaisLiveness` snapshot · `NodeState.IDLE`
+(slot 5, `listenersUp`-guarded, 7th required param) · `ensureInitialized` publishes its own
+`beginStartup(clearIdleUnloaded=true)`/`endStartup()`, clears `lastInitFailed` at attempt start, catches
+`Throwable` · `ensureInitializedInBackground` publishes on the caller · `shutdown()` = `closeEngine()`
+then idle=false; `releaseIfIdle` = idle=true **then** `closeEngine()` (no unshielded instant on the idle
+path — a ruling; the KDoc claims only the writer-side property) · watchdog shield `&& listenersUp`
+(#333) · LAN-rebind gate `!isReady && !idleUnloaded` (#334) · STOP clears idle (#335) · `/health`
+`"state"` · three parity `IDLE` arms in tile/widget (PR-B turns them into WARM) · histogram + JSON p50,
+unload counter, nullable idle gauge · `IdleUnloadProbe.kt` (four tests; two properties honestly
+skipped in its header — swap-rollback double failure has no deterministic hook, LAN-rebind is manual).
+
+**Three things a review round changed that the plan did not know** — the plan (rev 3) has been
+corrected for the first, the ledger records the others: (1) `lastInitFailed && idleUnloaded` **is
+reachable** via #333's lane, so slot 4 is load-bearing, not defence in depth; (2) a service-driven start
+flips `isReady` (`RelaisNodeService.kt:281`) **before** it bounces the listeners — any probe or client
+that polls `isReady` alone lands in a ~100 ms–1 s window where `listenersUp=false`; poll
+`isReady && listenersUp && !startupInProgress` (`awaitNodeSettled()` in the probe); (3) JUnit ran the
+probe's methods d, c, a, b until `@FixMethodOrder` was added.
+
+**Next, in order:** (a) run the probe on **rango** (unlocked; the `adb shell am instrument` line is in
+`IdleUnloadProbe.kt`'s header) — it logs `RELOAD_TO_FIRST_TOKEN_MS`, the number Task 6 and the
+audio-hold decision are gated on; (b) push `feat/22-idle-unload-a`, open PR-A citing `Closes #333 #334
+#335`, put the security INFO in the description (`/health` now distinguishes OFF/ERROR/IDLE/STARTING to
+an unauthenticated peer — coarse, by design); (c) `/codex review` the diff before merge; (d) after
+merge, PR-B (Tasks 3, 4(c)(e)(f), 7 — the six UI surfaces + Configure controls; #336) and the
+deferred minors the final review routed there (`RelaisNodeController.state(context, ready)` overload
+before adding more snapshot-ritual copies; RUNBOOK/alerting for the three new series). Worktree how-to:
+`Android/src/local.properties` must be copied into a fresh worktree before Gradle runs.
+
+**Cost note:** each codex plan consult was ~1.19M tokens at `reasoning=high` with the ~100 KB plan
+embedded. Two were run. A third would have been prose past its floor.
+
+---
+
+## 2026-09-12 21:40 EDT — (superseded above — PR-B was re-reviewed, hardware-checked and MERGED as #332 / `2d25736a`) #318 and #323 MERGED. feature-09 PR-B implemented; codex found two defects, both FIXED in `80d106f6`.
 
 `main` = `62050b83`. Two feature-09 PRs shipped this session, both hardware-verified on rango:
 
