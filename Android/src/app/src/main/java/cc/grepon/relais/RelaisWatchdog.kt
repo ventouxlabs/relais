@@ -132,7 +132,7 @@ class RelaisWatchdogReceiver : BroadcastReceiver() {
       RelaisWatchdog.schedule(context)
       return
     }
-    if (RelaisEngine.wasIdleUnloaded) {
+    if (liveness.idleUnloaded && liveness.listenersUp) {
       // Gracefully released by idle-TTL auto-unload (#178), not a crash — the process/service is
       // alive, the engine is just intentionally not resident right now. Without this check the
       // watchdog's own ~60s heartbeat would see !isReady, conclude the node is dead, escalate the
@@ -141,6 +141,13 @@ class RelaisWatchdogReceiver : BroadcastReceiver() {
       // notification after sustained normal idling. Treat exactly like the healthy path: reset
       // backoff, keep the heartbeat at base, and let the NEXT REQUEST reload the engine lazily
       // (RelaisEngine.ensureInitialized), not the watchdog.
+      //
+      // `&& listenersUp`, mirroring the healthy branch above (feature-22): a `:8443` bind failure
+      // tears both listeners down with the engine deliberately resident, no request can arrive, so
+      // the TTL WILL idle it out — and an idle-unloaded node nothing can reach is not "healthy
+      // idle", it is the ERROR computeNodeState reports. Without the conjunct this branch shielded
+      // it forever; with it, the tick falls through to the restart below, which rebinds.
+      // Both facts off the ONE snapshot taken above — never a separate read of the engine flag.
       RelaisWatchdog.reset(context)
       RelaisWatchdog.schedule(context)
       return

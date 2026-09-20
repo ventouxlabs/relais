@@ -477,7 +477,13 @@ class RelaisNodeService : Service() {
     }
     synchronized(listenerLifecycleLock) {
       if (serviceDestroyed) return
-      if (!RelaisEngine.isReady) {
+      // Snapshot first, engine flag second (the read-order rule). The rebind touches listeners,
+      // not the engine: an idle-unloaded node (feature-22) never satisfies `isReady`, and a phone
+      // that roams Wi-Fi during a 15-minute idle window would otherwise keep a leaf whose SANs name
+      // the old address — every CA-verifying client fails the handshake, no request reaches the
+      // engine to wake it, and the watchdog is shielded because the listeners ARE listening.
+      val liveness = RelaisLivenessState.snapshot
+      if (!RelaisEngine.isReady && !liveness.idleUnloaded) {
         scheduleLanRebindObservation(LAN_REBIND_OBSERVE_INTERVAL_MS)
         return
       }
