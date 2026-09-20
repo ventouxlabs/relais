@@ -6,7 +6,7 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-20 — ⏩ START HERE. **Build-order steps 0–4 all MERGED. Tree clean, no open PRs, no stray branches. Next = step 5, feature-22 idle-unload.**
+## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. Next = JD's split/push decisions, then BUILD PR-A.**
 
 `main` = `2d25736a` (#332). Everything the two 2026-09-12 sections below describe as pending has since
 shipped: #323 (PR-A), #325 (#324 TLS-handshake 500s), #326 (#319 auto-start), #327 (#322 atomic
@@ -37,18 +37,55 @@ Read them as history, not as instructions.
 - Six issues open, none blocking: #300 #288 #122 #102 #97 (Play Console / decisions only JD can make),
   #69 (image-gen, parked on G5).
 
-### Next: step 5 — `feat(engine): idle-unload gaps` (feature-22, tasks 1–3, 5–8; 4 is cut)
+### Step 5 — feature-22 idle-unload: plan reconciled and review-hardened, NOT yet built
 
-The 09-07 rules still apply: fresh `critic` + `/codex review` on the plan *before* cutting the branch,
-`/codex review` the diff before merge and after every fix commit, hardware smoke on rango
-(`IdleUnloadProbe`, incl. forced reload failure → `/health` reads ERROR not IDLE). **But the plan is
-dated 09-07 and names seams that #323/#327/#331/#332 have since rewritten** (`assembleDashboardStatus`,
-`handleHealth`, `NodeState`, the resident-model id/path persistence PR-B's P1 fixed). Reconcile the
-plan's file/line claims against `origin/main` **first**, then review — otherwise the review rounds
-re-find what the merges already resolved ([[grep-before-inventing]]).
+`.claude/PRPs/plans/feature-22-idle-unload.plan.md` is at **rev 3** (`7bfe773a`), 844 lines, and it
+is the artefact to implement from. What happened to it today, in order:
 
-Decision still needed from JD, cannot be made from a desk: `/v1/audio/transcriptions` on the idle
-path — bounded-hold vs 503 — needs an on-device number (measure it in this step's probe first).
+1. **Reconciled against `main`** (`e36e84fa`). The 09-07 plan's anchors were re-checked against the
+   tree — ~70 line numbers, three claims that were false (`/health` is one of *two* open routes;
+   `RelaisDiscovery.updateModel` has a caller since #332; feature-09 had merged so
+   `assembleDashboardStatus` was settled, not "in flight"), and the HANDOFF's "tasks 1–3, 5–8 (4 is
+   cut)" was pre-renumbering — all seven tasks are in scope.
+2. **Two review rounds, `critic` (Opus) + `codex` (gpt-6-astra) each time**, 20 then 21 findings, five
+   found by both each round, every one verified against source and applied (`cf3f7776`, `7bfe773a`).
+   The record with dispositions is in the plan's *Notes → Review round 2 / 3*. Verdict from both
+   after round 2: P3-only; **round 4 must be a build + the probe, not prose**.
+
+**What the reviews changed, that the next session must not re-derive:**
+
+- Task 4 is a **state-model change with six reader surfaces**, not a `/health` field. The 09-07 plan
+  counted three health derivations; `grep -rn startupInProgress` finds six, and the three it missed
+  are the in-app ones: `RelaisShellViewModel.kt:129-130`'s stall detector reads an idle node as
+  **"node not running · press START"**, Configure locks the MODEL row "while starting", `/experiments`
+  says OFFLINE. Files 17 → 35.
+- The fix for "IDLE sticks through a failing reload" was wrong **three times** before it was right:
+  09-07 "clear the flag at attempt start" (exposed the synchronous in-lock reload to the watchdog —
+  `RelaisWatchdog.kt:135` was never read); rev 1 "clear on completion" (protected that reload,
+  exposed the next retry, and rested on "the publisher cannot nest" — a sentence I wrote without
+  opening `RelaisLivenessState.kt`; the counter is at `:30`); rev 2 "publish startup from
+  `ensureInitialized`, clear idle on every `beginStartup`" (a swap that bails at `:462` would have
+  restarted a healthy idle node). Rev 3: `beginStartup(clearIdleUnloaded = true)` **only** from the
+  real-init branch; `lastInitFailed` cleared at attempt start like `:270`; `shutdown()` clears
+  `idleUnloaded` (it survived STOP); `ensureInitializedInBackground` publishes startup on the caller;
+  `Throwable` at both background callers. Recorded in memory as [[grep-before-inventing]] instance 7.
+- Pre-existing defects the plan now fixes, none previously filed: a bind-failed node that idles out is
+  unrecoverable (watchdog shield lacks `listenersUp`); an idle node never follows a LAN address change
+  (`RelaisNodeService.kt:477` gates the rebind on `isReady`); idle survives STOP so
+  `RelaisInference.kt:69`'s self-heal can reload with no FGS; tile `START` on any not-ready node
+  bounces both listeners. And one **not** fixed, filed as a follow-up in the plan: Configure's MODEL
+  pick while idle only persists the ref — an idle reload would pair the cached path with the new id
+  (the #332 P1, on the other surface). The row stays locked.
+
+**Decisions JD still owns (asked 2026-09-20):** whether to split step 5 into PR-A (Tasks 1, 2,
+4(a)(b)(d)(g) + probe — engine/liveness/`/health`/watchdog/metrics) and PR-B (Tasks 3, 4(c)(e)(f), 7
+— every UI surface + the Configure controls), with Task 6 after PR-A's measurement; whether to push
+this docs branch (`docs/handoff-2026-09-20`, 4 commits, unpushed) as its own PR first; whether to file
+the five pre-existing defects above as issues so the PRs have `Closes #n` targets. The audio-hold
+question needs Task 5's number and is not a decision anyone can make yet.
+
+**Cost note:** each codex plan consult was ~1.19M tokens at `reasoning=high` with the ~100 KB plan
+embedded. Two were run. A third would have been prose past its floor.
 
 ---
 
