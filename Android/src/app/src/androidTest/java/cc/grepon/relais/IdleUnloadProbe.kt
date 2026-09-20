@@ -43,10 +43,13 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Before
+import org.junit.FixMethodOrder
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.runners.MethodSorters
 
 /**
  * On-device probe for feature-22 idle-TTL auto-unload (#178) — the properties [RelaisEngine],
@@ -107,6 +110,7 @@ import org.junit.runner.RunWith
  *    this mirrors.
  */
 @RunWith(AndroidJUnit4::class)
+@FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class IdleUnloadProbe {
 
   private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -122,14 +126,25 @@ class IdleUnloadProbe {
     assumeTrue("no staged model at $modelPath — provision one before running this probe", File(modelPath).exists())
 
     nodeWasRunning = RelaisConfig.shouldRun(context)
-    val binder = startAndBindNode()
-    val readyDeadline = System.currentTimeMillis() + 180_000
-    while (!binder.isReady && System.currentTimeMillis() < readyDeadline) Thread.sleep(500)
-    assertTrue("node engine did not become ready within 180s", binder.isReady)
-    assertTrue("node http listener did not open on :8080", waitForListener())
+    try {
+      val binder = startAndBindNode()
+      val readyDeadline = System.currentTimeMillis() + 180_000
+      while (!binder.isReady && System.currentTimeMillis() < readyDeadline) Thread.sleep(500)
+      assertTrue("node engine did not become ready within 180s", binder.isReady)
+      assertTrue("node http listener did not open on :8080", waitForListener())
+      // isReady flips before the service tears listeners down and rebinds (RelaisNodeService's
+      // init thread) — wait for the whole attempt to settle, not just the socket accepting.
+      awaitNodeSettled()
 
-    // See the class KDoc "Watchdog ownership" section: take exclusive control of watchdog timing.
-    RelaisWatchdog.cancel(context)
+      // See the class KDoc "Watchdog ownership" section: take exclusive control of watchdog timing.
+      RelaisWatchdog.cancel(context)
+    } catch (t: Throwable) {
+      // JUnit skips @After when @Before throws — restore node-off/default-TTL ourselves so a
+      // readiness/settle timeout doesn't leave rango running with shouldRun=true against the
+      // operator's prior intent.
+      tearDown()
+      throw t
+    }
   }
 
   @After
@@ -296,9 +311,10 @@ class IdleUnloadProbe {
     // Let the watchdog recover it: this dispatches a REAL relais-init thread via
     // RelaisNodeService.start(), which re-provisions and reloads the CONFIGURED (good) model.
     RelaisWatchdogReceiver().onReceive(context, Intent())
-    val recoveryDeadline = System.currentTimeMillis() + 180_000
-    while (!RelaisEngine.isReady && System.currentTimeMillis() < recoveryDeadline) Thread.sleep(500)
-    assertTrue("watchdog-driven restart did not bring the engine back within 180s", RelaisEngine.isReady)
+    // A watchdog-driven restart is service-driven — wait for the whole attempt to settle, not
+    // just isReady, or this reads a stale STARTING while the service is still tearing down and
+    // rebinding listeners.
+    awaitNodeSettled()
     assertEquals("/health must read LIVE once the watchdog recovers the node", "LIVE", healthState())
 
     // Reset before 4(d), or its cycle loop would run under a stale ERROR read for one poll. The
@@ -361,6 +377,31 @@ class IdleUnloadProbe {
 
   /** Far enough past any plausible `ttlMs` that a real scheduling delay can never mask the release. */
   private fun farFutureNowMs(): Long = System.currentTimeMillis() + FAR_FUTURE_OFFSET_MS
+
+  /**
+   * Waits for a SERVICE-driven start (not a request-driven reload) to fully settle. In
+   * `RelaisNodeService`'s init thread, [RelaisEngine.isReady] flips first (`RelaisNodeService.kt:281`)
+   * and only after that does the thread tear listeners down, rebind HTTP/HTTPS, register discovery,
+   * and finally republish `listenersUp`/clear `startupInProgress` (`endStartup()`, the attempt's
+   * last write). Polling `isReady` alone lands inside that up-to-~1s window and reads a stale
+   * STARTING. Tolerant of the pre-dispatch instant right after `onReceive()` returns, where
+   * `startupInProgress` is already false but so is `isReady` — the `isReady` conjunct handles it.
+   * Request-driven reload waits do not need this: they publish `startupInProgress` themselves and
+   * never bounce listeners.
+   */
+  private fun awaitNodeSettled(timeoutMs: Long = 180_000) {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (System.currentTimeMillis() < deadline) {
+      val liveness = RelaisLivenessState.snapshot
+      if (RelaisEngine.isReady && liveness.listenersUp && !liveness.startupInProgress) return
+      Thread.sleep(500)
+    }
+    val liveness = RelaisLivenessState.snapshot
+    fail(
+      "node did not settle within ${timeoutMs}ms: isReady=${RelaisEngine.isReady}, " +
+        "listenersUp=${liveness.listenersUp}, startupInProgress=${liveness.startupInProgress}",
+    )
+  }
 
   private fun currentNodeState(): NodeState {
     // Snapshot ONCE, then engine flags — computeNodeState's own read-order rule.
