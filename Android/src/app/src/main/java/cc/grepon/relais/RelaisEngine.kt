@@ -398,6 +398,10 @@ object RelaisEngine {
       // The panel's phase line otherwise says "starting node…" for a reload.
       RelaisNodeProgress.phase = ProvisionPhase.LOADING_ENGINE
       try {
+        // feature-22: wall-clock time this REAL init spends building the resident engine. Started
+        // here — the first statement inside the try — so it never includes an isReady fast-path (both
+        // re-checks above return before this point). Fed to RelaisMetrics on the success path only.
+        val startNs = System.nanoTime()
         require(File(modelPath).exists()) { "Model not found: $modelPath" }
         // NOTE: the former Pixel-10/Tensor-G5 pre-flight gate that refused gemma-4-E4B is gone —
         // E4B was verified to init + serve (text, sustained decode, and vision) on G5 with no SIGSEGV
@@ -411,6 +415,7 @@ object RelaisEngine {
         residentModelId = modelId // #180: the source of truth for what the resident engine is serving
         residentModelPath = modelPath
         lastActivityAtMs = System.currentTimeMillis() // idle-TTL clock (#178): init counts as activity
+        RelaisMetrics.recordEngineLoad((System.nanoTime() - startNs) / 1e9)
       } catch (t: Throwable) {
         // Throwable, not Exception: a native engine-create surfaces UnsatisfiedLinkError or
         // OutOfMemoryError (the swap path's own reason), and RAM pressure is why idle-unload exists.

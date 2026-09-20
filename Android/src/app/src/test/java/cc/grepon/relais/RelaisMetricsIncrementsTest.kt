@@ -33,7 +33,10 @@ import org.robolectric.annotation.Config
  *     still present and un-double-counted;
  *  2. the `relais_completion_tokens` histogram (buckets + sum + count, negative guard);
  *  3. `relais_thermal_events_total{level}` + the [RelaisMetrics.thermalLabel] whitelist;
- *  4. the [RelaisMetrics.endpointLabel] cardinality guard (unknown -> "other").
+ *  4. the [RelaisMetrics.endpointLabel] cardinality guard (unknown -> "other");
+ *  5. the recent-request ring-buffer opt-out (feature-09 Task 1);
+ *  6. `relais_engine_load_duration_seconds` — the feature-22 engine-load histogram fed by
+ *     [cc.grepon.relais.RelaisEngine.ensureInitialized]'s real-init success path only.
  *
  * Uses Robolectric only for a Context (renderProm needs one for build_info); the metric logic itself
  * is process-global and reset per test via the dedicated test seam.
@@ -264,6 +267,100 @@ class RelaisMetricsIncrementsTest {
     assertTrue(
       "the default must still append — the opt-out is opt-in, not opt-out-by-default",
       RelaisMetrics.recentRequests().any { it.endpoint == label },
+    )
+  }
+
+  // --- 6. engine-load-duration histogram (feature-22 Task 1) --------------------------------------
+
+  /**
+   * Mirrors [RelaisTtftMetricsTest]'s TTFT histogram tests but for the coarser, seconds-based
+   * `relais_engine_load_duration_seconds` series that [cc.grepon.relais.RelaisEngine.ensureInitialized]
+   * feeds only on its real-init success path (never the `isReady` fast-path — that would fill the
+   * histogram with zeros). Asserts rendered `_bucket`/`_sum`/`_count` lines, never a name grep.
+   */
+  @Test
+  fun `engine load duration lands in cumulative buckets with sum and count`() {
+    RelaisMetrics.recordEngineLoad(1.5) // <=2.0
+    RelaisMetrics.recordEngineLoad(15.0) // <=20.0
+
+    val prom = RelaisMetrics.renderProm(context)
+
+    assertTrue(
+      "the series must be declared a histogram",
+      prom.contains("# TYPE relais_engine_load_duration_seconds histogram"),
+    )
+    assertTrue(
+      "le=1.0 must be 0 — neither sample is that fast",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"1.0\"} 0"),
+    )
+    assertTrue(
+      "le=2.0 must be cumulative-1 (the 1.5s sample)",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"2.0\"} 1"),
+    )
+    assertTrue(
+      "le=20.0 must be cumulative-2 (both samples)",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"20.0\"} 2"),
+    )
+    assertTrue(
+      "+Inf must equal the total count",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"+Inf\"} 2"),
+    )
+    assertTrue("_sum must be 16.5", prom.contains("relais_engine_load_duration_seconds_sum 16.5"))
+    assertTrue("_count must be 2", prom.contains("relais_engine_load_duration_seconds_count 2"))
+  }
+
+  @Test
+  fun `an engine load above the largest bound lands only in the +Inf bucket`() {
+    RelaisMetrics.recordEngineLoad(200.0)
+
+    val prom = RelaisMetrics.renderProm(context)
+
+    assertTrue(
+      "le=120.0 must stay 0 — 200s is above the largest explicit bound",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"120.0\"} 0"),
+    )
+    assertTrue(
+      "+Inf must capture it",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"+Inf\"} 1"),
+    )
+    assertTrue("_count must be 1", prom.contains("relais_engine_load_duration_seconds_count 1"))
+  }
+
+  @Test
+  fun `resetIncrementsForTest clears the engine-load histogram`() {
+    RelaisMetrics.recordEngineLoad(5.0)
+
+    RelaisMetrics.resetIncrementsForTest()
+    val prom = RelaisMetrics.renderProm(context)
+
+    assertTrue("count cleared", prom.contains("relais_engine_load_duration_seconds_count 0"))
+    assertTrue("sum cleared", prom.contains("relais_engine_load_duration_seconds_sum 0.0"))
+  }
+
+  @Test
+  fun `renderJson exposes engine_load_p50_seconds beside the other histogram quantiles`() {
+    RelaisMetrics.recordEngineLoad(1.0)
+    RelaisMetrics.recordEngineLoad(5.0)
+
+    val json = RelaisMetrics.renderJson(context)
+
+    assertTrue("HUD must expose an engine-load p50", json.has("engine_load_p50_seconds"))
+    assertEquals(
+      "p50 of {1.0, 5.0} is the 1.0 bucket bound",
+      1.0,
+      json.getDouble("engine_load_p50_seconds"),
+      1e-9,
+    )
+  }
+
+  @Test
+  fun `engine_load_p50_seconds is zero when nothing has been recorded`() {
+    val json = RelaisMetrics.renderJson(context)
+    assertEquals(
+      "an empty histogram reports 0.0, not a bucket bound",
+      0.0,
+      json.getDouble("engine_load_p50_seconds"),
+      1e-9,
     )
   }
 }

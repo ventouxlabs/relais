@@ -122,6 +122,20 @@ object RelaisMetrics {
   private var decodeStartSum = 0.0
   private val decodeStartHistLock = Any()
 
+  // Engine-load-duration histogram (feature-22): wall-clock seconds RelaisEngine.ensureInitialized's
+  // REAL-init branch spends building the resident engine. Fed only from that branch's success path —
+  // never the `isReady` fast-path, or the histogram fills with zeros. Coarser than the TTFT/inference
+  // ladders above (a cold load is seconds, not sub-second): 1s..120s. Label-free (security M6). This
+  // time is ALSO absorbed into relais_inference_duration_seconds for whichever request triggered the
+  // reload — recordLatency spans the whole request including the lock wait — so a cold-start request
+  // is double-counted across both series by design; this series exists to separate "how long did
+  // loading take" from "how long did the whole request take", not to fix that double-count.
+  private val engineLoadBucketBoundsSec = doubleArrayOf(1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0)
+  private val engineLoadBucketCounts = LongArray(engineLoadBucketBoundsSec.size + 1) // last == +Inf
+  private var engineLoadCount = 0L
+  private var engineLoadSum = 0.0
+  private val engineLoadHistLock = Any()
+
   // Thermal-event counter (Feature #10). The existing `relais_thermal_status` gauge only shows the
   // status at scrape time; a transient SEVERE between two scrapes is invisible. This counter,
   // incremented on every status change by the ThermalGovernor listener, captures those transients.
@@ -284,6 +298,24 @@ object RelaisMetrics {
 
   private fun ttftBucketIndex(sec: Double): Int =
     ttftBucketBoundsSec.indexOfFirst { sec <= it }.takeIf { it >= 0 } ?: ttftBucketBoundsSec.size
+
+  /**
+   * Records engine-load duration in seconds (feature-22). Call ONLY from
+   * `RelaisEngine.ensureInitialized`'s real-init success path — the `if (isReady) return` fast-path
+   * (both the outer check and the re-check under the lock) must never call this, or the histogram
+   * fills with zeros for every cache-hit call.
+   */
+  fun recordEngineLoad(sec: Double) {
+    if (sec < 0.0) return
+    synchronized(engineLoadHistLock) {
+      engineLoadCount++
+      engineLoadSum += sec
+      engineLoadBucketCounts[engineLoadBucketIndex(sec)]++
+    }
+  }
+
+  private fun engineLoadBucketIndex(sec: Double): Int =
+    engineLoadBucketBoundsSec.indexOfFirst { sec <= it }.takeIf { it >= 0 } ?: engineLoadBucketBoundsSec.size
 
   /**
    * Increments the thermal-event counter for a status change (Feature #10). Call from the
@@ -481,6 +513,25 @@ object RelaisMetrics {
       line("relais_decode_start_latency_seconds_count $decodeStartCount")
     }
 
+    line(
+      "# HELP relais_engine_load_duration_seconds Seconds spent building the resident engine during " +
+        "a real init (the isReady fast-path records nothing). This time is ALSO included in " +
+        "relais_inference_duration_seconds for the request that triggered the reload — a cold-start " +
+        "request is double-counted across both series by design.",
+    )
+    line("# TYPE relais_engine_load_duration_seconds histogram")
+    synchronized(engineLoadHistLock) {
+      var cumulative = 0L
+      for (i in engineLoadBucketBoundsSec.indices) {
+        cumulative += engineLoadBucketCounts[i]
+        line("relais_engine_load_duration_seconds_bucket{le=\"${engineLoadBucketBoundsSec[i]}\"} $cumulative")
+      }
+      cumulative += engineLoadBucketCounts[engineLoadBucketBoundsSec.size]
+      line("relais_engine_load_duration_seconds_bucket{le=\"+Inf\"} $cumulative")
+      line("relais_engine_load_duration_seconds_sum $engineLoadSum")
+      line("relais_engine_load_duration_seconds_count $engineLoadCount")
+    }
+
     line("# HELP relais_thermal_events_total Thermal status-change events by level (catches transients the gauge misses).")
     line("# TYPE relais_thermal_events_total counter")
     for ((level, v) in thermalEventCounts) {
@@ -547,6 +598,10 @@ object RelaisMetrics {
       synchronized(histLock) { quantile(0.50) to quantile(0.95) }
     val ttftP50 =
       synchronized(ttftHistLock) { bucketQuantile(0.50, ttftCount, ttftBucketCounts, ttftBucketBoundsSec) }
+    val engineLoadP50 =
+      synchronized(engineLoadHistLock) {
+        bucketQuantile(0.50, engineLoadCount, engineLoadBucketCounts, engineLoadBucketBoundsSec)
+      }
     return JSONObject()
       .put("uptime_seconds", (now - startMs) / 1000.0)
       .put("model_id", RelaisConfig.modelId(context))
@@ -561,6 +616,7 @@ object RelaisMetrics {
       .put("decode_tokens_per_second", lastDecodeTokS)
       .put("inference_p50_seconds", p50)
       .put("ttft_p50_seconds", ttftP50)
+      .put("engine_load_p50_seconds", engineLoadP50)
       .put("inference_p95_seconds", p95)
       .put("thermal_status", ThermalGovernor.statusValue)
       .put("thermal_headroom", ThermalGovernor.headroomOrSentinel())
@@ -595,6 +651,11 @@ object RelaisMetrics {
       decodeStartBucketCounts.fill(0L)
       decodeStartCount = 0L
       decodeStartSum = 0.0
+    }
+    synchronized(engineLoadHistLock) {
+      engineLoadBucketCounts.fill(0L)
+      engineLoadCount = 0L
+      engineLoadSum = 0.0
     }
     thermalEventCounts.clear()
   }
