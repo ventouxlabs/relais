@@ -527,7 +527,7 @@ class ToolCallingProbe {
   | 1 | `ready && listenersUp && thermal >= 3` | `HOT` | unchanged (#327 added `listenersUp`) |
   | 2 | `ready && listenersUp` | `LIVE` | unchanged — a ready, reachable engine is LIVE even if `idleUnloaded` is stale |
   | 3 | `startupInProgress` | `STARTING` | unchanged — and after 4(b) this is what a **synchronous** reload reads too |
-  | 4 | `shouldRun && lastInitFailed` | `ERROR` | **must stay above IDLE.** Under rev 3 the combination `lastInitFailed && idleUnloaded` is unreachable (a failure is only ever written after a `beginStartup(clearIdleUnloaded=true)`) — keep the row as defence in depth; the load-bearing defence is the attempt-start clear in (b) |
+  | 4 | `shouldRun && lastInitFailed` | `ERROR` | **must stay above IDLE, and it is load-bearing** (PR-A final review, 2026-09-20 — rev 3 wrongly called this pair unreachable): a *service-driven* init failure sets `lastInitFailed` after the attempt cleared idle (`RelaisNodeService.kt:328`), and a later TTL sets `idleUnloaded` without touching it — the #333 lane, with `listenersUp=false`. Only the three-way `lastInitFailed && idleUnloaded && listenersUp` is unreachable. `RelaisWatchdog`'s "the ERROR computeNodeState reports" depends on this row |
   | 5 | `shouldRun && listenersUp && idleUnloaded` | **`IDLE`** | new — reachable *and* gracefully unloaded; without `listenersUp` it falls to 6 |
   | 6 | `shouldRun` | `STARTING` | unchanged |
   | 7 | else | `OFF` | unchanged |

@@ -6,7 +6,7 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. Next = JD's split/push decisions, then BUILD PR-A.**
+## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. PR-A BUILT + reviewed on `feat/22-idle-unload-a` (14 commits, unpushed); next = probe on rango, then push PR-A.**
 
 `main` = `2d25736a` (#332). Everything the two 2026-09-12 sections below describe as pending has since
 shipped: #323 (PR-A), #325 (#324 TLS-handshake 500s), #326 (#319 auto-start), #327 (#322 atomic
@@ -77,12 +77,49 @@ is the artefact to implement from. What happened to it today, in order:
   pick while idle only persists the ref — an idle reload would pair the cached path with the new id
   (the #332 P1, on the other surface). The row stays locked.
 
-**Decisions JD still owns (asked 2026-09-20):** whether to split step 5 into PR-A (Tasks 1, 2,
-4(a)(b)(d)(g) + probe — engine/liveness/`/health`/watchdog/metrics) and PR-B (Tasks 3, 4(c)(e)(f), 7
-— every UI surface + the Configure controls), with Task 6 after PR-A's measurement; whether to push
-this docs branch (`docs/handoff-2026-09-20`, 4 commits, unpushed) as its own PR first; whether to file
-the five pre-existing defects above as issues so the PRs have `Closes #n` targets. The audio-hold
-question needs Task 5's number and is not a decision anyone can make yet.
+**Decisions JD made (2026-09-20, all four approved):** split step 5 into PR-A/PR-B as proposed; push
+the docs branch (PR **#338**, open); file the five defects (**#333–#337**); build PR-A now.
+
+### PR-A — BUILT, reviewed, NOT pushed, probe NOT run
+
+Branch **`feat/22-idle-unload-a`** in worktree `.claude/worktrees/f22-a`, **14 commits over `2d25736a`**
+(23 files, +1651/−68), head `730555a7`. Built by subagent-driven development: one implementer per task
+(4 → 1 → 2 → 5), a task review after each, a whole-branch review + a security pass at the end, one fix
+wave, one scoped re-review. **Every review's verdict is on disk** in
+`.claude/worktrees/f22-a/.superpowers/sdd/feature-22-idle-unload.plan/` (git-ignored — `progress.md` is
+the ledger with every controller ruling; `task-*-review.md`, `final-review.md`, `security-review.md`).
+Final verdict: **mergeable after the probe run on rango.** Evidence: the three-flavor JVM lane green after every task, the count growing
+with it — 1406 (Task 4) → 1411 (Task 1) → 1417 (Task 2) per flavor (`--rerun-tasks`, XML-verified), 21 + 4 + 3 + 4 + 4 mutations all killed,
+`compileFullOpenDebugAndroidTestKotlin` green; `RelaisHttpServer.kt` is now **2828** lines.
+
+What shipped, in one line each: `idleUnloaded` in the `RelaisLiveness` snapshot · `NodeState.IDLE`
+(slot 5, `listenersUp`-guarded, 7th required param) · `ensureInitialized` publishes its own
+`beginStartup(clearIdleUnloaded=true)`/`endStartup()`, clears `lastInitFailed` at attempt start, catches
+`Throwable` · `ensureInitializedInBackground` publishes on the caller · `shutdown()` = `closeEngine()`
+then idle=false; `releaseIfIdle` = idle=true **then** `closeEngine()` (no unshielded instant on the idle
+path — a ruling; the KDoc claims only the writer-side property) · watchdog shield `&& listenersUp`
+(#333) · LAN-rebind gate `!isReady && !idleUnloaded` (#334) · STOP clears idle (#335) · `/health`
+`"state"` · three parity `IDLE` arms in tile/widget (PR-B turns them into WARM) · histogram + JSON p50,
+unload counter, nullable idle gauge · `IdleUnloadProbe.kt` (four tests; two properties honestly
+skipped in its header — swap-rollback double failure has no deterministic hook, LAN-rebind is manual).
+
+**Three things a review round changed that the plan did not know** — the plan (rev 3) has been
+corrected for the first, the ledger records the others: (1) `lastInitFailed && idleUnloaded` **is
+reachable** via #333's lane, so slot 4 is load-bearing, not defence in depth; (2) a service-driven start
+flips `isReady` (`RelaisNodeService.kt:281`) **before** it bounces the listeners — any probe or client
+that polls `isReady` alone lands in a ~100 ms–1 s window where `listenersUp=false`; poll
+`isReady && listenersUp && !startupInProgress` (`awaitNodeSettled()` in the probe); (3) JUnit ran the
+probe's methods d, c, a, b until `@FixMethodOrder` was added.
+
+**Next, in order:** (a) run the probe on **rango** (unlocked; the `adb shell am instrument` line is in
+`IdleUnloadProbe.kt`'s header) — it logs `RELOAD_TO_FIRST_TOKEN_MS`, the number Task 6 and the
+audio-hold decision are gated on; (b) push `feat/22-idle-unload-a`, open PR-A citing `Closes #333 #334
+#335`, put the security INFO in the description (`/health` now distinguishes OFF/ERROR/IDLE/STARTING to
+an unauthenticated peer — coarse, by design); (c) `/codex review` the diff before merge; (d) after
+merge, PR-B (Tasks 3, 4(c)(e)(f), 7 — the six UI surfaces + Configure controls; #336) and the
+deferred minors the final review routed there (`RelaisNodeController.state(context, ready)` overload
+before adding more snapshot-ritual copies; RUNBOOK/alerting for the three new series). Worktree how-to:
+`Android/src/local.properties` must be copied into a fresh worktree before Gradle runs.
 
 **Cost note:** each codex plan consult was ~1.19M tokens at `reasoning=high` with the ~100 KB plan
 embedded. Two were run. A third would have been prose past its floor.
