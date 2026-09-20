@@ -250,7 +250,7 @@ class IdleUnloadProbe {
 
     assertTrue("reload thread did not finish within 120s", reloadThread.let { it.join(120_000); !it.isAlive })
     assertTrue("engine must be ready once the request-driven reload completes", RelaisEngine.isReady)
-    assertEquals("/health must read LIVE once the reload completes", "LIVE", healthState())
+    assertServing("/health must read LIVE (or HOT, if the device is thermally throttled) once the reload completes")
 
     val reloadToFirstTokenMs = (firstTokenAtNs.get() - startNs) / 1_000_000.0
     // The number task 6's relais_reload_to_first_token_seconds metric depends on. Logged prominently.
@@ -318,7 +318,7 @@ class IdleUnloadProbe {
     // just isReady, or this reads a stale STARTING while the service is still tearing down and
     // rebinding listeners.
     awaitNodeSettled()
-    assertEquals("/health must read LIVE once the watchdog recovers the node", "LIVE", healthState())
+    assertServing("/health must read LIVE (or HOT) once the watchdog recovers the node")
 
     // Reset before 4(d), or its cycle loop would run under a stale ERROR read for one poll. The
     // successful recovery above already clears this (RelaisNodeService.kt:270), but restate it
@@ -353,7 +353,7 @@ class IdleUnloadProbe {
       val nativeHeapMb = Debug.getNativeHeapAllocatedSize() / (1024.0 * 1024.0)
       Log.i(TAG, "cycle $i: native heap allocated = %.1f MiB".format(nativeHeapMb))
     }
-    assertEquals("/health must read LIVE after the final cycle", "LIVE", healthState())
+    assertServing("/health must read LIVE (or HOT — five back-to-back reloads can heat the SoC) after the final cycle")
     Log.i(TAG, "4(d) PASS: $CYCLE_COUNT unload/reload cycles completed with no close failures")
   }
 
@@ -421,6 +421,16 @@ class IdleUnloadProbe {
   }
 
   /** `/health` is unauthenticated (RelaisHttpServer.kt) — plain loopback GET, no bearer key. */
+  /**
+   * A ready, reachable engine reads LIVE — or HOT when `PowerManager.THERMAL_STATUS_SEVERE`+ is in
+   * force (`computeNodeState` slot 1 beats slot 2), which repeated reloads on a phone can reach. Both
+   * mean "serving"; neither is a recovery failure. Codex review of PR #339, round 3.
+   */
+  private fun assertServing(message: String) {
+    val state = healthState()
+    assertTrue("$message — got $state", state == "LIVE" || state == "HOT")
+  }
+
   private fun healthState(): String {
     val conn = URL("http://127.0.0.1:8080/health").openConnection() as HttpURLConnection
     conn.connectTimeout = 5_000
