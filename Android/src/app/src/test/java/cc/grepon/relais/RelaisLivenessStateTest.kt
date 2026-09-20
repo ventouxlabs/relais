@@ -89,4 +89,87 @@ class RelaisLivenessStateTest {
     assertFalse("startup writer did not finish", worker.isAlive)
     assertEquals(RelaisLiveness(listenersUp = true, startupInProgress = false), publisher.snapshot)
   }
+
+  // ---- feature-22: idleUnloaded is the third lifecycle fact, published in the same snapshot ----
+
+  @Test fun `a real init attempt clears idle-unloaded and starts in ONE snapshot`() {
+    // ensureInitialized's real-init branch is the only caller of clearIdleUnloaded = true. Both
+    // facts flip in the same replaced snapshot — a reader can never see startupInProgress=true
+    // beside a stale idleUnloaded=true (which computeNodeState would tolerate, slot 3 > 5, but a
+    // separate-read design would let a poll combine the old idle with the new startup).
+    val publisher = RelaisLivenessPublisher(RelaisLiveness(listenersUp = true, idleUnloaded = true))
+
+    publisher.beginStartup(clearIdleUnloaded = true)
+
+    assertEquals(
+      RelaisLiveness(listenersUp = true, startupInProgress = true, idleUnloaded = false),
+      publisher.snapshot,
+    )
+  }
+
+  @Test fun `a plain beginStartup preserves idle-unloaded`() {
+    // The swap thread begins startup BEFORE it has resolved a target; a missing file or a resolve
+    // failure ends startup with no init attempted. Clearing idle there would make a healthy idle
+    // node read STARTING, trip the stall detector, and get restarted for a failed operator action.
+    val publisher = RelaisLivenessPublisher(RelaisLiveness(listenersUp = true, idleUnloaded = true))
+
+    publisher.beginStartup()
+    assertEquals(
+      RelaisLiveness(listenersUp = true, startupInProgress = true, idleUnloaded = true),
+      publisher.snapshot,
+    )
+
+    publisher.endStartup()
+    assertEquals(
+      RelaisLiveness(listenersUp = true, startupInProgress = false, idleUnloaded = true),
+      publisher.snapshot,
+    )
+  }
+
+  @Test fun `publishIdleUnloaded preserves the other two liveness components`() {
+    val publisher = RelaisLivenessPublisher(RelaisLiveness(listenersUp = true, startupInProgress = true))
+
+    publisher.publishIdleUnloaded(true)
+    assertEquals(
+      RelaisLiveness(listenersUp = true, startupInProgress = true, idleUnloaded = true),
+      publisher.snapshot,
+    )
+
+    publisher.publishIdleUnloaded(false)
+    assertEquals(
+      RelaisLiveness(listenersUp = true, startupInProgress = true, idleUnloaded = false),
+      publisher.snapshot,
+    )
+  }
+
+  @Test fun `listener and idle publication each preserve the other`() {
+    val publisher = RelaisLivenessPublisher()
+
+    publisher.publishIdleUnloaded(true)
+    publisher.publishListenersUp(true)
+    assertEquals(RelaisLiveness(listenersUp = true, idleUnloaded = true), publisher.snapshot)
+
+    publisher.publishListenersUp(false)
+    assertTrue(publisher.snapshot.idleUnloaded)
+    assertFalse(publisher.snapshot.listenersUp)
+  }
+
+  @Test fun `a nested clearing begin keeps the node starting until the OUTER owner ends`() {
+    // The service's init thread and the swap thread each wrap ensureInitialized's own pair; the
+    // inner clear must not end the outer owner's startup, and the clear must survive the inner end.
+    val publisher = RelaisLivenessPublisher(RelaisLiveness(idleUnloaded = true))
+
+    publisher.beginStartup() // outer owner (service / swap thread)
+    publisher.beginStartup(clearIdleUnloaded = true) // inner: ensureInitialized's real-init branch
+    publisher.endStartup() // inner end
+
+    assertEquals(RelaisLiveness(startupInProgress = true, idleUnloaded = false), publisher.snapshot)
+
+    publisher.endStartup() // outer end
+    assertEquals(RelaisLiveness(startupInProgress = false, idleUnloaded = false), publisher.snapshot)
+  }
+
+  @Test fun `the snapshot's defaults are all three facts false`() {
+    assertEquals(RelaisLiveness(listenersUp = false, startupInProgress = false, idleUnloaded = false), RelaisLiveness())
+  }
 }

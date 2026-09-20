@@ -53,9 +53,19 @@ class TilePresentationTest {
     assertEquals("Relais · error", p.label)
   }
 
-  @Test fun `live and hot are the only active states`() {
+  @Test fun `idle maps to active with an idle label — the node is up, the engine is released`() {
+    // feature-22 PR-A: minimal arm that preserves today's behaviour (an idle node used to read
+    // STARTING → ACTIVE). PR-B (task 4(c)) keeps ACTIVE and changes the tap to WARM.
+    val p = tilePresentation(NodeState.IDLE)
+    assertEquals(TileState.ACTIVE, p.tileState)
+    assertEquals("Relais · idle", p.label)
+    assertEquals("engine released — wakes on request", p.subtitle)
+  }
+
+  @Test fun `live and hot are among the active states`() {
     val active = NodeState.entries.filter { tilePresentation(it).tileState == TileState.ACTIVE }.toSet()
-    // STARTING is also ACTIVE (a lit tile that's coming up), so assert the resident-engine pair is a subset.
+    // STARTING and IDLE are also ACTIVE (a lit tile that's coming up / a lit node whose engine is
+    // released on purpose), so assert the resident-engine pair is a subset.
     assertTrue("LIVE must be active", NodeState.LIVE in active)
     assertTrue("HOT must be active", NodeState.HOT in active)
   }

@@ -148,7 +148,7 @@ not coupled to any gateway.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| GET | `/health` | none | `{status, ready, thermal_state}` |
+| GET | `/health` | none | `{status, ready, thermal_state, state}` — `state` is one of `OFF`/`STARTING`/`LIVE`/`HOT`/`ERROR`/`IDLE`; `IDLE` = engine released by idle-TTL, warms on the next request |
 | GET | `/metrics` | key | Prometheus text (or JSON via `Accept: application/json`) |
 | POST | `/generate` | key | `{text, image_b64?, audio_b64?}` — native multimodal |
 | POST | `/v1/chat/completions` | key | OpenAI-compatible, `stream` supported |

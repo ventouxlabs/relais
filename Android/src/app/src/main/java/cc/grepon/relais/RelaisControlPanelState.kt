@@ -72,8 +72,10 @@ data class RelaisControlPanelState(
  *
  * [initFailed] only produces the failed-init message while [running] is still true (review M1):
  * `RelaisNodeService` sets `lastInitFailed=true` on a failed attempt (e.g. a first-run gated-repo
- * 401) but never clears `shouldRun`/`lastInitFailed` itself — only the next init attempt (a fresh
- * START) resets `lastInitFailed`. So once the operator has explicitly STOPped, `running` is false
+ * 401) — and so does `RelaisEngine.ensureInitialized` when a real init attempt throws (feature-22,
+ * a request-driven reload after an idle unload) — but neither clears `shouldRun`; only the start
+ * of the next init attempt (a fresh START, or any real reload) resets `lastInitFailed`. So once
+ * the operator has explicitly STOPped, `running` is false
  * and any stale `initFailed` is ignored — the panel reads a plain, honest "node stopped", not a
  * message about an attempt that's no longer in flight.
  */

@@ -54,6 +54,8 @@ fun tilePresentation(state: NodeState): TilePresentation = when (state) {
   NodeState.STARTING -> TilePresentation("Relais · starting…", "coming up", TileState.ACTIVE)
   NodeState.OFF -> TilePresentation("Relais · off", "tap to start node", TileState.INACTIVE)
   NodeState.ERROR -> TilePresentation("Relais · error", "init failed — tap to retry", TileState.INACTIVE)
+  // feature-22 PR-B (task 4(c)): becomes WARM
+  NodeState.IDLE -> TilePresentation("Relais · idle", "engine released — wakes on request", TileState.ACTIVE)
 }
 
 /** What a single tile tap does. The tile is one-action, so the meaning is state-dependent. */
@@ -77,5 +79,7 @@ enum class TileAction { START, STOP, RUN_PROMPT }
 fun tileAction(state: NodeState, templateId: String?, ready: Boolean): TileAction = when (state) {
   NodeState.OFF, NodeState.ERROR -> TileAction.START
   NodeState.STARTING, NodeState.HOT -> TileAction.STOP
+  // feature-22 PR-B (task 4(c)): becomes WARM. STOP is parity: an idle node used to read STARTING.
+  NodeState.IDLE -> TileAction.STOP
   NodeState.LIVE -> if (ready && !templateId.isNullOrBlank()) TileAction.RUN_PROMPT else TileAction.STOP
 }

@@ -21,7 +21,7 @@ import cc.grepon.relais.ThermalGovernor
 
 /**
  * Thin node lifecycle + state read-model over the existing statics. UI surfaces (tile/widget) use
- * [state] for a single, consistent OFF/STARTING/LIVE/HOT/ERROR readout instead of each re-deriving it
+ * [state] for a single, consistent OFF/STARTING/LIVE/HOT/ERROR/IDLE readout instead of each re-deriving it
  * (which would drift). [start]/[stop] delegate to the existing [RelaisNodeService] companion methods.
  */
 object RelaisNodeController {
@@ -38,6 +38,7 @@ object RelaisNodeController {
       startupInProgress = liveness.startupInProgress,
       lastInitFailed = RelaisEngine.lastInitFailed,
       thermalStatus = ThermalGovernor.statusValue,
+      idleUnloaded = liveness.idleUnloaded,
     )
   }
 

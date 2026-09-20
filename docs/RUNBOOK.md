@@ -21,7 +21,7 @@ adb -s <serial> shell am start -n <appId>/cc.grepon.relais.RelaisControlActivity
 - The API key lives in `EncryptedSharedPreferences` — read it off the control-panel "ACCESS KEY" field.
 
 ## Health & monitoring
-- `GET /health` (no auth) → `{status, ready, thermal_state}`.
+- `GET /health` (no auth) → `{status, ready, thermal_state, state}`. `state` is the node's coarse state (`OFF`/`STARTING`/`LIVE`/`HOT`/`ERROR`/`IDLE`); `ready=false` with `state=IDLE` is a healthy node whose engine was released by idle-TTL and will warm on the next request — not a dead one.
 - `GET /metrics` → Prometheus text (or JSON via `Accept: application/json`). Dashboards/alerts:
   [`relais-grafana-dashboard.json`](relais-grafana-dashboard.json), [`relais-alerts.md`](relais-alerts.md).
 - Reach a node: `adb -s <serial> forward tcp:8443 tcp:8443` → `curl -k https://localhost:8443/health`.

@@ -48,6 +48,7 @@ import cc.grepon.relais.tts.buildTtsError
 import cc.grepon.relais.tts.parseSpeechRequest
 import cc.grepon.relais.tts.ttsContentType
 import cc.grepon.relais.batch.WebhookGuard
+import cc.grepon.relais.core.computeNodeState
 import cc.grepon.relais.data.BatchJob
 import cc.grepon.relais.data.BatchStatus
 import cc.grepon.relais.data.RelaisDatabase
@@ -946,9 +947,27 @@ class RelaisHttpServer(
   }
 
   private fun handleHealth(ctx: RequestContext) {
+    // Unauthenticated route: whatever goes in is public. `state` is a coarse enum name only — no
+    // model id, no path, no client detail. Snapshot FIRST, engine flags after (the read-order rule
+    // in computeNodeState's KDoc), so `state` tells an idle-unloaded node from a dead one.
+    val liveness = RelaisLivenessState.snapshot
+    val ready = RelaisEngine.isReady
+    val state = computeNodeState(
+      shouldRun = RelaisConfig.shouldRun(context),
+      ready = ready,
+      listenersUp = liveness.listenersUp,
+      startupInProgress = liveness.startupInProgress,
+      lastInitFailed = RelaisEngine.lastInitFailed,
+      thermalStatus = ThermalGovernor.statusValue,
+      idleUnloaded = liveness.idleUnloaded,
+    )
     ctx.send(
       200,
-      JSONObject().put("status", "ok").put("ready", RelaisEngine.isReady).put("thermal_state", ThermalGovernor.statusValue),
+      JSONObject()
+        .put("status", "ok")
+        .put("ready", ready)
+        .put("thermal_state", ThermalGovernor.statusValue)
+        .put("state", state.name),
     )
   }
 

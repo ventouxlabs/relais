@@ -121,6 +121,8 @@ private fun StatusLine(nodeState: NodeState) {
     NodeState.STARTING -> "○ starting…" to Muted
     NodeState.ERROR -> "○ error — open app" to Muted
     NodeState.OFF -> "○ off — open app to start" to Muted
+    // feature-22 PR-B (task 4(c)): becomes WARM ("tap to warm"; canRun includes IDLE)
+    NodeState.IDLE -> "○ idle — engine released" to Muted
   }
   Text(text = "relais  $label", style = TextStyle(color = ColorProvider(accent), fontSize = 13.sp))
 }

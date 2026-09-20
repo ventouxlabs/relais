@@ -20,6 +20,7 @@ package cc.grepon.relais
 
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -33,7 +34,15 @@ import org.robolectric.annotation.Config
  *     still present and un-double-counted;
  *  2. the `relais_completion_tokens` histogram (buckets + sum + count, negative guard);
  *  3. `relais_thermal_events_total{level}` + the [RelaisMetrics.thermalLabel] whitelist;
- *  4. the [RelaisMetrics.endpointLabel] cardinality guard (unknown -> "other").
+ *  4. the [RelaisMetrics.endpointLabel] cardinality guard (unknown -> "other");
+ *  5. the recent-request ring-buffer opt-out (feature-09 Task 1);
+ *  6. `relais_engine_load_duration_seconds` — the feature-22 engine-load histogram fed by
+ *     [cc.grepon.relais.RelaisEngine.ensureInitialized]'s real-init success path only.
+ *  7. `relais_engine_unloads_total` (feature-22 Task 2, delta-asserted — see item 6's sibling gotcha)
+ *     and `relais_engine_idle_seconds`, whose value is injected via [RelaisMetrics.renderProm]'s /
+ *     [RelaisMetrics.renderJson]'s `idleSecondsSupplier` parameter rather than driven through a real
+ *     [cc.grepon.relais.RelaisEngine] (deliberately no Robolectric engine harness for this — see the
+ *     task-2 brief).
  *
  * Uses Robolectric only for a Context (renderProm needs one for build_info); the metric logic itself
  * is process-global and reset per test via the dedicated test seam.
@@ -264,6 +273,182 @@ class RelaisMetricsIncrementsTest {
     assertTrue(
       "the default must still append — the opt-out is opt-in, not opt-out-by-default",
       RelaisMetrics.recentRequests().any { it.endpoint == label },
+    )
+  }
+
+  // --- 6. engine-load-duration histogram (feature-22 Task 1) --------------------------------------
+
+  /**
+   * Mirrors [RelaisTtftMetricsTest]'s TTFT histogram tests but for the coarser, seconds-based
+   * `relais_engine_load_duration_seconds` series that [cc.grepon.relais.RelaisEngine.ensureInitialized]
+   * feeds only on its real-init success path (never the `isReady` fast-path — that would fill the
+   * histogram with zeros). Asserts rendered `_bucket`/`_sum`/`_count` lines, never a name grep.
+   */
+  @Test
+  fun `engine load duration lands in cumulative buckets with sum and count`() {
+    RelaisMetrics.recordEngineLoad(1.5) // <=2.0
+    RelaisMetrics.recordEngineLoad(15.0) // <=20.0
+
+    val prom = RelaisMetrics.renderProm(context)
+
+    assertTrue(
+      "the series must be declared a histogram",
+      prom.contains("# TYPE relais_engine_load_duration_seconds histogram"),
+    )
+    assertTrue(
+      "le=1.0 must be 0 — neither sample is that fast",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"1.0\"} 0"),
+    )
+    assertTrue(
+      "le=2.0 must be cumulative-1 (the 1.5s sample)",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"2.0\"} 1"),
+    )
+    assertTrue(
+      "le=20.0 must be cumulative-2 (both samples)",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"20.0\"} 2"),
+    )
+    assertTrue(
+      "+Inf must equal the total count",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"+Inf\"} 2"),
+    )
+    assertTrue("_sum must be 16.5", prom.contains("relais_engine_load_duration_seconds_sum 16.5"))
+    assertTrue("_count must be 2", prom.contains("relais_engine_load_duration_seconds_count 2"))
+  }
+
+  @Test
+  fun `an engine load above the largest bound lands only in the +Inf bucket`() {
+    RelaisMetrics.recordEngineLoad(200.0)
+
+    val prom = RelaisMetrics.renderProm(context)
+
+    assertTrue(
+      "le=120.0 must stay 0 — 200s is above the largest explicit bound",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"120.0\"} 0"),
+    )
+    assertTrue(
+      "+Inf must capture it",
+      prom.contains("relais_engine_load_duration_seconds_bucket{le=\"+Inf\"} 1"),
+    )
+    assertTrue("_count must be 1", prom.contains("relais_engine_load_duration_seconds_count 1"))
+  }
+
+  @Test
+  fun `resetIncrementsForTest clears the engine-load histogram`() {
+    RelaisMetrics.recordEngineLoad(5.0)
+
+    RelaisMetrics.resetIncrementsForTest()
+    val prom = RelaisMetrics.renderProm(context)
+
+    assertTrue("count cleared", prom.contains("relais_engine_load_duration_seconds_count 0"))
+    assertTrue("sum cleared", prom.contains("relais_engine_load_duration_seconds_sum 0.0"))
+  }
+
+  @Test
+  fun `renderJson exposes engine_load_p50_seconds beside the other histogram quantiles`() {
+    RelaisMetrics.recordEngineLoad(1.0)
+    RelaisMetrics.recordEngineLoad(5.0)
+
+    val json = RelaisMetrics.renderJson(context)
+
+    assertTrue("HUD must expose an engine-load p50", json.has("engine_load_p50_seconds"))
+    assertEquals(
+      "p50 of {1.0, 5.0} is the 1.0 bucket bound",
+      1.0,
+      json.getDouble("engine_load_p50_seconds"),
+      1e-9,
+    )
+  }
+
+  @Test
+  fun `engine_load_p50_seconds is zero when nothing has been recorded`() {
+    val json = RelaisMetrics.renderJson(context)
+    assertEquals(
+      "an empty histogram reports 0.0, not a bucket bound",
+      0.0,
+      json.getDouble("engine_load_p50_seconds"),
+      1e-9,
+    )
+  }
+
+  // --- 7. unload counter + idle gauge (feature-22 Task 2) -----------------------------------------
+
+  /**
+   * `resetIncrementsForTest` does NOT clear plain counters (its own KDoc says so, and this task's
+   * brief repeats it as a GOTCHA), and [RelaisEngineIdleReleaseTest] exercises the real
+   * `RelaisEngine.releaseIfIdle` thousands of times in this same test process — so the absolute
+   * counter value here is unpredictable by test order. Delta-asserted, not compared to a fixed value.
+   */
+  @Test
+  fun `recordEngineUnload moves relais_engine_unloads_total by exactly one in both renders`() {
+    fun promCount(): Long =
+      RelaisMetrics.renderProm(context).lines()
+        .firstOrNull { it.startsWith("relais_engine_unloads_total ") }
+        ?.substringAfterLast(' ')
+        ?.trim()
+        ?.toLong()
+        ?: error("relais_engine_unloads_total line missing from the Prometheus render")
+
+    fun jsonCount(): Long = RelaisMetrics.renderJson(context).getLong("engine_unloads_total")
+
+    val promBefore = promCount()
+    val jsonBefore = jsonCount()
+
+    RelaisMetrics.recordEngineUnload()
+
+    assertEquals("Prometheus counter must move by exactly 1", promBefore + 1, promCount())
+    assertEquals("JSON counter must move by exactly 1", jsonBefore + 1, jsonCount())
+  }
+
+  @Test
+  fun `relais_engine_unloads_total is declared a counter with no labels`() {
+    val prom = RelaisMetrics.renderProm(context)
+    assertTrue(
+      "the series must be declared a counter",
+      prom.contains("# TYPE relais_engine_unloads_total counter"),
+    )
+    val line = prom.lines().first { it.startsWith("relais_engine_unloads_total ") }
+    assertFalse("no labels on this series (M6 label hygiene) — a bare value only", line.contains("{"))
+  }
+
+  @Test
+  fun `relais_engine_idle_seconds renders the supplied value when non-null`() {
+    val prom = RelaisMetrics.renderProm(context) { 42.5 }
+
+    assertTrue(
+      "the series must be declared a gauge",
+      prom.contains("# TYPE relais_engine_idle_seconds gauge"),
+    )
+    assertEquals(
+      "relais_engine_idle_seconds 42.5",
+      prom.lines().first { it.startsWith("relais_engine_idle_seconds ") },
+    )
+  }
+
+  @Test
+  fun `relais_engine_idle_seconds is entirely absent from the Prometheus render when null`() {
+    val prom = RelaisMetrics.renderProm(context) { null }
+
+    assertFalse(
+      "no HELP, TYPE, or value line — the series must not exist while the engine has never been active",
+      prom.contains("relais_engine_idle_seconds"),
+    )
+  }
+
+  @Test
+  fun `renderJson includes idle_seconds when the supplier returns a value`() {
+    val json = RelaisMetrics.renderJson(context) { 7.25 }
+
+    assertTrue("idle_seconds must be present when supplied", json.has("idle_seconds"))
+    assertEquals(7.25, json.getDouble("idle_seconds"), 1e-9)
+  }
+
+  @Test
+  fun `renderJson omits idle_seconds entirely when the supplier returns null`() {
+    val json = RelaisMetrics.renderJson(context) { null }
+
+    assertFalse(
+      "no idle_seconds key at all — never-served omits the field rather than encoding 0 or null",
+      json.has("idle_seconds"),
     )
   }
 }
