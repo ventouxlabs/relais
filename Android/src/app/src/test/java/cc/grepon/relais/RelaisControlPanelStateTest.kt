@@ -717,6 +717,9 @@ class RelaisControlPanelStateTest {
     assertEquals(NodeStatus.STARTING, s.status)
     assertNotEquals(NodeStatus.IDLE, s.status)
     assertEquals(PrimaryAction.CANCEL, s.primaryAction)
+    // The four-way with the listeners ALSO down (a bind-failed node, evicted by the TTL, now being
+    // restarted by the watchdog) is STARTING too — pinned so the fall-through is stated, not assumed.
+    assertEquals(NodeStatus.STARTING, idle(startupInProgress = true, listenersUp = false).status)
   }
 
   @Test
