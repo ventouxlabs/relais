@@ -151,7 +151,11 @@ fun computeControlPanelState(
   // a mid-download model change could resurrect a superseded path once the in-flight ensureModel()
   // resolves. A failed attempt is not "provisioning" — the row must stay open so the likely fix
   // (a different model/token) is reachable without a detour.
-  val nodeBusy = status == NodeStatus.STARTING
+  // Also locked on IDLE (#337): the picker persists the new path through the download funnel, but
+  // `RelaisModelProvisioner.cachedPath` is never invalidated on an id change, so until `remember`
+  // completes an idle reload can load the OLD weights under the NEW id. This does not close that
+  // window (MODELS is one bottom-nav tap away); it refuses to widen it onto the idle dashboard.
+  val nodeBusy = status == NodeStatus.STARTING || status == NodeStatus.IDLE
   val progressVisible = status == NodeStatus.STARTING && phase == ProvisionPhase.DOWNLOADING && downloadTotalBytes > 0
   val thermalShed = status == NodeStatus.LIVE && thermalShedding
   return RelaisControlPanelState(
@@ -166,12 +170,18 @@ fun computeControlPanelState(
       NodeStatus.OFFLINE -> PrimaryAction.START // also the retry action for the failed sub-state
     },
     modelRowEnabled = !nodeBusy,
-    modelLockedCaption = if (nodeBusy) "model locked while starting" else null,
-    // LIVE or IDLE: both mean "reachable" — hiding LOCAL and muting LAN on an idle node would
-    // contradict its own label. (IDLE puts the hero treatment on a non-LIVE state; DESIGN.md's
-    // "LIVE LAN endpoint only" predates idle-unload and reachability is what the hero marks.)
+    // Same two captions Configure uses, so the two screens never disagree about why the row is shut.
+    modelLockedCaption =
+      when {
+        !nodeBusy -> null
+        status == NodeStatus.IDLE -> "model locked while engine released · switch from the dashboard"
+        else -> "model locked while starting"
+      },
+    // LOCAL is shown while the node is reachable — LIVE or IDLE; hiding it on a node whose label
+    // says "reachable" would contradict the label. The LAN value is shown in every state; only its
+    // hero (Paper) treatment is LIVE-only, by DESIGN.md §Typography — IDLE gets the Muted preview.
     showLocalEndpoint = status == NodeStatus.LIVE || status == NodeStatus.IDLE,
-    lanEndpointLive = status == NodeStatus.LIVE || status == NodeStatus.IDLE,
+    lanEndpointLive = status == NodeStatus.LIVE,
     showProgressBar = progressVisible,
     progressFraction = if (progressVisible) downloadProgressFraction(downloadReceivedBytes, downloadTotalBytes) else null,
   )

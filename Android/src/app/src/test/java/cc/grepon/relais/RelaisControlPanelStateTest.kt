@@ -208,14 +208,17 @@ class RelaisControlPanelStateTest {
   }
 
   // ---------------------------------------------------------------------------
-  // Endpoint row visibility (§4.1-4.3) — LOCAL only LIVE; LAN Paper only LIVE
+  // Endpoint row visibility (§4.1-4.3) — LOCAL shown while reachable (LIVE or IDLE); LAN Paper
+  // (the hero row) LIVE only, per DESIGN.md §Typography.
   // ---------------------------------------------------------------------------
 
   @Test
-  fun `LOCAL endpoint row is hidden unless LIVE`() {
+  fun `LOCAL endpoint row is shown only while reachable — LIVE or IDLE`() {
     assertFalse(computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).showLocalEndpoint)
     assertFalse(computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).showLocalEndpoint)
     assertTrue(computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).showLocalEndpoint)
+    // IDLE is reachable — the loopback endpoint is real and the row must not vanish (feature-22).
+    assertTrue(computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = true).showLocalEndpoint)
   }
 
   @Test
@@ -223,6 +226,8 @@ class RelaisControlPanelStateTest {
     assertFalse(computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).lanEndpointLive)
     assertFalse(computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).lanEndpointLive)
     assertTrue(computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).lanEndpointLive)
+    // IDLE too: the hero treatment is LIVE-only by DESIGN.md, pinned beside its IDLE twin.
+    assertFalse(computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = true).lanEndpointLive)
   }
 
   // ---------------------------------------------------------------------------
@@ -678,12 +683,13 @@ class RelaisControlPanelStateTest {
     assertFalse("idle is the quiet default, not an attention state", s.detailLineBright)
     assertFalse(s.showProgressBar)
     assertNull(s.progressFraction)
-    // The MODEL row follows the pre-existing `status == STARTING` lockout, so it stays open while
-    // idle: the in-app route (MODELS destination) persists through the download/provision funnel,
-    // which is the case ModelSwitch.applyManualId's KDoc calls safe. Configure's row is the one that
-    // stays locked (#337). If that ruling changes, this row changes with it.
-    assertTrue(s.modelRowEnabled)
-    assertNull(s.modelLockedCaption)
+    // The MODEL row is LOCKED on IDLE, with the same caption Configure shows (#337): the panel's
+    // picker persists the new path through the download funnel, but `cachedPath` is never
+    // invalidated on an id change, so until `remember` completes an idle reload can pair the OLD
+    // path with the NEW id. Locking here does not close that window (MODELS is one bottom-nav tap
+    // away) — it refuses to widen it onto the surface the operator is looking at.
+    assertFalse(s.modelRowEnabled)
+    assertEquals("model locked while engine released · switch from the dashboard", s.modelLockedCaption)
   }
 
   @Test
@@ -734,11 +740,19 @@ class RelaisControlPanelStateTest {
   }
 
   @Test
-  fun `IDLE advertises both endpoints — the node's whole promise is that it is reachable`() {
-    // Hiding LOCAL and muting LAN on a node whose label says "reachable" would contradict the label.
+  fun `IDLE shows the LOCAL endpoint — the node is reachable`() {
+    // Hiding LOCAL on a node whose label says "reachable" would contradict the label.
+    assertTrue(idle().showLocalEndpoint)
+  }
+
+  @Test
+  fun `IDLE keeps the LAN endpoint Muted — the hero row is LIVE-only by DESIGN dot md`() {
+    // "hero 17sp … LIVE LAN endpoint only" (DESIGN.md §Typography): the LAN value is still shown,
+    // as the Muted preview, exactly as STARTING and OFFLINE show it. Both rows in one place so the
+    // asymmetry is stated: LOCAL keys on reachability, the hero keys on LIVE.
     val s = idle()
+    assertFalse(s.lanEndpointLive)
     assertTrue(s.showLocalEndpoint)
-    assertTrue(s.lanEndpointLive)
   }
 
   @Test

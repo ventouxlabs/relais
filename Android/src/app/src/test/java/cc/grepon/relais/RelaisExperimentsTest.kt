@@ -39,7 +39,14 @@ class RelaisExperimentsTest {
     modelId: String = "gemma-3n-e4b",
     capabilities: String = "multimodal,tools,reasoning",
     idleUnloaded: Boolean = false,
-  ) = assembleExperimentsStatus(engineReady, listenersUp, startupInProgress, modelId, capabilities, idleUnloaded)
+  ) = assembleExperimentsStatus(
+    engineReady = engineReady,
+    listenersUp = listenersUp,
+    startupInProgress = startupInProgress,
+    currentModelId = modelId,
+    capabilities = capabilities,
+    idleUnloaded = idleUnloaded,
+  )
 
   // ---- assembler: status mapping mirrors the dashboard (DESIGN.md) ----
 
