@@ -25,7 +25,7 @@ package cc.grepon.relais
 data class ExperimentsStatus(
   /** True only when the engine is initialized AND the node's listeners are up — i.e. reachable. */
   val live: Boolean,
-  /** "LIVE" | "STARTING" | "OFFLINE" — same DESIGN.md status mapping as the dashboard. */
+  /** "LIVE" | "STARTING" | "IDLE" | "OFFLINE" — same DESIGN.md status mapping as the dashboard. */
   val statusLabel: String,
   val currentModelId: String,
   /** Comma-joined enabled capability names (e.g. "multimodal,tools,reasoning"). */
@@ -33,8 +33,9 @@ data class ExperimentsStatus(
 )
 
 /**
- * Pure assembler for [ExperimentsStatus]; keeps the LIVE/STARTING/OFFLINE mapping identical to
- * [assembleDashboardStatus] without dragging the full dashboard render model along.
+ * Pure assembler for [ExperimentsStatus]; keeps the LIVE/STARTING/IDLE/OFFLINE mapping identical to
+ * [assembleDashboardStatus] without dragging the full dashboard render model along — including why
+ * [idleUnloaded] is the one defaulted lifecycle input (its omission fails closed to OFFLINE).
  * No I/O, no Context, no Android — fully unit-testable on the JVM.
  */
 fun assembleExperimentsStatus(
@@ -43,6 +44,7 @@ fun assembleExperimentsStatus(
   startupInProgress: Boolean,
   currentModelId: String,
   capabilities: String,
+  idleUnloaded: Boolean = false,
 ): ExperimentsStatus =
   ExperimentsStatus(
     // Reachability, not engine residency — see [assembleDashboardStatus], which owns the rationale
@@ -51,6 +53,7 @@ fun assembleExperimentsStatus(
     statusLabel = when {
       engineReady && listenersUp -> "LIVE"
       startupInProgress -> "STARTING"
+      listenersUp && idleUnloaded -> "IDLE"
       else -> "OFFLINE"
     },
     currentModelId = currentModelId,
@@ -72,9 +75,10 @@ fun assembleExperimentsStatus(
  *  - All dynamic values are HTML-escaped via [escapeHtml] before interpolation.
  */
 fun renderExperimentsHtml(status: ExperimentsStatus, scriptNonce: String): String {
+  // IDLE takes the STARTING treatment (dimmed amber, no pulse) — see [renderDashboardHtml].
   val dotColor = when (status.statusLabel) {
     "LIVE" -> "#FFB000"
-    "STARTING" -> "rgba(255,176,0,0.6)"
+    "STARTING", "IDLE" -> "rgba(255,176,0,0.6)"
     else -> "#8A8780"
   }
   val dotPulse = if (status.live) " dot-pulse" else ""

@@ -1011,6 +1011,7 @@ class RelaisHttpServer(
         availableModelIdsFor(provisionedOnDisk(), configuredId, RelaisRuntimeCompat::incompatibleReason),
       switchLocked = startingNow,
       pendingModelId = pendingModelIdFor(configuredId, RelaisEngine.residentModelId),
+      idleUnloaded = liveness.idleUnloaded,
     )
     respondText(
       ctx.sock, 200, renderDashboardHtml(dashStatus), "text/html; charset=utf-8",
@@ -1031,6 +1032,7 @@ class RelaisHttpServer(
       startupInProgress = liveness.startupInProgress,
       currentModelId = RelaisConfig.modelId(context),
       capabilities = expCaps.toCapsString(),
+      idleUnloaded = liveness.idleUnloaded,
     )
     val nonce = Base64.encodeToString(ByteArray(16).also { SecureRandom().nextBytes(it) }, Base64.NO_WRAP)
     respondText(

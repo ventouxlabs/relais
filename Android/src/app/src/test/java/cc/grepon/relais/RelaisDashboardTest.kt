@@ -29,7 +29,7 @@ import org.junit.Test
  * Hermetic JVM tests for the pure dashboard functions (no Context, no Android).
  *
  * Tests:
- *  1. Status-label mapping (LIVE / STARTING / OFFLINE)
+ *  1. Status-label mapping (LIVE / STARTING / IDLE / OFFLINE)
  *  2. Thermal-label mapping (0..6 -> name, out-of-range -> UNKNOWN)
  *  3. Field pass-through (assembler doesn't drop or reorder values)
  *  4. escapeHtml helper (XSS guard: < > & " ' all escaped)
@@ -193,6 +193,99 @@ class RelaisDashboardTest {
     )
     assertEquals("LIVE", s.statusLabel)
     assertTrue(s.live)
+  }
+
+  // ---- IDLE (feature-22): engine released by the idle TTL, listeners still bound ----
+
+  /** The idle-unloaded node; the three flags default to the healthy idle shape. */
+  private fun idleStatus(
+    engineReady: Boolean = false,
+    listenersUp: Boolean = true,
+    startupInProgress: Boolean = false,
+  ) = assembleDashboardStatus(
+    engineReady = engineReady,
+    listenersUp = listenersUp,
+    startupInProgress = startupInProgress,
+    thermalStatus = 0,
+    decodeTokensPerSec = 0.0,
+    currentModelId = "litert-community/gemma-4-E4B-it-litert-lm",
+    uptimeSeconds = 900.0,
+    queueDepth = 0,
+    errorsTotal = 0L,
+    shedTotal = 0L,
+    recentRequests = emptyList(),
+    baseUrl = "https://192.168.1.42:8443/v1",
+    apiKeyMasked = "abcd…wxyz",
+    capabilities = "tools,reasoning",
+    idleUnloaded = true,
+  )
+
+  @Test
+  fun `listeners up with the engine released by the idle TTL reads IDLE, not OFFLINE`() {
+    val s = idleStatus()
+    assertEquals("IDLE", s.statusLabel)
+    assertFalse("the beacon pulses for LIVE only", s.live)
+  }
+
+  @Test
+  fun `LIVE beats a stale idleUnloaded flag`() {
+    // A ready, reachable engine is LIVE whatever the flag says — the engine IS resident.
+    val s = idleStatus(engineReady = true)
+    assertEquals("LIVE", s.statusLabel)
+    assertTrue(s.live)
+  }
+
+  @Test
+  fun `STARTING beats idleUnloaded — a reload in flight is not idle`() {
+    // Same precedence as computeNodeState (slot 3 > 5): a swap's plain beginStartup() lands before
+    // the real-init branch clears the flag, so the pair is observable for real.
+    val s = idleStatus(startupInProgress = true)
+    assertEquals("STARTING", s.statusLabel)
+    assertFalse(s.live)
+  }
+
+  @Test
+  fun `idleUnloaded with the listeners down reads OFFLINE, not IDLE`() {
+    // IDLE mirrors slot 5, which requires listenersUp: an unloaded engine behind torn-down listeners
+    // (a bind failure, then the TTL) is not "reachable, warms on request" — nothing can reach it.
+    val s = idleStatus(listenersUp = false)
+    assertEquals("OFFLINE", s.statusLabel)
+    assertNotEquals("IDLE", s.statusLabel)
+  }
+
+  @Test
+  fun `idleUnloaded defaults to false when omitted — the omission fails closed to OFFLINE`() {
+    // Listeners up, nothing in flight, engine down, flag OMITTED: the only honest default is
+    // OFFLINE. A default of true would label every dead-but-bound node "idle".
+    val s = assembleDashboardStatus(
+      engineReady = false,
+      listenersUp = true,
+      startupInProgress = false,
+      thermalStatus = 0,
+      decodeTokensPerSec = 0.0,
+      currentModelId = "x",
+      uptimeSeconds = 0.0,
+      queueDepth = 0,
+      errorsTotal = 0L,
+      shedTotal = 0L,
+      recentRequests = emptyList(),
+      baseUrl = "https://192.168.1.42:8443/v1",
+      apiKeyMasked = "abcd…wxyz",
+      capabilities = "tools,reasoning",
+    )
+    assertEquals("OFFLINE", s.statusLabel)
+    assertNotEquals("IDLE", s.statusLabel)
+  }
+
+  @Test
+  fun `renderDashboardHtml gives IDLE the STARTING dot — dimmed amber, no pulse`() {
+    // DESIGN.md has no idle colour; IDLE borrows STARTING's 60% amber and, like STARTING, never
+    // pulses (the beacon heartbeat is LIVE-only). Muted would read as OFFLINE, which is the defect.
+    val html = renderDashboardHtml(idleStatus())
+    assertTrue("IDLE dot must be the dimmed amber", html.contains("background: rgba(255,176,0,0.6);"))
+    assertFalse("IDLE dot must not carry the muted OFFLINE colour", html.contains("background: #8A8780;"))
+    assertTrue("status cell renders the label beside a static beacon", html.contains("""<span class="beacon"></span>IDLE"""))
+    assertFalse("no pulse off LIVE", html.contains("dot-pulse\"></span>"))
   }
 
   // ---------------------------------------------------------------------------
