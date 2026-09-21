@@ -84,6 +84,9 @@ fun DashboardScreen(
     when (state.status) {
       NodeStatus.LIVE -> Amber
       NodeStatus.STARTING -> Amber.copy(alpha = 0.6f)
+      // The STARTING treatment: DESIGN.md defines no idle colour, and Muted would read as OFFLINE —
+      // the very defect IDLE exists to fix. The pulse below stays LIVE-only.
+      NodeStatus.IDLE -> Amber.copy(alpha = 0.6f)
       NodeStatus.OFFLINE -> Muted
     }
   // State transitions crossfade color over ~300ms (§5) instead of an instant color jump.

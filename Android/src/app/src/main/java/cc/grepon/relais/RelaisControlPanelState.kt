@@ -23,8 +23,13 @@ import java.util.Locale
 /** The single state-appropriate primary action (AUDIT.md §4.0) — never more than one per screen. */
 enum class PrimaryAction { START, CANCEL, STOP }
 
-/** The three top-level home-screen states. THERMAL SHED is a LIVE sub-state, not a fourth value (§4.4). */
-enum class NodeStatus { OFFLINE, STARTING, LIVE }
+/**
+ * The top-level home-screen states. THERMAL SHED is a LIVE sub-state, not a status value (§4.4).
+ * [IDLE] (feature-22): the engine was released by the idle TTL while both listeners stayed bound —
+ * the node is running and reachable, and the next request reloads the model. Rendered with the
+ * STARTING colour treatment (DESIGN.md defines no idle colour) and never pulses.
+ */
+enum class NodeStatus { OFFLINE, STARTING, LIVE, IDLE }
 
 /** The provisioning phase behind STARTING (§4.2), so the phase line is never a bare "starting…". */
 enum class ProvisionPhase { IDLE, RESOLVING, DOWNLOADING, LOADING_ENGINE }
@@ -60,15 +65,18 @@ data class RelaisControlPanelState(
  * [RelaisEngine.isReady] / [RelaisConfig.shouldRun]; [thermalShedding] mirrors
  * [ThermalGovernor.shouldShed]; [phase] and the download byte counts mirror [RelaisNodeProgress];
  * [initFailed] mirrors [RelaisEngine.lastInitFailed] (already consumed by the QS tile);
- * [listenersUp] and [startupInProgress] come from one [RelaisLivenessState.snapshot].
+ * [listenersUp], [startupInProgress] and [idleUnloaded] come from one [RelaisLivenessState.snapshot],
+ * taken BEFORE [ready] and [initFailed] (the read-order rule in `computeNodeState`'s KDoc).
  *
- * [listenersUp] is deliberately **required** while every other added signal is defaulted, and the
+ * [listenersUp] is deliberately **required** while the other added signals are defaulted, and the
  * asymmetry is the safety property: omitting [startupInProgress] can only under-report (STARTING
  * degrades to OFFLINE, an honest state that still offers the retry), whereas omitting [listenersUp]
  * would fabricate reachability — a false LIVE for a node nothing can reach, which is exactly the
  * defect this parameter exists to prevent. A new surface must not be able to opt into that by
  * saying nothing. (Better still, a new surface should read [RelaisNodeController.state] instead of
- * re-deriving this at all.)
+ * re-deriving this at all.) [idleUnloaded] is required for the same reason: its omission would
+ * fail OPEN into STARTING — a CANCEL button and a phase line for a node that is healthy — and
+ * after three polls into the stalled-start copy; the caller must say which it is.
  *
  * [initFailed] only produces the failed-init message while [running] is still true (review M1):
  * `RelaisNodeService` sets `lastInitFailed=true` on a failed attempt (e.g. a first-run gated-repo
@@ -88,6 +96,7 @@ fun computeControlPanelState(
   downloadReceivedBytes: Long,
   downloadTotalBytes: Long,
   listenersUp: Boolean,
+  idleUnloaded: Boolean,
   initFailed: Boolean = false,
   stalledStart: Boolean = false,
   startupInProgress: Boolean = false,
@@ -125,6 +134,16 @@ fun computeControlPanelState(
     // OFFLINE would flash a START button through the tail of every healthy start.
     ready && startupInProgress -> NodeStatus.STARTING
     failed -> NodeStatus.OFFLINE // OFFLINE-rendered on purpose (§ review M1): retry via START, never CANCEL-locked.
+    // Below `failed`, above `running -> STARTING` — computeNodeState's slot 4 > 5 > 6, and with the
+    // stall detector excluding idle (RelaisShellViewModel.looksStalled), `failed` on an idle node
+    // reduces to [initFailed]: a broken node must never read IDLE, the one state the watchdog leaves
+    // alone. Requires [listenersUp] for the same reason LIVE does — IDLE promises "reachable, warms on
+    // the next request", and an unloaded engine behind torn-down listeners is not that; it falls
+    // through to STARTING, which is what lets the watchdog's shield drop. And `!startupInProgress`
+    // (slot 3 > 5): the swap thread and ensureInitializedInBackground publish a plain beginStartup()
+    // before the real-init branch clears idle, and every other surface reads STARTING through that
+    // window — this panel must not be the one that says IDLE.
+    running && listenersUp && idleUnloaded && !startupInProgress -> NodeStatus.IDLE
     running -> NodeStatus.STARTING
     else -> NodeStatus.OFFLINE
   }
@@ -142,13 +161,17 @@ fun computeControlPanelState(
     detailLineBright = thermalShed || failed,
     primaryAction = when (status) {
       NodeStatus.LIVE -> PrimaryAction.STOP
+      NodeStatus.IDLE -> PrimaryAction.STOP
       NodeStatus.STARTING -> PrimaryAction.CANCEL
       NodeStatus.OFFLINE -> PrimaryAction.START // also the retry action for the failed sub-state
     },
     modelRowEnabled = !nodeBusy,
     modelLockedCaption = if (nodeBusy) "model locked while starting" else null,
-    showLocalEndpoint = status == NodeStatus.LIVE,
-    lanEndpointLive = status == NodeStatus.LIVE,
+    // LIVE or IDLE: both mean "reachable" — hiding LOCAL and muting LAN on an idle node would
+    // contradict its own label. (IDLE puts the hero treatment on a non-LIVE state; DESIGN.md's
+    // "LIVE LAN endpoint only" predates idle-unload and reachability is what the hero marks.)
+    showLocalEndpoint = status == NodeStatus.LIVE || status == NodeStatus.IDLE,
+    lanEndpointLive = status == NodeStatus.LIVE || status == NodeStatus.IDLE,
     showProgressBar = progressVisible,
     progressFraction = if (progressVisible) downloadProgressFraction(downloadReceivedBytes, downloadTotalBytes) else null,
   )
@@ -190,6 +213,11 @@ internal fun controlPanelDetailLine(
     // layer is responsible for the color choice; this function only owns the text.
     status == NodeStatus.LIVE && thermalShedding -> "thermal · shedding load"
     status == NodeStatus.LIVE -> "engine resident · $modelDisplayName"
+    // Explicit, because this `when` is over booleans and a missing row falls to "node stopped".
+    // No phase line: RelaisNodeProgress.phase can be a stale LOADING_ENGINE after a request-driven
+    // reload, and the panel must not reset it — so the row never consults [phase]. Copy matches the
+    // foreground notification and the QS tile; Muted (the quiet default), primary action STOP.
+    status == NodeStatus.IDLE -> "idle · engine released — wakes on the next request"
     status == NodeStatus.STARTING -> provisionPhaseLine(phase, downloadReceivedBytes, downloadTotalBytes)
     else -> "node stopped · $modelDisplayName"
   }

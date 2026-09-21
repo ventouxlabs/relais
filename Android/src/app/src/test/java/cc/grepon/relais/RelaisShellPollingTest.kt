@@ -19,6 +19,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -86,5 +87,32 @@ class RelaisShellPollingTest {
     advanceTimeBy(60_000)
     runCurrent()
     assertEquals("no collector → only the eager seed produce(), no polling", 1, calls.get())
+  }
+
+  // ---------------------------------------------------------------------------
+  // #217 stall predicate × feature-22 idle-unload. The detector's premise — "running with no init
+  // in flight means the service died" — predates idle-unload: an idle node is running, not ready,
+  // and has nothing in flight BY DESIGN. Without the exclusion it read "node not running · press
+  // START" after three polls, and START is a full service re-init with a listener bounce.
+  // ---------------------------------------------------------------------------
+
+  @Test
+  fun `an idle-unloaded node never looks stalled while a dead one still does`() {
+    // Both rows in ONE test: the exclusion only discriminates beside its positive twin.
+    assertFalse(
+      "idle-unloaded is a healthy state, not a stall",
+      looksStalled(running = true, ready = false, startupInProgress = false, idleUnloaded = true),
+    )
+    assertTrue(
+      "the original #217 case — service died under a persisted shouldRun — must still count",
+      looksStalled(running = true, ready = false, startupInProgress = false, idleUnloaded = false),
+    )
+  }
+
+  @Test
+  fun `looksStalled needs running, not ready, and nothing in flight`() {
+    assertFalse("stopped", looksStalled(running = false, ready = false, startupInProgress = false, idleUnloaded = false))
+    assertFalse("ready", looksStalled(running = true, ready = true, startupInProgress = false, idleUnloaded = false))
+    assertFalse("init in flight", looksStalled(running = true, ready = false, startupInProgress = true, idleUnloaded = false))
   }
 }

@@ -41,7 +41,7 @@ class RelaisControlPanelStateTest {
       ready = true, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals(NodeStatus.LIVE, s.status)
     assertEquals("LIVE", s.statusWord)
@@ -54,7 +54,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.RESOLVING,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals(NodeStatus.STARTING, s.status)
     assertEquals("STARTING", s.statusWord)
@@ -67,7 +67,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = false, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals(NodeStatus.OFFLINE, s.status)
     assertEquals("OFFLINE", s.statusWord)
@@ -77,9 +77,9 @@ class RelaisControlPanelStateTest {
   @Test
   fun `never more than one primary action across all three states`() {
     val actions = listOf(
-      computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true).primaryAction,
-      computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true).primaryAction,
-      computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true).primaryAction,
+      computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).primaryAction,
+      computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).primaryAction,
+      computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).primaryAction,
     )
     assertEquals(setOf(PrimaryAction.STOP, PrimaryAction.CANCEL, PrimaryAction.START), actions.toSet())
   }
@@ -94,7 +94,7 @@ class RelaisControlPanelStateTest {
       ready = true, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals("engine resident · Gemma 4 E2B", s.detailLine)
   }
@@ -105,7 +105,7 @@ class RelaisControlPanelStateTest {
       ready = true, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = true, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals("thermal · shedding load", s.detailLine)
     // Still LIVE — thermal shed is a sub-state, not a fourth top-level status (§4.4).
@@ -119,7 +119,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = false, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals("node stopped · Gemma 4 E2B", s.detailLine)
   }
@@ -130,7 +130,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.RESOLVING,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals("resolving model…", s.detailLine)
   }
@@ -141,7 +141,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.LOADING_ENGINE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals("loading engine…", s.detailLine)
   }
@@ -152,7 +152,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.DOWNLOADING,
       downloadReceivedBytes = 1_200_000_000L, downloadTotalBytes = 2_800_000_000L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals("downloading model · 42% · 1.2/2.8 GB", s.detailLine)
   }
@@ -163,7 +163,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.DOWNLOADING,
       downloadReceivedBytes = 500_000_000L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals("downloading model…", s.detailLine)
   }
@@ -175,7 +175,7 @@ class RelaisControlPanelStateTest {
         ready = false, running = true, modelDisplayName = "m",
         thermalShedding = false, phase = phase,
         downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
       )
       assertFalse("phase=$phase must not render bare starting text", s.detailLine == "starting…")
       assertTrue("phase=$phase detail line must be non-blank", s.detailLine.isNotBlank())
@@ -188,21 +188,21 @@ class RelaisControlPanelStateTest {
 
   @Test
   fun `model row is enabled and uncaptioned when OFFLINE`() {
-    val s = computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true)
+    val s = computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false)
     assertTrue(s.modelRowEnabled)
     assertNull(s.modelLockedCaption)
   }
 
   @Test
   fun `model row is enabled and uncaptioned when LIVE`() {
-    val s = computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true)
+    val s = computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false)
     assertTrue(s.modelRowEnabled)
     assertNull(s.modelLockedCaption)
   }
 
   @Test
   fun `model row is disabled with explanation caption when STARTING`() {
-    val s = computeControlPanelState(false, true, "m", false, ProvisionPhase.RESOLVING, 0, 0, listenersUp = true)
+    val s = computeControlPanelState(false, true, "m", false, ProvisionPhase.RESOLVING, 0, 0, listenersUp = true, idleUnloaded = false)
     assertFalse(s.modelRowEnabled)
     assertEquals("model locked while starting", s.modelLockedCaption)
   }
@@ -213,16 +213,16 @@ class RelaisControlPanelStateTest {
 
   @Test
   fun `LOCAL endpoint row is hidden unless LIVE`() {
-    assertFalse(computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true).showLocalEndpoint)
-    assertFalse(computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true).showLocalEndpoint)
-    assertTrue(computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true).showLocalEndpoint)
+    assertFalse(computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).showLocalEndpoint)
+    assertFalse(computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).showLocalEndpoint)
+    assertTrue(computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).showLocalEndpoint)
   }
 
   @Test
   fun `LAN endpoint renders Paper only when LIVE, Muted otherwise`() {
-    assertFalse(computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true).lanEndpointLive)
-    assertFalse(computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true).lanEndpointLive)
-    assertTrue(computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true).lanEndpointLive)
+    assertFalse(computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).lanEndpointLive)
+    assertFalse(computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).lanEndpointLive)
+    assertTrue(computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, listenersUp = true, idleUnloaded = false).lanEndpointLive)
   }
 
   // ---------------------------------------------------------------------------
@@ -233,22 +233,22 @@ class RelaisControlPanelStateTest {
   fun `progress bar is visible only during DOWNLOADING with a known total`() {
     val downloading = computeControlPanelState(
       false, true, "m", false, ProvisionPhase.DOWNLOADING, 1_000_000_000L, 2_000_000_000L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertTrue(downloading.showProgressBar)
     assertEquals(0.5f, requireNotNull(downloading.progressFraction), 0.0001f)
 
     val unknownTotal = computeControlPanelState(
       false, true, "m", false, ProvisionPhase.DOWNLOADING, 1_000_000_000L, 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertFalse(unknownTotal.showProgressBar)
     assertNull(unknownTotal.progressFraction)
 
-    val resolving = computeControlPanelState(false, true, "m", false, ProvisionPhase.RESOLVING, 0L, 0L, listenersUp = true)
+    val resolving = computeControlPanelState(false, true, "m", false, ProvisionPhase.RESOLVING, 0L, 0L, listenersUp = true, idleUnloaded = false)
     assertFalse(resolving.showProgressBar)
 
-    val live = computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0L, 0L, listenersUp = true)
+    val live = computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0L, 0L, listenersUp = true, idleUnloaded = false)
     assertFalse(live.showProgressBar)
   }
 
@@ -256,7 +256,7 @@ class RelaisControlPanelStateTest {
   fun `progress fraction is coerced into 0 to 1`() {
     val overReceived = computeControlPanelState(
       false, true, "m", false, ProvisionPhase.DOWNLOADING, 5_000_000_000L, 2_000_000_000L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals(1f, requireNotNull(overReceived.progressFraction), 0.0001f)
   }
@@ -301,7 +301,7 @@ class RelaisControlPanelStateTest {
         thermalShedding = false, phase = ProvisionPhase.IDLE,
         downloadReceivedBytes = 0, downloadTotalBytes = 0,
         initFailed = false, stalledStart = true,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
       )
     assertEquals(NodeStatus.OFFLINE, s.status)
     assertEquals(PrimaryAction.START, s.primaryAction)
@@ -316,13 +316,13 @@ class RelaisControlPanelStateTest {
       computeControlPanelState(
         false, true, "m", false, ProvisionPhase.IDLE, 0, 0,
         initFailed = false, stalledStart = true,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
       )
     val failedInit =
       computeControlPanelState(
         false, true, "m", false, ProvisionPhase.IDLE, 0, 0,
         initFailed = true, stalledStart = false,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
       )
     assertEquals("node not running · press START", stalled.detailLine)
     assertEquals("start failed · check model/token, then START again", failedInit.detailLine)
@@ -340,7 +340,7 @@ class RelaisControlPanelStateTest {
       computeControlPanelState(
         false, true, "m", false, ProvisionPhase.IDLE, 0, 0,
         initFailed = true, stalledStart = true,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
       )
     assertEquals(NodeStatus.OFFLINE, s.status)
     assertEquals(PrimaryAction.START, s.primaryAction)
@@ -354,7 +354,7 @@ class RelaisControlPanelStateTest {
       computeControlPanelState(
         false, true, "m", false, ProvisionPhase.DOWNLOADING, 500, 1000,
         initFailed = false, stalledStart = false,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
       )
     assertEquals(NodeStatus.STARTING, s.status)
     assertEquals(PrimaryAction.CANCEL, s.primaryAction)
@@ -368,7 +368,7 @@ class RelaisControlPanelStateTest {
       computeControlPanelState(
         false, false, "m", false, ProvisionPhase.IDLE, 0, 0,
         initFailed = false, stalledStart = true,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
       )
     assertEquals(NodeStatus.OFFLINE, s.status)
     assertEquals("node stopped · m", s.detailLine)
@@ -421,7 +421,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.RESOLVING,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L, initFailed = true,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals(NodeStatus.OFFLINE, s.status)
     assertEquals("OFFLINE", s.statusWord)
@@ -446,7 +446,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = false, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L, initFailed = true,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals(NodeStatus.OFFLINE, s.status)
     assertEquals("node stopped · Gemma 4 E2B", s.detailLine)
@@ -460,7 +460,7 @@ class RelaisControlPanelStateTest {
       ready = true, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L, initFailed = true,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals(NodeStatus.LIVE, s.status)
     assertEquals("engine resident · Gemma 4 E2B", s.detailLine)
@@ -472,7 +472,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = true, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.RESOLVING,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L, initFailed = false,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals(NodeStatus.STARTING, s.status)
     assertEquals("resolving model…", s.detailLine)
@@ -485,7 +485,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = true, modelDisplayName = "m",
       thermalShedding = false, phase = ProvisionPhase.RESOLVING,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals(NodeStatus.STARTING, s.status)
   }
@@ -500,7 +500,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = true, modelDisplayName = "m",
       thermalShedding = true, phase = ProvisionPhase.RESOLVING,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L, initFailed = false,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals("resolving model…", s.detailLine)
     assertFalse("thermalShedding must not leak into a non-LIVE detail line", s.detailLine.contains("thermal"))
@@ -513,7 +513,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = false, modelDisplayName = "m",
       thermalShedding = true, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L, initFailed = false,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals("node stopped · m", s.detailLine)
     assertFalse(s.detailLine.contains("thermal"))
@@ -526,7 +526,7 @@ class RelaisControlPanelStateTest {
       ready = false, running = true, modelDisplayName = "m",
       thermalShedding = true, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L, initFailed = true,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     )
     assertEquals("start failed · check model/token, then START again", s.detailLine)
     assertFalse(s.detailLine.contains("thermal"))
@@ -540,11 +540,11 @@ class RelaisControlPanelStateTest {
 
   @Test
   fun `detailLineBright is true only for LIVE-plus-thermal-shed and the failed state`() {
-    val liveNormal = computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, initFailed = false, listenersUp = true)
-    val liveShed = computeControlPanelState(true, true, "m", true, ProvisionPhase.IDLE, 0, 0, initFailed = false, listenersUp = true)
-    val starting = computeControlPanelState(false, true, "m", false, ProvisionPhase.RESOLVING, 0, 0, initFailed = false, listenersUp = true)
-    val offline = computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, initFailed = false, listenersUp = true)
-    val failed = computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, initFailed = true, listenersUp = true)
+    val liveNormal = computeControlPanelState(true, true, "m", false, ProvisionPhase.IDLE, 0, 0, initFailed = false, listenersUp = true, idleUnloaded = false)
+    val liveShed = computeControlPanelState(true, true, "m", true, ProvisionPhase.IDLE, 0, 0, initFailed = false, listenersUp = true, idleUnloaded = false)
+    val starting = computeControlPanelState(false, true, "m", false, ProvisionPhase.RESOLVING, 0, 0, initFailed = false, listenersUp = true, idleUnloaded = false)
+    val offline = computeControlPanelState(false, false, "m", false, ProvisionPhase.IDLE, 0, 0, initFailed = false, listenersUp = true, idleUnloaded = false)
+    val failed = computeControlPanelState(false, true, "m", false, ProvisionPhase.IDLE, 0, 0, initFailed = true, listenersUp = true, idleUnloaded = false)
 
     assertFalse(liveNormal.detailLineBright)
     assertTrue(liveShed.detailLineBright)
@@ -567,7 +567,7 @@ class RelaisControlPanelStateTest {
     ready = true, running = true, modelDisplayName = "Gemma 4 E2B",
     thermalShedding = false, phase = ProvisionPhase.IDLE,
     downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-    listenersUp = false, initFailed = initFailed, startupInProgress = false,
+    listenersUp = false, idleUnloaded = false, initFailed = initFailed, startupInProgress = false,
   )
 
   @Test
@@ -576,7 +576,7 @@ class RelaisControlPanelStateTest {
       ready = true, running = true, modelDisplayName = "m",
       thermalShedding = false, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = true,
+      listenersUp = true, idleUnloaded = false,
     ).status)
     // Same engine, nothing listening: anything but LIVE. A node nothing can reach is not live.
     assertNotEquals(NodeStatus.LIVE, unreachable().status)
@@ -622,7 +622,7 @@ class RelaisControlPanelStateTest {
       ready = true, running = true, modelDisplayName = "m",
       thermalShedding = false, phase = ProvisionPhase.LOADING_ENGINE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = false, initFailed = false, startupInProgress = true,
+      listenersUp = false, idleUnloaded = false, initFailed = false, startupInProgress = true,
     )
     assertEquals(NodeStatus.STARTING, s.status)
     assertEquals(PrimaryAction.CANCEL, s.primaryAction)
@@ -636,16 +636,134 @@ class RelaisControlPanelStateTest {
       ready = true, running = true, modelDisplayName = "m",
       thermalShedding = false, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = false, initFailed = false, startupInProgress = true,
+      listenersUp = false, idleUnloaded = false, initFailed = false, startupInProgress = true,
     )
     val stuck = computeControlPanelState(
       ready = true, running = true, modelDisplayName = "m",
       thermalShedding = false, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = false, initFailed = false, startupInProgress = false,
+      listenersUp = false, idleUnloaded = false, initFailed = false, startupInProgress = false,
     )
     assertNotEquals(comingUp.status, stuck.status)
     assertNotEquals(comingUp.primaryAction, stuck.primaryAction)
+  }
+
+  // ---------------------------------------------------------------------------
+  // IDLE (feature-22) — the engine was released by the idle TTL, both listeners are still bound,
+  // and the next request reloads it. Mirrors computeNodeState's slot 5: below `failed`, above
+  // `running -> STARTING`, and it requires listenersUp for the same reason LIVE does.
+  // ---------------------------------------------------------------------------
+
+  /** A healthy idle node: running, engine released, both listeners bound, nothing in flight. */
+  private fun idle(
+    initFailed: Boolean = false,
+    listenersUp: Boolean = true,
+    startupInProgress: Boolean = false,
+    phase: ProvisionPhase = ProvisionPhase.IDLE,
+  ) = computeControlPanelState(
+    ready = false, running = true, modelDisplayName = "Gemma 4 E2B",
+    thermalShedding = false, phase = phase,
+    downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
+    listenersUp = listenersUp, idleUnloaded = true,
+    initFailed = initFailed, stalledStart = false, startupInProgress = startupInProgress,
+  )
+
+  @Test
+  fun `an idle-unloaded node with listeners up reads IDLE and offers STOP`() {
+    val s = idle()
+    assertEquals(NodeStatus.IDLE, s.status)
+    assertEquals("IDLE", s.statusWord)
+    // The node IS running — START here would be a full service re-init with a listener bounce.
+    assertEquals(PrimaryAction.STOP, s.primaryAction)
+    assertFalse("idle is the quiet default, not an attention state", s.detailLineBright)
+    assertFalse(s.showProgressBar)
+    assertNull(s.progressFraction)
+    // The MODEL row follows the pre-existing `status == STARTING` lockout, so it stays open while
+    // idle: the in-app route (MODELS destination) persists through the download/provision funnel,
+    // which is the case ModelSwitch.applyManualId's KDoc calls safe. Configure's row is the one that
+    // stays locked (#337). If that ruling changes, this row changes with it.
+    assertTrue(s.modelRowEnabled)
+    assertNull(s.modelLockedCaption)
+  }
+
+  @Test
+  fun `IDLE sits below failed — a failed init on an idle-flagged node reads OFFLINE`() {
+    // Slot 4 > 5, and it is reachable: a service-side init failure sets lastInitFailed AFTER the
+    // attempt cleared idle, and a later TTL sets idleUnloaded without touching it. The failure must
+    // win, or a broken node reads IDLE — precisely the state the watchdog leaves alone.
+    val s = idle(initFailed = true)
+    assertEquals(NodeStatus.OFFLINE, s.status)
+    assertNotEquals(NodeStatus.IDLE, s.status)
+    assertEquals(PrimaryAction.START, s.primaryAction)
+    assertEquals("start failed · check model/token, then START again", s.detailLine)
+    assertTrue(s.detailLineBright)
+  }
+
+  @Test
+  fun `IDLE requires listenersUp — an unloaded engine behind torn-down listeners is not idle`() {
+    // IDLE promises "reachable, warms on the next request". With nothing listening that is false,
+    // so it falls through to STARTING — the same fall-through that drops the watchdog's shield.
+    val s = idle(listenersUp = false)
+    assertNotEquals(NodeStatus.IDLE, s.status)
+    assertEquals(NodeStatus.STARTING, s.status)
+  }
+
+  @Test
+  fun `a reload in flight beats a stale idleUnloaded — STARTING, not IDLE`() {
+    // The swap thread and ensureInitializedInBackground publish a plain beginStartup() BEFORE the
+    // real-init branch clears idle in one snapshot, so this pair is observable for real (a swap's
+    // resolveModel can take seconds). Slot 3 > 5: every other surface reads STARTING here.
+    val s = idle(startupInProgress = true, phase = ProvisionPhase.LOADING_ENGINE)
+    assertEquals(NodeStatus.STARTING, s.status)
+    assertNotEquals(NodeStatus.IDLE, s.status)
+    assertEquals(PrimaryAction.CANCEL, s.primaryAction)
+  }
+
+  @Test
+  fun `IDLE detail line names the released engine and renders no phase line`() {
+    // The phase is deliberately LOADING_ENGINE: after a request-driven reload RelaisNodeProgress.phase
+    // is left where the reload set it, so an IDLE arm routed through provisionPhaseLine would read
+    // "loading engine…" for a node doing nothing of the sort. The copy matches the notification.
+    val s = idle(phase = ProvisionPhase.LOADING_ENGINE)
+    assertEquals("idle · engine released — wakes on the next request", s.detailLine)
+    assertNotEquals(provisionPhaseLine(ProvisionPhase.LOADING_ENGINE, 0, 0), s.detailLine)
+    assertFalse(s.detailLine.contains("loading"))
+  }
+
+  @Test
+  fun `IDLE advertises both endpoints — the node's whole promise is that it is reachable`() {
+    // Hiding LOCAL and muting LAN on a node whose label says "reachable" would contradict the label.
+    val s = idle()
+    assertTrue(s.showLocalEndpoint)
+    assertTrue(s.lanEndpointLive)
+  }
+
+  @Test
+  fun `LIVE beats a stale idleUnloaded flag`() {
+    // A ready, reachable engine is LIVE whatever the flag says — the engine IS resident.
+    val s = computeControlPanelState(
+      ready = true, running = true, modelDisplayName = "m",
+      thermalShedding = false, phase = ProvisionPhase.IDLE,
+      downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
+      listenersUp = true, idleUnloaded = true,
+    )
+    assertEquals(NodeStatus.LIVE, s.status)
+    assertEquals(PrimaryAction.STOP, s.primaryAction)
+  }
+
+  @Test
+  fun `a stopped node with a stale idleUnloaded flag reads stopped, never IDLE`() {
+    // shutdown() clears the flag on STOP, so this is a tear at worst — but IDLE must still follow
+    // the operator's intent, exactly as the resident-engine-after-STOP case does.
+    val s = computeControlPanelState(
+      ready = false, running = false, modelDisplayName = "Gemma 4 E2B",
+      thermalShedding = false, phase = ProvisionPhase.IDLE,
+      downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
+      listenersUp = true, idleUnloaded = true,
+    )
+    assertEquals(NodeStatus.OFFLINE, s.status)
+    assertEquals("node stopped · Gemma 4 E2B", s.detailLine)
+    assertEquals(PrimaryAction.START, s.primaryAction)
   }
 
   @Test
@@ -656,7 +774,7 @@ class RelaisControlPanelStateTest {
       ready = true, running = false, modelDisplayName = "Gemma 4 E2B",
       thermalShedding = false, phase = ProvisionPhase.IDLE,
       downloadReceivedBytes = 0L, downloadTotalBytes = 0L,
-      listenersUp = false,
+      listenersUp = false, idleUnloaded = false,
     )
     assertEquals(NodeStatus.OFFLINE, s.status)
     assertEquals(PrimaryAction.START, s.primaryAction)
