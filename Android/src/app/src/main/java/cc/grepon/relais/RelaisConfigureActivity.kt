@@ -115,6 +115,10 @@ class RelaisConfigureActivity : ComponentActivity() {
 private fun ConfigureScreen(activity: RelaisConfigureActivity) {
   val ctx = LocalContext.current
 
+  // Liveness snapshot FIRST, engine flags after (the read-order rule in computeNodeState's KDoc).
+  // `idle` is polled INTO Compose state here rather than read raw where it is used: a raw
+  // `RelaisLivenessState.snapshot` read inside a derived `val` would not invalidate the composition.
+  var idle by remember { mutableStateOf(RelaisLivenessState.snapshot.idleUnloaded) }
   var ready by remember { mutableStateOf(RelaisEngine.isReady) }
   var running by remember { mutableStateOf(RelaisConfig.shouldRun(ctx)) }
   val powerManager = remember { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
@@ -124,6 +128,8 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
   var autoStartEnabled by remember { mutableStateOf(RelaisConfig.autoStartEnabled(ctx)) }
   LaunchedEffect(Unit) {
     while (true) {
+      val liveness = RelaisLivenessState.snapshot
+      idle = liveness.idleUnloaded
       ready = RelaisEngine.isReady
       running = RelaisConfig.shouldRun(ctx)
       batteryUnrestricted = powerManager.isIgnoringBatteryOptimizations(ctx.packageName)
@@ -131,7 +137,12 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
     }
   }
   // Same lockout rule as the home screen's MODEL row (P6): a mid-download model change could
-  // resurrect a superseded path once the in-flight ensureModel() resolves.
+  // resurrect a superseded path once the in-flight ensureModel() resolves. DELIBERATELY still locked
+  // while idle-unloaded (feature-22): `onPickRef` below only persists the ref — nothing dispatches a
+  // swap — and the request-driven reload pairs `cachedPathOrDefault` with the new configured id,
+  // which loads the OLD weights under the NEW id with no error anywhere (the case
+  // `ModelSwitch.applyManualId`'s KDoc describes). The dashboard's targeted swap is the mechanism
+  // that works while idle; routing this pick through it is #337. Only the caption changes.
   val nodeBusy = running && !ready
 
   var modelId by remember { mutableStateOf(RelaisConfig.modelId(ctx)) }
@@ -175,7 +186,12 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
       SectionLabel("MODEL")
       ModelRow(value = modelDisplay, enabled = !nodeBusy) { showModelSheet = true }
       if (nodeBusy) {
-        Text("model locked while starting", color = Muted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        Text(
+          if (idle) "model locked while engine released · switch from the dashboard" else "model locked while starting",
+          color = Muted,
+          fontFamily = FontFamily.Monospace,
+          fontSize = 11.sp,
+        )
       }
       if (modelNote.isNotEmpty()) {
         Text(modelNote, color = Muted, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
