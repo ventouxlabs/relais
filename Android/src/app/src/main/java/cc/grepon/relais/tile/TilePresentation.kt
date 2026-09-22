@@ -47,6 +47,8 @@ object TileState {
  * - OFF → INACTIVE "Relais · off".
  * - ERROR → INACTIVE "Relais · error" (asked-to-run but last init failed; tap re-toggles, the
  *   control panel is where the operator diagnoses).
+ * - IDLE → ACTIVE "Relais · idle" (running, engine released by idle-TTL — ACTIVE for the STARTING
+ *   reason: the node IS up; the subtitle names the tap's action the way OFF's does).
  */
 fun tilePresentation(state: NodeState): TilePresentation = when (state) {
   NodeState.LIVE -> TilePresentation("Relais · live", "engine resident", TileState.ACTIVE)
@@ -54,12 +56,17 @@ fun tilePresentation(state: NodeState): TilePresentation = when (state) {
   NodeState.STARTING -> TilePresentation("Relais · starting…", "coming up", TileState.ACTIVE)
   NodeState.OFF -> TilePresentation("Relais · off", "tap to start node", TileState.INACTIVE)
   NodeState.ERROR -> TilePresentation("Relais · error", "init failed — tap to retry", TileState.INACTIVE)
-  // feature-22 PR-B (task 4(c)): becomes WARM
-  NodeState.IDLE -> TilePresentation("Relais · idle", "engine released — wakes on request", TileState.ACTIVE)
+  NodeState.IDLE -> TilePresentation("Relais · idle", "tap to warm", TileState.ACTIVE)
 }
 
-/** What a single tile tap does. The tile is one-action, so the meaning is state-dependent. */
-enum class TileAction { START, STOP, RUN_PROMPT }
+/**
+ * What a single tile tap does. The tile is one-action, so the meaning is state-dependent. [WARM]
+ * (feature-22) re-warms an idle-released engine in place via
+ * [cc.grepon.relais.RelaisEngine.ensureInitializedInBackground] — NOT a [START], which is a full
+ * service re-init that tears down and rebinds both listeners (killing in-flight LAN requests and
+ * churning NSD) for a node whose listeners are already up.
+ */
+enum class TileAction { START, STOP, RUN_PROMPT, WARM }
 
 /**
  * Pure decision for what a tile tap should do — device-safe and cold-start-safe by construction:
@@ -71,6 +78,11 @@ enum class TileAction { START, STOP, RUN_PROMPT }
  *    live, configured tile runs the canned prompt and KEEPS the node up; stop it from the app/control
  *    panel or by clearing the template).
  *  - LIVE with no template (the default) → STOP (a plain start/stop toggle).
+ *  - IDLE → WARM regardless of template or [ready] (the node is running; its engine was released by
+ *    idle-TTL, so re-warm it behind the live listeners — never RUN_PROMPT, the engine is not
+ *    resident; never START, that would bounce the listeners; never STOP, the operator asked for
+ *    this node). IDLE + [ready]=true is reachable by a tear between the two reads and still WARMs —
+ *    an idempotent no-op once the engine is in fact ready.
  *
  * RUN_PROMPT is returned ONLY when [ready] is true and the template is non-blank, so a tap can never
  * cold-start the engine, never fire a prompt on the same tap that stops the node, and never fire while
@@ -79,7 +91,6 @@ enum class TileAction { START, STOP, RUN_PROMPT }
 fun tileAction(state: NodeState, templateId: String?, ready: Boolean): TileAction = when (state) {
   NodeState.OFF, NodeState.ERROR -> TileAction.START
   NodeState.STARTING, NodeState.HOT -> TileAction.STOP
-  // feature-22 PR-B (task 4(c)): becomes WARM. STOP is parity: an idle node used to read STARTING.
-  NodeState.IDLE -> TileAction.STOP
+  NodeState.IDLE -> TileAction.WARM
   NodeState.LIVE -> if (ready && !templateId.isNullOrBlank()) TileAction.RUN_PROMPT else TileAction.STOP
 }

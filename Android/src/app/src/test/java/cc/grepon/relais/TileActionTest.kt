@@ -20,7 +20,8 @@ import org.junit.Test
 
 /**
  * Pure truth table for [tileAction] — the single tap decision. Pins the cold-start guard, the
- * device-safety (never run a prompt while HOT), and that a prompt never fires on a stop-tap.
+ * device-safety (never run a prompt while HOT), that a prompt never fires on a stop-tap, and that an
+ * idle node is WARMed in place rather than restarted (feature-22 PR-B).
  */
 class TileActionTest {
 
@@ -39,14 +40,17 @@ class TileActionTest {
     assertEquals(TileAction.STOP, tileAction(NodeState.HOT, templateId = "t", ready = true))
   }
 
-  @Test fun `IDLE stops — parity with the STARTING an idle node used to read (PR-B makes it WARM)`() {
-    // feature-22 PR-A: the node is running, so the tap cancels the intent-to-run exactly as it did
-    // when an idle node read STARTING. Never RUN_PROMPT — the engine is not resident.
-    assertEquals(TileAction.STOP, tileAction(NodeState.IDLE, templateId = "t", ready = false))
-    assertEquals(TileAction.STOP, tileAction(NodeState.IDLE, templateId = null, ready = false))
+  @Test fun `IDLE warms the engine in place — never START (a listener bounce) and never STOP`() {
+    // feature-22 PR-B (task 4(c)): the node is running with its engine released by idle-TTL. START
+    // would be a full service re-init — stopListeners() → pool.shutdownNow() → rebind → NSD
+    // re-register — killing any in-flight LAN request; STOP would throw away a node the operator
+    // asked for. WARM re-warms the engine behind the live listeners, whatever the template says.
+    assertEquals(TileAction.WARM, tileAction(NodeState.IDLE, templateId = "t", ready = false))
+    assertEquals(TileAction.WARM, tileAction(NodeState.IDLE, templateId = null, ready = false))
     // The tile reads state and isReady() in two separate reads, so IDLE + ready=true is reachable
-    // by tear; it must still STOP, never RUN_PROMPT (the STARTING row's shape).
-    assertEquals(TileAction.STOP, tileAction(NodeState.IDLE, templateId = "t", ready = true))
+    // by tear; it must still WARM (an idempotent no-op once the engine is in fact ready), never
+    // RUN_PROMPT — that stays the LIVE arm's alone.
+    assertEquals(TileAction.WARM, tileAction(NodeState.IDLE, templateId = "t", ready = true))
   }
 
   @Test fun `LIVE with a configured template and a ready engine runs the canned prompt`() {

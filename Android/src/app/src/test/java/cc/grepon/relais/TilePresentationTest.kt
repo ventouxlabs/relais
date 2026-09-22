@@ -53,13 +53,14 @@ class TilePresentationTest {
     assertEquals("Relais · error", p.label)
   }
 
-  @Test fun `idle maps to active with an idle label — the node is up, the engine is released`() {
-    // feature-22 PR-A: minimal arm that preserves today's behaviour (an idle node used to read
-    // STARTING → ACTIVE). PR-B (task 4(c)) keeps ACTIVE and changes the tap to WARM.
+  @Test fun `idle maps to active and invites a warm — the node is up, the engine is released`() {
+    // feature-22 PR-B (task 4(c)): ACTIVE because the node is running (a lit tile reads "I asked for
+    // this", as for STARTING); the subtitle names the tap's action the way OFF's "tap to start node"
+    // does, since the tap now WARMs the engine in place.
     val p = tilePresentation(NodeState.IDLE)
     assertEquals(TileState.ACTIVE, p.tileState)
     assertEquals("Relais · idle", p.label)
-    assertEquals("engine released — wakes on request", p.subtitle)
+    assertEquals("tap to warm", p.subtitle)
   }
 
   @Test fun `live and hot are among the active states`() {

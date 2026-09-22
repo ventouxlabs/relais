@@ -17,19 +17,24 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import cc.grepon.relais.RelaisConfig
+import cc.grepon.relais.RelaisEngine
 import cc.grepon.relais.core.RelaisInference
 import cc.grepon.relais.core.RelaisNodeController
 
 /**
  * Quick Settings tile (Feature #2): live node status + one-tap start/stop, optionally a canned-prompt
- * run on tap. State is DERIVED from [RelaisNodeController.state] (the single OFF/STARTING/LIVE/HOT/ERROR
- * source of truth) via the pure [tilePresentation] mapping — the tile never re-implements state logic.
+ * run on tap. State is DERIVED from [RelaisNodeController.state] (the single
+ * OFF/STARTING/LIVE/HOT/ERROR/IDLE source of truth) via the pure [tilePresentation] mapping — the
+ * tile never re-implements state logic.
  *
  * Tap semantics are decided purely by [tileAction] from the current [NodeState] + config: OFF→start,
- * STARTING/HOT→stop, LIVE→stop (default) or run the canned prompt when a template is configured and
- * the engine is ready. Cold-start safety: RUN_PROMPT is only chosen when [RelaisInference.isReady] is
- * already true, so a tap can NEVER kick off inference (and thus never provision a multi-GB model) when
- * the engine isn't resident, and never fires a prompt on the same tap that stops the node.
+ * STARTING/HOT→stop, IDLE→warm (feature-22: re-warm the idle-released engine in place, no listener
+ * bounce), LIVE→stop (default) or run the canned prompt when a template is configured and the engine
+ * is ready. Cold-start safety: RUN_PROMPT is only chosen when [RelaisInference.isReady] is already
+ * true, so a tap can NEVER kick off inference (and thus never provision a multi-GB model) when the
+ * engine isn't resident, and never fires a prompt on the same tap that stops the node. WARM is not a
+ * cold start: IDLE implies `shouldRun && listenersUp && idleUnloaded`, i.e. the foreground service
+ * that owns the idle-TTL is provably alive behind the reload.
  */
 class RelaisTileService : TileService() {
 
@@ -44,6 +49,11 @@ class RelaisTileService : TileService() {
     when (tileAction(RelaisNodeController.state(this), templateId, RelaisInference.isReady())) {
       TileAction.START -> RelaisNodeController.start(this)
       TileAction.STOP -> RelaisNodeController.stop(this)
+      // applicationContext, never `this`: the reload thread lives for the whole (~20 s) engine load
+      // and must not pin a TileService the system may unbind meanwhile. Single-flight, and it
+      // publishes startupInProgress on THIS thread before returning, so the render() below already
+      // reads STARTING ("Relais · starting…") instead of a stale "idle".
+      TileAction.WARM -> RelaisEngine.ensureInitializedInBackground(applicationContext)
       // RUN_PROMPT implies a non-blank templateId (see tileAction); let keeps it non-null without `!!`.
       TileAction.RUN_PROMPT -> templateId?.let { enqueueCannedPrompt(it) }
     }
