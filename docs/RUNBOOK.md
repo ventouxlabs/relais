@@ -50,10 +50,15 @@ by design:
 
 - **`/v1/chat/completions` and `/generate` hold the request synchronously through the reload** —
   a client's first request after idle simply takes ~19.5 s longer, which is under the threshold at
-  which a bounded 503 would have been worth adding, and most OpenAI SDK defaults (60 s+ read
-  timeout) tolerate it without a retry.
+  which a bounded 503 would have been worth adding, and most OpenAI-compatible clients use read
+  timeouts in the minutes (litellm: 600 s) and tolerate it without a retry.
 - **`/v1/audio/transcriptions` (and `/translations`) answer `503` + `Retry-After: 10`** instead and
   kick the reload in the background — retry after the delay rather than waiting on the connection.
+
+If the LAN listeners are failing to bind (e.g. `:8443` held by another process) and idle-unload
+fires while the failure is ongoing, the engine is no longer resident — every watchdog backoff retry
+after that point re-pays a full cold start on top of the failed rebind attempt, not just a cheap
+listener retry.
 
 #### Idle-unload metrics
 
