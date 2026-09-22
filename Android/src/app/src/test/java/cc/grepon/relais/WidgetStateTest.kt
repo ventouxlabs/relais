@@ -12,11 +12,18 @@
 
 package cc.grepon.relais
 
+import cc.grepon.relais.core.NodeState
 import cc.grepon.relais.widget.RESPONSE_CAP
 import cc.grepon.relais.widget.WidgetPhase
+import cc.grepon.relais.widget.WidgetTapAction
 import cc.grepon.relais.widget.WidgetUiState
+import cc.grepon.relais.widget.awaitEngineReady
 import cc.grepon.relais.widget.capResponse
+import cc.grepon.relais.widget.shouldAwaitWarm
 import cc.grepon.relais.widget.shouldRunWidgetPrompt
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.currentTime
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -24,9 +31,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pure JVM truth table for the widget's [WidgetUiState] machine, the [capResponse] bound, and the
- * cold-start [shouldRunWidgetPrompt] gate. No Android/Glance types — these run as plain unit tests.
+ * Pure JVM truth table for the widget's [WidgetUiState] machine, the [capResponse] bound, the
+ * [NodeState]-keyed [shouldRunWidgetPrompt] tap decision, and the worker's warm-wait
+ * ([shouldAwaitWarm] + [awaitEngineReady], on virtual time). No Android/Glance types — these run as
+ * plain unit tests.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class WidgetStateTest {
 
   @Test fun `loading carries the prompt and drops any prior response`() {
@@ -90,19 +100,81 @@ class WidgetStateTest {
     assertEquals(RESPONSE_CAP, state.response?.length)
   }
 
-  @Test fun `shouldRunWidgetPrompt is true only when ready and a non-blank prompt is present`() {
-    assertTrue(shouldRunWidgetPrompt(ready = true, prompt = "status check"))
+  @Test fun `shouldRunWidgetPrompt keys on NodeState — LIVE and HOT run, IDLE warms first, the rest ignore`() {
+    // feature-22 PR-B (task 4(c)): the decision takes the COMPUTED state, not raw flags. IDLE already
+    // implies shouldRun && listenersUp && idleUnloaded (computeNodeState slot 5), which is a stronger
+    // proof that the foreground service is alive than the `wasIdleUnloaded` flag RelaisInference's
+    // self-heal keys on — so warming from a tap is a reload behind a live service, never a cold start.
+    val expected = mapOf(
+      NodeState.LIVE to WidgetTapAction.RUN,
+      NodeState.HOT to WidgetTapAction.RUN,
+      NodeState.IDLE to WidgetTapAction.WARM_THEN_RUN,
+      NodeState.OFF to WidgetTapAction.IGNORE,
+      NodeState.STARTING to WidgetTapAction.IGNORE,
+      NodeState.ERROR to WidgetTapAction.IGNORE,
+    )
+    assertEquals("every NodeState value needs a row here", NodeState.entries.toSet(), expected.keys)
+    for ((state, action) in expected) {
+      assertEquals("tap on $state", action, shouldRunWidgetPrompt(state, "status check"))
+    }
   }
 
-  @Test fun `shouldRunWidgetPrompt is false when the engine is not ready (cold-start guard)`() {
-    // The single most important assertion: a tap can never kick off inference on a cold engine.
-    assertFalse(shouldRunWidgetPrompt(ready = false, prompt = "status check"))
+  @Test fun `shouldRunWidgetPrompt ignores a stale tap on a stopped node — the cold-start guard`() {
+    // The single most important assertion: a tap can never kick off anything on a node that is OFF
+    // (the widget rendered IDLE, the operator pressed STOP, the tap landed afterwards — shutdown()
+    // cleared idleUnloaded, so the state is OFF, and OFF is IGNORE). Same for a node that is still
+    // coming up or whose last init failed: nothing to run, nothing to warm.
+    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.OFF, "status check"))
+    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.STARTING, "status check"))
+    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.ERROR, "status check"))
   }
 
-  @Test fun `shouldRunWidgetPrompt is false for a null or blank prompt`() {
-    assertFalse(shouldRunWidgetPrompt(ready = true, prompt = null))
-    assertFalse(shouldRunWidgetPrompt(ready = true, prompt = ""))
-    assertFalse(shouldRunWidgetPrompt(ready = true, prompt = "   "))
+  @Test fun `shouldRunWidgetPrompt warms an IDLE node — neither a plain run nor an ignored tap`() {
+    assertEquals(WidgetTapAction.WARM_THEN_RUN, shouldRunWidgetPrompt(NodeState.IDLE, "status check"))
+  }
+
+  @Test fun `shouldRunWidgetPrompt ignores a null or blank prompt in every state, IDLE included`() {
+    // A blank prompt beats every state: nothing to run means nothing to warm for either.
+    for (state in NodeState.entries) {
+      for (prompt in listOf(null, "", "   ")) {
+        assertEquals("$state × '$prompt'", WidgetTapAction.IGNORE, shouldRunWidgetPrompt(state, prompt))
+      }
+    }
+  }
+
+  @Test fun `shouldAwaitWarm waits only when not ready and either the tap warmed or a reload is in flight`() {
+    // Each true row kills one mutant: "gate on startupInProgress only" (row 1 — by the time
+    // WorkManager runs doWork the reload may already have cleared the flag, which is why the tap
+    // passes `warm`), and "gate on warm only" (row 2 — a reload some other caller kicked).
+    assertTrue(shouldAwaitWarm(ready = false, warm = true, startupInProgress = false))
+    assertTrue(shouldAwaitWarm(ready = false, warm = false, startupInProgress = true))
+    assertFalse(shouldAwaitWarm(ready = false, warm = false, startupInProgress = false))
+    // A ready engine never waits, whatever the inputs say.
+    assertFalse(shouldAwaitWarm(ready = true, warm = true, startupInProgress = true))
+  }
+
+  @Test fun `awaitEngineReady returns true as soon as the engine reports ready`() = runTest {
+    var checks = 0
+    val ready = awaitEngineReady(isReady = { ++checks >= 3 }, intervalMs = 500L, maxIterations = 120)
+    assertTrue(ready)
+    assertEquals("two sleeps, ready on the third check", 1000L, currentTime)
+  }
+
+  @Test fun `awaitEngineReady does not sleep when the engine is already ready`() = runTest {
+    assertTrue(awaitEngineReady(isReady = { true }, intervalMs = 500L, maxIterations = 120))
+    assertEquals(0L, currentTime)
+  }
+
+  @Test fun `awaitEngineReady gives up at the cap — 60 s with ModelSwitch's poll constants`() = runTest {
+    // The cap is what bounds a widget tap on a node whose reload failed: 500 ms × 120 = 60 s, and the
+    // reload measured 19.4–19.8 s on rango/E2B (feature-22 Task 5), so a healthy warm fits with room.
+    val ready = awaitEngineReady(
+      isReady = { false },
+      intervalMs = ModelSwitch.RELOAD_POLL_INTERVAL_MS,
+      maxIterations = ModelSwitch.MAX_RELOAD_POLL_ITERATIONS,
+    )
+    assertFalse(ready)
+    assertEquals(60_000L, currentTime)
   }
 
   @Test fun `every phase round-trips through the helpers without leaking another phase's fields`() {

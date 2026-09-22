@@ -66,10 +66,12 @@ private const val MAX_PROMPT_BUTTONS = 4
  * [PromptTemplate]; a single default when none), a LOADING indicator, the capped response, and a
  * CLEAR action. Amber-on-charcoal via [RelaisWidgetTheme], per DESIGN.md.
  *
- * Cold-start safety: a button tap routes through [RunPromptAction], which re-checks
- * [cc.grepon.relais.core.RelaisInference.isReady] and refuses to enqueue inference when the node is
- * off — a tap can NEVER cold-start the engine. When off, the status line reads "open app to start"
- * and the prompt buttons are rendered disabled (no click action attached).
+ * Cold-start safety: a button tap routes through [RunPromptAction], which re-derives the
+ * [NodeState] and refuses to enqueue inference unless the node is LIVE/HOT (run) or IDLE (warm the
+ * idle-released engine behind the still-live service, then run — feature-22). A tap can NEVER
+ * cold-start the engine on a node that is off: OFF/STARTING/ERROR are ignored. When off, the status
+ * line reads "open app to start" and the prompt buttons are rendered disabled (no click action
+ * attached); when idle it reads "tap to warm" and the buttons are enabled.
  */
 class RelaisWidget : GlanceAppWidget() {
 
@@ -90,9 +92,11 @@ private fun WidgetContent(state: WidgetUiState) {
   val context = LocalContext.current
   val nodeState = RelaisNodeController.state(context)
   val compact = LocalSize.current.height < COMPACT_HEIGHT
-  // Buttons are tappable only on a LIVE node that isn't already running — the visual half of the
-  // cold-start guard (RunPromptAction enforces the authoritative gate).
-  val canRun = nodeState == NodeState.LIVE && state.phase != WidgetPhase.LOADING
+  // Buttons are tappable only on a LIVE or IDLE node that isn't already running — the visual half of
+  // the cold-start guard (RunPromptAction enforces the authoritative gate). HOT stays disabled here
+  // as on the tile: never invite inference heat while throttling.
+  val canRun =
+    (nodeState == NodeState.LIVE || nodeState == NodeState.IDLE) && state.phase != WidgetPhase.LOADING
 
   Column(modifier = GlanceModifier.fillMaxSize().background(GlanceTheme.colors.background).padding(12.dp)) {
     StatusLine(nodeState)
@@ -121,8 +125,7 @@ private fun StatusLine(nodeState: NodeState) {
     NodeState.STARTING -> "○ starting…" to Muted
     NodeState.ERROR -> "○ error — open app" to Muted
     NodeState.OFF -> "○ off — open app to start" to Muted
-    // feature-22 PR-B (task 4(c)): becomes WARM ("tap to warm"; canRun includes IDLE)
-    NodeState.IDLE -> "○ idle — engine released" to Muted
+    NodeState.IDLE -> "○ idle — tap to warm" to Muted // DESIGN.md: non-live is muted, no new colour
   }
   Text(text = "relais  $label", style = TextStyle(color = ColorProvider(accent), fontSize = 13.sp))
 }

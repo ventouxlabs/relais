@@ -26,12 +26,15 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import cc.grepon.relais.ModelSwitch
+import cc.grepon.relais.RelaisLivenessState
 import cc.grepon.relais.core.RelaisInference
 import cc.grepon.relais.templates.WorkflowRegistry
 
 private const val TAG = "WidgetPromptWorker"
 private const val KEY_TEMPLATE_ID = "template_id"
 private const val KEY_APP_WIDGET_ID = "app_widget_id"
+private const val KEY_WARM = "warm"
 
 /** The fixed canned prompt the widget runs (the template only supplies the system prompt). */
 const val WIDGET_PROMPT = "Give me a one-line status check."
@@ -59,10 +62,14 @@ fun readState(prefs: Preferences): WidgetUiState {
 /**
  * Runs the widget's canned prompt off the broadcast thread (long inference must outlive the ~10 s
  * ActionCallback/broadcast limit — hence a Worker). Re-asserts [RelaisInference.isReady] (defense in
- * depth: the action already gated, but the node can stop between enqueue and run — never cold-start),
- * resolves the template's system prompt via [WorkflowRegistry], runs the in-process inference, and
- * writes DONE/ERROR (with a capped response) back into the widget's Glance state, then re-renders.
- * Enqueued with `enqueueUniqueWork(KEEP)` so rapid taps don't stack inferences on the single engine.
+ * depth: the action already gated, but the node can stop between enqueue and run — this worker never
+ * kicks a reload itself), resolves the template's system prompt via [WorkflowRegistry], runs the
+ * in-process inference, and writes DONE/ERROR (with a capped response) back into the widget's Glance
+ * state, then re-renders. When the enqueuing tap warmed an idle node (`warm` input, feature-22) or a
+ * reload is otherwise in flight, it first waits for the engine — [awaitEngineReady] on
+ * [ModelSwitch]'s poll constants, a 60 s cap — and settles the existing "node off" error if the
+ * engine never comes back. Enqueued with `enqueueUniqueWork(KEEP)` so rapid taps don't stack
+ * inferences on the single engine.
  */
 class WidgetPromptWorker(context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
@@ -78,6 +85,25 @@ class WidgetPromptWorker(context: Context, params: WorkerParameters) :
       return Result.failure()
     }
 
+    // Read order: the liveness snapshot FIRST, then the engine flag (computeNodeState's rule).
+    val warm = inputData.getBoolean(KEY_WARM, false)
+    val liveness = RelaisLivenessState.snapshot
+    val mustWait = shouldAwaitWarm(
+      ready = RelaisInference.isReady(),
+      warm = warm,
+      startupInProgress = liveness.startupInProgress,
+    )
+    if (mustWait) {
+      // The tap already kicked the reload (or another caller did); wait for the ENGINE, not a flag —
+      // by the time WorkManager runs this, a fast reload may have begun AND ended. Bounded at 60 s
+      // (500 ms × 120); the reload measured 19.4–19.8 s on rango/E2B (feature-22 Task 5).
+      Log.i(TAG, "engine warming; waiting for it to come up")
+      awaitEngineReady(
+        isReady = RelaisInference::isReady,
+        intervalMs = ModelSwitch.RELOAD_POLL_INTERVAL_MS,
+        maxIterations = ModelSwitch.MAX_RELOAD_POLL_ITERATIONS,
+      )
+    }
     if (!RelaisInference.isReady()) {
       Log.i(TAG, "engine not resident at run time; skipping widget prompt")
       settle(glanceId, WidgetUiState.idle().error("node off — open app to start"))
@@ -111,18 +137,19 @@ class WidgetPromptWorker(context: Context, params: WorkerParameters) :
 
   companion object {
     /** Enqueues a per-widget unique run (KEEP coalesces rapid taps onto the single engine lock). */
-    fun enqueue(context: Context, glanceId: GlanceId, templateId: String?) {
+    fun enqueue(context: Context, glanceId: GlanceId, templateId: String?, warm: Boolean) {
       val appWidgetId = GlanceAppWidgetManager(context).getAppWidgetId(glanceId)
       val request = OneTimeWorkRequestBuilder<WidgetPromptWorker>()
-        .setInputData(inputData(appWidgetId, templateId))
+        .setInputData(inputData(appWidgetId, templateId, warm))
         .build()
       WorkManager.getInstance(context.applicationContext)
         .enqueueUniqueWork("relais-widget-$appWidgetId", ExistingWorkPolicy.KEEP, request)
     }
 
-    private fun inputData(appWidgetId: Int, templateId: String?): Data =
+    private fun inputData(appWidgetId: Int, templateId: String?, warm: Boolean): Data =
       Data.Builder()
         .putInt(KEY_APP_WIDGET_ID, appWidgetId)
+        .putBoolean(KEY_WARM, warm)
         .apply { templateId?.let { putString(KEY_TEMPLATE_ID, it) } }
         .build()
   }

@@ -12,6 +12,9 @@
 
 package cc.grepon.relais.widget
 
+import cc.grepon.relais.core.NodeState
+import kotlinx.coroutines.delay
+
 /** Bound on persisted model output in the launcher (a public surface). Mirrors the tile's cap. */
 const val RESPONSE_CAP = 600
 
@@ -59,9 +62,58 @@ data class WidgetUiState(
 fun capResponse(text: String): String = text.take(RESPONSE_CAP)
 
 /**
- * Cold-start guard (pure, unit-tested): a widget tap may run a prompt ONLY when the engine is already
- * [ready] AND a non-blank [prompt] is present. False when the node is off (a tap must never cold-start
- * a multi-GB engine) or the prompt is missing/blank. Mirrors the QS tile's `isReady` gate.
+ * What a widget tap resolves to (feature-22, task 4(c)):
+ *  - [RUN]: the engine is resident — run the prompt now.
+ *  - [WARM_THEN_RUN]: the node is up but its engine was released by idle-TTL — kick a reload, then
+ *    run once it is back.
+ *  - [IGNORE]: nothing to run and nothing to warm.
  */
-fun shouldRunWidgetPrompt(ready: Boolean, prompt: String?): Boolean =
-  ready && !prompt.isNullOrBlank()
+enum class WidgetTapAction { RUN, WARM_THEN_RUN, IGNORE }
+
+/**
+ * Cold-start guard (pure, unit-tested), keyed on the COMPUTED [nodeState] — the single source of
+ * truth ([cc.grepon.relais.core.computeNodeState]) — never on raw engine flags:
+ *  - a null/blank [prompt] is [WidgetTapAction.IGNORE] in every state (nothing to run, nothing to
+ *    warm for);
+ *  - LIVE / HOT → [WidgetTapAction.RUN] (the engine is resident; HOT matches the `isReady` gate this
+ *    replaced — the rendered button is the tile-style "no heat while throttling" half, see
+ *    [RelaisWidget]);
+ *  - IDLE → [WidgetTapAction.WARM_THEN_RUN]. IDLE already implies `shouldRun && listenersUp &&
+ *    idleUnloaded`, a STRONGER proof that the foreground service is alive than the `wasIdleUnloaded`
+ *    flag [cc.grepon.relais.core.RelaisInference]'s self-heal keys on — so the warm is a reload
+ *    behind a live service, not the cold start this guard exists to prevent;
+ *  - OFF / STARTING / ERROR → [WidgetTapAction.IGNORE]. A stale tap on a node the operator has since
+ *    stopped is `OFF` (`shutdown()` clears `idleUnloaded`), so it can never warm — the second
+ *    defence after the flag itself.
+ */
+fun shouldRunWidgetPrompt(nodeState: NodeState, prompt: String?): WidgetTapAction = when {
+  prompt.isNullOrBlank() -> WidgetTapAction.IGNORE
+  else -> when (nodeState) {
+    NodeState.LIVE, NodeState.HOT -> WidgetTapAction.RUN
+    NodeState.IDLE -> WidgetTapAction.WARM_THEN_RUN
+    NodeState.OFF, NodeState.STARTING, NodeState.ERROR -> WidgetTapAction.IGNORE
+  }
+}
+
+/**
+ * Whether [WidgetPromptWorker] should wait for a reload before re-checking readiness (pure,
+ * unit-tested): only when the engine is not [ready] AND either the tap that enqueued it [warm]ed the
+ * node or a reload is in flight ([startupInProgress]) for some other reason. `warm` is an INPUT, not
+ * a flag re-read: by the time WorkManager runs `doWork` a fast reload may have begun and ended, so
+ * `startupInProgress` alone would let the worker fall straight through to "node off".
+ */
+fun shouldAwaitWarm(ready: Boolean, warm: Boolean, startupInProgress: Boolean): Boolean =
+  !ready && (warm || startupInProgress)
+
+/**
+ * Polls [isReady] every [intervalMs] for at most [maxIterations] sleeps and returns the final answer
+ * — the ENGINE's readiness, never a liveness flag the reload may already have cleared. Returns
+ * immediately (no sleep) when already ready. Pure over its inputs; unit-tested on virtual time.
+ */
+suspend fun awaitEngineReady(isReady: () -> Boolean, intervalMs: Long, maxIterations: Int): Boolean {
+  repeat(maxIterations) {
+    if (isReady()) return true
+    delay(intervalMs)
+  }
+  return isReady()
+}
