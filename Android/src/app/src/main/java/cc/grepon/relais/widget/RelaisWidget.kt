@@ -67,9 +67,10 @@ private const val MAX_PROMPT_BUTTONS = 4
  * CLEAR action. Amber-on-charcoal via [RelaisWidgetTheme], per DESIGN.md.
  *
  * Cold-start safety: a button tap routes through [RunPromptAction], which re-derives the
- * [NodeState] and refuses to enqueue inference unless the node is LIVE/HOT (run) or IDLE (warm the
+ * [NodeState] and refuses to enqueue inference unless the node is LIVE (run) or IDLE (warm the
  * idle-released engine behind the still-live service, then run — feature-22). A tap can NEVER
- * cold-start the engine on a node that is off: OFF/STARTING/ERROR are ignored. When off, the status
+ * cold-start the engine on a node that is off, and never adds inference heat while the device is
+ * throttling: OFF/STARTING/ERROR/HOT are ignored. When off, the status
  * line reads "open app to start" and the prompt buttons are rendered disabled (no click action
  * attached); when idle it reads "tap to warm" and the buttons are enabled.
  */

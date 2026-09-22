@@ -20,6 +20,7 @@ import cc.grepon.relais.widget.WidgetUiState
 import cc.grepon.relais.widget.awaitEngineReady
 import cc.grepon.relais.widget.capResponse
 import cc.grepon.relais.widget.shouldAwaitWarm
+import cc.grepon.relais.widget.shouldGiveUpWarm
 import cc.grepon.relais.widget.shouldRunWidgetPrompt
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.currentTime
@@ -33,8 +34,8 @@ import org.junit.Test
 /**
  * Pure JVM truth table for the widget's [WidgetUiState] machine, the [capResponse] bound, the
  * [NodeState]-keyed [shouldRunWidgetPrompt] tap decision, and the worker's warm-wait
- * ([shouldAwaitWarm] + [awaitEngineReady], on virtual time). No Android/Glance types — these run as
- * plain unit tests.
+ * ([shouldAwaitWarm] / [shouldGiveUpWarm] + [awaitEngineReady], on virtual time). No Android/Glance
+ * types — these run as plain unit tests.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class WidgetStateTest {
@@ -100,14 +101,16 @@ class WidgetStateTest {
     assertEquals(RESPONSE_CAP, state.response?.length)
   }
 
-  @Test fun `shouldRunWidgetPrompt keys on NodeState — LIVE and HOT run, IDLE warms first, the rest ignore`() {
+  @Test fun `shouldRunWidgetPrompt keys on NodeState — LIVE runs, IDLE warms first, the rest ignore`() {
     // feature-22 PR-B (task 4(c)): the decision takes the COMPUTED state, not raw flags. IDLE already
     // implies shouldRun && listenersUp && idleUnloaded (computeNodeState slot 5), which is a stronger
     // proof that the foreground service is alive than the `wasIdleUnloaded` flag RelaisInference's
     // self-heal keys on — so warming from a tap is a reload behind a live service, never a cold start.
+    // HOT is IGNORE (review ruling R1): the engine is resident but the device is throttling, and the
+    // tile's "never add inference heat while hot" is also what the widget's canRun already renders.
     val expected = mapOf(
       NodeState.LIVE to WidgetTapAction.RUN,
-      NodeState.HOT to WidgetTapAction.RUN,
+      NodeState.HOT to WidgetTapAction.IGNORE,
       NodeState.IDLE to WidgetTapAction.WARM_THEN_RUN,
       NodeState.OFF to WidgetTapAction.IGNORE,
       NodeState.STARTING to WidgetTapAction.IGNORE,
@@ -119,7 +122,7 @@ class WidgetStateTest {
     }
   }
 
-  @Test fun `shouldRunWidgetPrompt ignores a stale tap on a stopped node — the cold-start guard`() {
+  @Test fun `shouldRunWidgetPrompt ignores a stale tap on a stopped or throttling node — the cold-start guard`() {
     // The single most important assertion: a tap can never kick off anything on a node that is OFF
     // (the widget rendered IDLE, the operator pressed STOP, the tap landed afterwards — shutdown()
     // cleared idleUnloaded, so the state is OFF, and OFF is IGNORE). Same for a node that is still
@@ -127,6 +130,9 @@ class WidgetStateTest {
     assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.OFF, "status check"))
     assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.STARTING, "status check"))
     assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.ERROR, "status check"))
+    // HOT: the engine IS resident, so this is the one row the old isReady gate got wrong — a tap that
+    // lands while the device throttles (rendered LIVE, tapped after the thermal flip) must not run.
+    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.HOT, "status check"))
   }
 
   @Test fun `shouldRunWidgetPrompt warms an IDLE node — neither a plain run nor an ignored tap`() {
@@ -153,23 +159,72 @@ class WidgetStateTest {
     assertFalse(shouldAwaitWarm(ready = true, warm = true, startupInProgress = true))
   }
 
+  @Test fun `shouldGiveUpWarm fires only when no reload is in flight AND the last attempt failed`() {
+    // Review ruling R2. Each false row kills one mutant: `!startupInProgress` alone (row 3 — nothing
+    // failed, the reload simply has not begun or a tear landed between attempts: keep polling) and
+    // `lastInitFailed` alone (row 2 — a stale failure while a retry is in flight: slot 3 > 4, keep
+    // polling until that attempt ends and writes its own verdict).
+    assertTrue(shouldGiveUpWarm(startupInProgress = false, lastInitFailed = true))
+    assertFalse(shouldGiveUpWarm(startupInProgress = true, lastInitFailed = true))
+    assertFalse(shouldGiveUpWarm(startupInProgress = false, lastInitFailed = false))
+    assertFalse(shouldGiveUpWarm(startupInProgress = true, lastInitFailed = false))
+  }
+
   @Test fun `awaitEngineReady returns true as soon as the engine reports ready`() = runTest {
     var checks = 0
-    val ready = awaitEngineReady(isReady = { ++checks >= 3 }, intervalMs = 500L, maxIterations = 120)
+    val ready = awaitEngineReady(
+      isReady = { ++checks >= 3 },
+      giveUp = { false },
+      intervalMs = 500L,
+      maxIterations = 120,
+    )
     assertTrue(ready)
     assertEquals("two sleeps, ready on the third check", 1000L, currentTime)
   }
 
   @Test fun `awaitEngineReady does not sleep when the engine is already ready`() = runTest {
-    assertTrue(awaitEngineReady(isReady = { true }, intervalMs = 500L, maxIterations = 120))
+    assertTrue(awaitEngineReady(isReady = { true }, giveUp = { false }, intervalMs = 500L, maxIterations = 120))
     assertEquals(0L, currentTime)
   }
 
+  @Test fun `awaitEngineReady settles early when told to give up — a failed reload costs one poll, not the cap`() =
+    runTest {
+      // Review ruling R2: the third check finds !startupInProgress && lastInitFailed → false after
+      // 2 × 500 ms, never the 60 s cap.
+      var asked = 0
+      val ready = awaitEngineReady(
+        isReady = { false },
+        giveUp = { ++asked >= 3 },
+        intervalMs = 500L,
+        maxIterations = 120,
+      )
+      assertFalse(ready)
+      assertEquals("gave up on the third check, after two sleeps", 1000L, currentTime)
+    }
+
+  @Test fun `awaitEngineReady lets a reload that just finished win over a same-iteration give-up`() = runTest {
+    // isReady is consulted BEFORE giveUp on every iteration: on the iteration where both flip true
+    // (endStartup() is the last write of an attempt, so a reader can see a stale lastInitFailed=true
+    // beside a fresh isReady=true for one poll) the answer is the engine's, not the flag's.
+    var readyChecks = 0
+    var giveUpChecks = 0
+    val ready = awaitEngineReady(
+      isReady = { ++readyChecks >= 3 },
+      giveUp = { ++giveUpChecks >= 3 },
+      intervalMs = 500L,
+      maxIterations = 120,
+    )
+    assertTrue(ready)
+    assertEquals(1000L, currentTime)
+  }
+
   @Test fun `awaitEngineReady gives up at the cap — 60 s with ModelSwitch's poll constants`() = runTest {
-    // The cap is what bounds a widget tap on a node whose reload failed: 500 ms × 120 = 60 s, and the
-    // reload measured 19.4–19.8 s on rango/E2B (feature-22 Task 5), so a healthy warm fits with room.
+    // The cap is what bounds a widget tap on a node whose reload neither succeeds nor records a
+    // failure (giveUp never fires): 500 ms × 120 = 60 s, and the reload measured 19.4–19.8 s on
+    // rango/E2B (feature-22 Task 5), so a healthy warm fits with room.
     val ready = awaitEngineReady(
       isReady = { false },
+      giveUp = { false },
       intervalMs = ModelSwitch.RELOAD_POLL_INTERVAL_MS,
       maxIterations = ModelSwitch.MAX_RELOAD_POLL_ITERATIONS,
     )

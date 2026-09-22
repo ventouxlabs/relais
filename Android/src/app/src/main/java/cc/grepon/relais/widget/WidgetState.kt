@@ -75,9 +75,10 @@ enum class WidgetTapAction { RUN, WARM_THEN_RUN, IGNORE }
  * truth ([cc.grepon.relais.core.computeNodeState]) — never on raw engine flags:
  *  - a null/blank [prompt] is [WidgetTapAction.IGNORE] in every state (nothing to run, nothing to
  *    warm for);
- *  - LIVE / HOT → [WidgetTapAction.RUN] (the engine is resident; HOT matches the `isReady` gate this
- *    replaced — the rendered button is the tile-style "no heat while throttling" half, see
- *    [RelaisWidget]);
+ *  - LIVE → [WidgetTapAction.RUN] (the engine is resident and the device is not throttling);
+ *  - HOT → [WidgetTapAction.IGNORE] (engine resident but the device is throttling; never add
+ *    inference heat while hot — the tile's policy, and the policy [RelaisWidget]'s `canRun` already
+ *    renders. This is the one row the boolean `isReady` gate this replaced got wrong);
  *  - IDLE → [WidgetTapAction.WARM_THEN_RUN]. IDLE already implies `shouldRun && listenersUp &&
  *    idleUnloaded`, a STRONGER proof that the foreground service is alive than the `wasIdleUnloaded`
  *    flag [cc.grepon.relais.core.RelaisInference]'s self-heal keys on — so the warm is a reload
@@ -89,9 +90,9 @@ enum class WidgetTapAction { RUN, WARM_THEN_RUN, IGNORE }
 fun shouldRunWidgetPrompt(nodeState: NodeState, prompt: String?): WidgetTapAction = when {
   prompt.isNullOrBlank() -> WidgetTapAction.IGNORE
   else -> when (nodeState) {
-    NodeState.LIVE, NodeState.HOT -> WidgetTapAction.RUN
+    NodeState.LIVE -> WidgetTapAction.RUN
     NodeState.IDLE -> WidgetTapAction.WARM_THEN_RUN
-    NodeState.OFF, NodeState.STARTING, NodeState.ERROR -> WidgetTapAction.IGNORE
+    NodeState.HOT, NodeState.OFF, NodeState.STARTING, NodeState.ERROR -> WidgetTapAction.IGNORE
   }
 }
 
@@ -106,13 +107,36 @@ fun shouldAwaitWarm(ready: Boolean, warm: Boolean, startupInProgress: Boolean): 
   !ready && (warm || startupInProgress)
 
 /**
+ * Whether the warm the worker is waiting on has FAILED, so the wait can settle now instead of
+ * running out the cap (pure, unit-tested): no reload in flight ([startupInProgress] false) AND the
+ * last attempt recorded a failure ([lastInitFailed]). Sound because the kick publishes
+ * `startupInProgress` on the caller before returning and `ensureInitialized` clears `lastInitFailed`
+ * at attempt START with `endStartup()` as its LAST write — so a reader that sees the flag clear sees
+ * the verdict of the attempt that just ended, and a stale `lastInitFailed` beside an in-flight retry
+ * keeps polling (slot 3 > 4, exactly as `computeNodeState` orders them). The `!isReady` conjunct is
+ * the [awaitEngineReady] check that precedes it. Readers take the liveness snapshot FIRST, then the
+ * engine flag (`core/NodeState.kt`'s read-order rule).
+ */
+fun shouldGiveUpWarm(startupInProgress: Boolean, lastInitFailed: Boolean): Boolean =
+  !startupInProgress && lastInitFailed
+
+/**
  * Polls [isReady] every [intervalMs] for at most [maxIterations] sleeps and returns the final answer
  * — the ENGINE's readiness, never a liveness flag the reload may already have cleared. Returns
- * immediately (no sleep) when already ready. Pure over its inputs; unit-tested on virtual time.
+ * immediately (no sleep) when already ready. [giveUp] is consulted AFTER [isReady] on every
+ * iteration, so a reload that just finished always wins over a same-poll give-up; when it fires the
+ * wait settles `false` at once instead of running out the cap. Pure over its inputs; unit-tested on
+ * virtual time.
  */
-suspend fun awaitEngineReady(isReady: () -> Boolean, intervalMs: Long, maxIterations: Int): Boolean {
+suspend fun awaitEngineReady(
+  isReady: () -> Boolean,
+  giveUp: () -> Boolean,
+  intervalMs: Long,
+  maxIterations: Int,
+): Boolean {
   repeat(maxIterations) {
     if (isReady()) return true
+    if (giveUp()) return false // AFTER isReady: a reload that just finished wins
     delay(intervalMs)
   }
   return isReady()

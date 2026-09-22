@@ -27,6 +27,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import cc.grepon.relais.ModelSwitch
+import cc.grepon.relais.RelaisEngine
 import cc.grepon.relais.RelaisLivenessState
 import cc.grepon.relais.core.RelaisInference
 import cc.grepon.relais.templates.WorkflowRegistry
@@ -67,9 +68,9 @@ fun readState(prefs: Preferences): WidgetUiState {
  * in-process inference, and writes DONE/ERROR (with a capped response) back into the widget's Glance
  * state, then re-renders. When the enqueuing tap warmed an idle node (`warm` input, feature-22) or a
  * reload is otherwise in flight, it first waits for the engine — [awaitEngineReady] on
- * [ModelSwitch]'s poll constants, a 60 s cap — and settles the existing "node off" error if the
- * engine never comes back. Enqueued with `enqueueUniqueWork(KEEP)` so rapid taps don't stack
- * inferences on the single engine.
+ * [ModelSwitch]'s poll constants, a 60 s cap, giving up within one poll once [shouldGiveUpWarm] says
+ * the reload failed — and settles the existing "node off" error if the engine never comes back.
+ * Enqueued with `enqueueUniqueWork(KEEP)` so rapid taps don't stack inferences on the single engine.
  */
 class WidgetPromptWorker(context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
@@ -96,10 +97,18 @@ class WidgetPromptWorker(context: Context, params: WorkerParameters) :
     if (mustWait) {
       // The tap already kicked the reload (or another caller did); wait for the ENGINE, not a flag —
       // by the time WorkManager runs this, a fast reload may have begun AND ended. Bounded at 60 s
-      // (500 ms × 120); the reload measured 19.4–19.8 s on rango/E2B (feature-22 Task 5).
+      // (500 ms × 120); the reload measured 19.4–19.8 s on rango/E2B (feature-22 Task 5). A reload
+      // that FAILS settles within one poll instead (giveUp: snapshot first, then the engine flag).
       Log.i(TAG, "engine warming; waiting for it to come up")
       awaitEngineReady(
         isReady = RelaisInference::isReady,
+        giveUp = {
+          val s = RelaisLivenessState.snapshot
+          shouldGiveUpWarm(
+            startupInProgress = s.startupInProgress,
+            lastInitFailed = RelaisEngine.lastInitFailed,
+          )
+        },
         intervalMs = ModelSwitch.RELOAD_POLL_INTERVAL_MS,
         maxIterations = ModelSwitch.MAX_RELOAD_POLL_ITERATIONS,
       )
