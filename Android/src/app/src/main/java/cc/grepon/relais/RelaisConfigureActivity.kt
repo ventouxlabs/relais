@@ -126,6 +126,7 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
     mutableStateOf(powerManager.isIgnoringBatteryOptimizations(ctx.packageName))
   }
   var autoStartEnabled by remember { mutableStateOf(RelaisConfig.autoStartEnabled(ctx)) }
+  var idleTtl by remember { mutableStateOf(RelaisConfig.idleTtlMinutes(ctx)) }
   LaunchedEffect(Unit) {
     while (true) {
       val liveness = RelaisLivenessState.snapshot
@@ -266,6 +267,50 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
         RelaisConfig.setAutoStart(ctx, next)
         autoStartEnabled = next
       }
+      // IDLE UNLOAD (#178, feature-22 PR-B task 3): the toggle owns disabling — writes the
+      // IDLE_TTL_DISABLED_MINUTES sentinel directly, never a ladder rung. Turning it off first
+      // remembers the current value so turning it back on restores it instead of resetting to the
+      // default.
+      ToggleRow("IDLE UNLOAD", idleTtl > 0) {
+        if (idleTtl > 0) {
+          RelaisConfig.setIdleTtlLastNonZeroMinutes(ctx, idleTtl)
+          RelaisConfig.setIdleTtlMinutes(ctx, IDLE_TTL_DISABLED_MINUTES)
+          idleTtl = IDLE_TTL_DISABLED_MINUTES
+        } else {
+          val restored = RelaisConfig.idleTtlLastNonZeroMinutes(ctx)
+          RelaisConfig.setIdleTtlMinutes(ctx, restored)
+          idleTtl = restored
+        }
+      }
+      // Rendered only while enabled — disabling is the toggle's job, not the stepper's. Each tap
+      // moves to the adjacent IDLE_TTL_LADDER rung (nextRung), never a fixed increment.
+      if (idleTtl > 0) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+          Text("IDLE AFTER", color = Muted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.5.sp)
+          Spacer(Modifier.weight(1f))
+          Stepper("–") {
+            val next = nextRung(idleTtl, IDLE_TTL_LADDER, up = false)
+            if (next != idleTtl) {
+              idleTtl = next
+              RelaisConfig.setIdleTtlMinutes(ctx, next)
+            }
+          }
+          Text(
+            "$idleTtl min",
+            color = Paper,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(horizontal = 12.dp),
+          )
+          Stepper("+") {
+            val next = nextRung(idleTtl, IDLE_TTL_LADDER, up = true)
+            if (next != idleTtl) {
+              idleTtl = next
+              RelaisConfig.setIdleTtlMinutes(ctx, next)
+            }
+          }
+        }
+      }
     }
 
     Divider()
@@ -365,6 +410,20 @@ private fun ToggleRow(label: String, value: Boolean, onToggle: () -> Unit) {
   ) {
     Text(label, color = Muted, fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.5.sp)
     Text(if (value) "on" else "off", color = Paper, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+  }
+}
+
+/**
+ * Stepper +/- tap target for the IDLE AFTER row. Copied from
+ * [cc.grepon.relais.triage.TriageControlActivity]'s private `Stepper` (each screen keeps its own
+ * private row composables — see feature-22 PR-B task-3 brief) rather than shared or made public.
+ */
+@Composable
+private fun Stepper(symbol: String, onClick: () -> Unit) {
+  Box(
+    Modifier.clip(RoundedCornerShape(6.dp)).clickable { onClick() }.padding(horizontal = 12.dp, vertical = 2.dp)
+  ) {
+    Text(symbol, color = Amber, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 18.sp)
   }
 }
 
