@@ -6,9 +6,9 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-22 — ⏩ START HERE. **PR-B is PUSHED and OPEN as #342 (`Closes #336`), CI running. The widget half is now DEVICE-SMOKED — the widget was already on rango all along. One new issue filed (#343). Next: CI → squash-merge → delete the `f22-b` worktree → feature-22 is complete.**
+## 2026-09-22 — ⏩ START HERE. **feature-22 is COMPLETE. PR-B MERGED as #342 (`ac71c3a7`), #336 auto-closed, CI green (Build Android APK 11m4s, JVM unit tests 8m11s). The widget half is DEVICE-SMOKED — the widget was already on rango all along. One new issue filed (#343). Nothing is in flight.**
 
-`main` = `89f16a68` (#341). PR-A merged as #339. **PR-B = #342**, branch `feat/22-idle-unload-b`, head `9eb9addf`, 18 commits.
+`main` = `ac71c3a7` (#342). PR-A merged as #339. PR-B was branch `feat/22-idle-unload-b`, head `9eb9addf`, 18 commits — squash-merged 2026-09-22 11:35 UTC.
 
 ### What this session did
 
@@ -47,10 +47,14 @@ TTL back to 15 min (pref-verified), node LIVE, model file restored at its origin
 
 ### Next
 
-1. CI on #342 → squash-merge (`Closes #336`).
-2. `git worktree remove .claude/worktrees/f22-b` after the merge.
-3. feature-22 is then **complete** — Task 6 was decided by measurement (document the hold, build nothing; audio keeps its 503).
-4. Carried forward, unchanged: BouncyCastle 1.78.1 → 1.85 after the R8 baseline (needs an on-device *inference* check); `RelaisHttpServer.kt` must be **extracted** from, not appended to, on its next change; #337's real close (invalidate `cachedPath` on id change); the two copy follow-ups on the ledger; #300 #288 #122 #102 #97 #69 open and none blocking.
+feature-22 is **done**. Task 6 was decided by measurement (document the hold, build nothing; audio keeps its 503), so there is no remaining code in the feature. No PR is open and no branch is in flight.
+
+Two caveats that rode along with the merge, recorded so they are not mistaken for verified:
+
+- **codex round 3 returned an untagged body** — *"No actionable regressions were identified in the idle-state mappings, TTL controls, or tile/widget warm-up paths."* By the review skill's gate rule an untagged result is fail-closed and a human judges it; rounds 1 and 2 were GATE PASS with P2s, all fixed. JD read it and merged.
+- **The worker's post-reload thermal re-check is JVM-verified only** — rango never went thermally hot, so the one path that needs a hot phone is still unsmoked. Everything else in #336's widget half has device evidence with timestamps.
+
+Carried forward, unchanged: BouncyCastle 1.78.1 → 1.85 after the R8 baseline (needs an on-device *inference* check); `RelaisHttpServer.kt` must be **extracted** from, not appended to, on its next change; #337's real close (invalidate `cachedPath` on id change); the two copy follow-ups on the ledger; #300 #288 #122 #102 #97 #69 open and none blocking.
 
 ---
 
