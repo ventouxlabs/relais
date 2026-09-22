@@ -49,6 +49,7 @@ import cc.grepon.relais.Muted
 import cc.grepon.relais.Panel
 import cc.grepon.relais.core.NodeState
 import cc.grepon.relais.core.RelaisNodeController
+import cc.grepon.relais.core.thermalHot
 import cc.grepon.relais.templates.PromptTemplate
 import cc.grepon.relais.templates.WorkflowRegistry
 
@@ -72,9 +73,11 @@ private const val MAX_PROMPT_BUTTONS = 4
  * cold-start the engine on a node that is off, and never adds inference heat while the device is
  * throttling: OFF/STARTING/ERROR/HOT are ignored, and so is an IDLE tap while the device is already
  * thermally hot (Codex P2 — mirrors HOT's policy for an engine that isn't resident yet; see
- * [cc.grepon.relais.widget.shouldRunWidgetPrompt]). When off, the status
- * line reads "open app to start" and the prompt buttons are rendered disabled (no click action
- * attached); when idle it reads "tap to warm" and the buttons are enabled.
+ * [cc.grepon.relais.widget.shouldRunWidgetPrompt]). [cc.grepon.relais.widget.widgetCanRun] renders
+ * that same policy on the buttons and status line so they never invite a tap that would silently
+ * IGNORE: when off, the status line reads "open app to start" and the prompt buttons are disabled
+ * (no click action attached); when idle it reads "tap to warm" and the buttons are enabled; when
+ * idle AND thermally hot it reads "hot, cooling" instead and the buttons go back to disabled.
  */
 class RelaisWidget : GlanceAppWidget() {
 
@@ -94,15 +97,16 @@ class RelaisWidget : GlanceAppWidget() {
 private fun WidgetContent(state: WidgetUiState) {
   val context = LocalContext.current
   val nodeState = RelaisNodeController.state(context)
+  // Read ONCE, same place as nodeState, and pass down — never re-read the global inside a composable
+  // further down the tree, or the buttons and the status line could observe different readings.
+  val hot = thermalHot()
   val compact = LocalSize.current.height < COMPACT_HEIGHT
-  // Buttons are tappable only on a LIVE or IDLE node that isn't already running — the visual half of
-  // the cold-start guard (RunPromptAction enforces the authoritative gate). HOT stays disabled here
-  // as on the tile: never invite inference heat while throttling.
-  val canRun =
-    (nodeState == NodeState.LIVE || nodeState == NodeState.IDLE) && state.phase != WidgetPhase.LOADING
+  // The visual half of the cold-start guard; RunPromptAction's shouldRunWidgetPrompt is the
+  // authoritative gate re-checked at tap time. See widgetCanRun's KDoc for the row-by-row policy.
+  val canRun = widgetCanRun(nodeState, hot, state.phase)
 
   Column(modifier = GlanceModifier.fillMaxSize().background(GlanceTheme.colors.background).padding(12.dp)) {
-    StatusLine(nodeState)
+    StatusLine(nodeState, hot)
     Spacer(GlanceModifier.height(8.dp))
     PromptButtons(context, enabled = canRun)
     when (state.phase) {
@@ -120,19 +124,29 @@ private fun WidgetContent(state: WidgetUiState) {
 }
 
 /**
- * The node status line, derived from the single [NodeState] source of truth. Colour follows
- * DESIGN.md's status mapping: LIVE/HOT = full amber; STARTING/IDLE = amber 60% (both resident-or-
- * coming-up-or-warmable — a live node, not an off one); OFF/ERROR = muted.
+ * The node status line, derived from the single [NodeState] source of truth (plus the raw
+ * [thermalHot] reading, for the one row where it changes the copy — see the IDLE arm below). Colour
+ * follows DESIGN.md's status mapping: LIVE/HOT = full amber; STARTING/IDLE = amber 60% (both
+ * resident-or-coming-up-or-warmable — a live node, not an off one); OFF/ERROR = muted.
  */
 @Composable
-private fun StatusLine(nodeState: NodeState) {
+private fun StatusLine(nodeState: NodeState, thermalHot: Boolean) {
   val (label, accent) = when (nodeState) {
     NodeState.LIVE -> "● live" to Amber
     NodeState.HOT -> "● hot — throttling" to Amber
     NodeState.STARTING -> "○ starting…" to Amber.copy(alpha = 0.6f)
     NodeState.ERROR -> "○ error — open app" to Muted
     NodeState.OFF -> "○ off — open app to start" to Muted
-    NodeState.IDLE -> "○ idle — tap to warm" to Amber.copy(alpha = 0.6f)
+    // Codex P2 fixwave round 2: while thermally hot the buttons are disabled (widgetCanRun) and a
+    // tap would IGNORE anyway (shouldRunWidgetPrompt) — "tap to warm" would misinform, same class of
+    // defect as the tile's stale "tap to warm" subtitle. Stays amber 60%: the node IS still up, only
+    // the tap is blocked, unlike OFF/ERROR's muted "nothing is running here".
+    NodeState.IDLE ->
+      if (thermalHot) {
+        "○ idle — hot, cooling" to Amber.copy(alpha = 0.6f)
+      } else {
+        "○ idle — tap to warm" to Amber.copy(alpha = 0.6f)
+      }
   }
   Text(text = "relais  $label", style = TextStyle(color = ColorProvider(accent), fontSize = 13.sp))
 }

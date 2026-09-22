@@ -77,8 +77,8 @@ enum class WidgetTapAction { RUN, WARM_THEN_RUN, IGNORE }
  *    warm for);
  *  - LIVE → [WidgetTapAction.RUN] (the engine is resident and the device is not throttling);
  *  - HOT → [WidgetTapAction.IGNORE] (engine resident but the device is throttling; never add
- *    inference heat while hot — the tile's policy, and the policy [RelaisWidget]'s `canRun` already
- *    renders. This is the one row the boolean `isReady` gate this replaced got wrong);
+ *    inference heat while hot — the tile's policy, and the policy [widgetCanRun] already renders.
+ *    This is the one row the boolean `isReady` gate this replaced got wrong);
  *  - IDLE while thermally hot ([thermalHot] true, Codex P2) → [WidgetTapAction.IGNORE].
  *    [cc.grepon.relais.core.computeNodeState] can only report HOT for a RESIDENT engine (`ready &&
  *    listenersUp`); an idle-unloaded node reads IDLE regardless of raw thermal status, so without
@@ -101,6 +101,28 @@ fun shouldRunWidgetPrompt(nodeState: NodeState, thermalHot: Boolean, prompt: Str
     NodeState.HOT, NodeState.OFF, NodeState.STARTING, NodeState.ERROR -> WidgetTapAction.IGNORE
   }
 }
+
+/**
+ * Whether the widget's prompt buttons should accept a tap (pure, unit-tested) — the VISUAL half of
+ * the cold-start guard; [shouldRunWidgetPrompt] remains the authoritative gate re-checked inside
+ * [RunPromptAction] at tap time (this is only what [RelaisWidget] renders as enabled/disabled).
+ *  - a [phase] already [WidgetPhase.LOADING] never re-triggers a second tap, in any state;
+ *  - LIVE → runnable (the engine is resident and, by construction, not thermally hot — `HOT` would
+ *    have fired first in [cc.grepon.relais.core.computeNodeState]);
+ *  - IDLE while thermally hot ([thermalHot] true, Codex P2 fixwave round 2) → NOT runnable. Without
+ *    this row the buttons stayed enabled and the status line still said "tap to warm" while a tap
+ *    silently no-opped via [shouldRunWidgetPrompt]'s `IGNORE` — the same defect as the tile's stale
+ *    "tap to warm" label, on the widget's render instead of its subtitle;
+ *  - IDLE otherwise → runnable (mirrors [shouldRunWidgetPrompt]'s `WARM_THEN_RUN`);
+ *  - HOT / OFF / STARTING / ERROR → never runnable (mirrors [shouldRunWidgetPrompt]'s `IGNORE` rows).
+ */
+fun widgetCanRun(nodeState: NodeState, thermalHot: Boolean, phase: WidgetPhase): Boolean =
+  phase != WidgetPhase.LOADING &&
+    when (nodeState) {
+      NodeState.LIVE -> true
+      NodeState.IDLE -> !thermalHot
+      NodeState.HOT, NodeState.OFF, NodeState.STARTING, NodeState.ERROR -> false
+    }
 
 /**
  * Whether [WidgetPromptWorker] should wait for a reload before re-checking readiness (pure,

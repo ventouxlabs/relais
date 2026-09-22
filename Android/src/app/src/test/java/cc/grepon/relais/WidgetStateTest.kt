@@ -22,6 +22,7 @@ import cc.grepon.relais.widget.capResponse
 import cc.grepon.relais.widget.shouldAwaitWarm
 import cc.grepon.relais.widget.shouldGiveUpWarm
 import cc.grepon.relais.widget.shouldRunWidgetPrompt
+import cc.grepon.relais.widget.widgetCanRun
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
@@ -33,9 +34,9 @@ import org.junit.Test
 
 /**
  * Pure JVM truth table for the widget's [WidgetUiState] machine, the [capResponse] bound, the
- * [NodeState]-keyed [shouldRunWidgetPrompt] tap decision, and the worker's warm-wait
- * ([shouldAwaitWarm] / [shouldGiveUpWarm] + [awaitEngineReady], on virtual time). No Android/Glance
- * types — these run as plain unit tests.
+ * [NodeState]-keyed [shouldRunWidgetPrompt] tap decision, the [widgetCanRun] button-enable policy,
+ * and the worker's warm-wait ([shouldAwaitWarm] / [shouldGiveUpWarm] + [awaitEngineReady], on virtual
+ * time). No Android/Glance types — these run as plain unit tests.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class WidgetStateTest {
@@ -107,7 +108,7 @@ class WidgetStateTest {
     // proof that the foreground service is alive than the `wasIdleUnloaded` flag RelaisInference's
     // self-heal keys on — so warming from a tap is a reload behind a live service, never a cold start.
     // HOT is IGNORE (review ruling R1): the engine is resident but the device is throttling, and the
-    // tile's "never add inference heat while hot" is also what the widget's canRun already renders.
+    // tile's "never add inference heat while hot" is also what the widget's widgetCanRun renders.
     // Codex P2 (PR-B fixwave): an IDLE tap while the device is ALREADY thermally hot must also
     // IGNORE — computeNodeState can only report HOT for a resident engine, so an idle-unloaded node
     // reads IDLE at any thermal status, and without this row the tap warmed the engine and ran it
@@ -174,6 +175,53 @@ class WidgetStateTest {
             shouldRunWidgetPrompt(state, hot, prompt),
           )
         }
+      }
+    }
+  }
+
+  @Test fun `widgetCanRun keys on NodeState, thermalHot, and phase — LIVE runs, IDLE runs unless hot, LOADING never re-triggers`() {
+    // Codex P2 fixwave round 2: widgetCanRun is the pure decision behind RelaisWidget's button-enable
+    // state. (IDLE, hot=true) must be NOT runnable — without this row the buttons stayed enabled and
+    // the status line still said "tap to warm" while a tap silently no-opped via
+    // shouldRunWidgetPrompt's IGNORE. (LIVE, hot=true) is unreachable by construction
+    // (computeNodeState's HOT arm fires first whenever ready && listenersUp) but asserted for
+    // totality, same verdict as (LIVE, hot=false).
+    val expected = mapOf(
+      Triple(NodeState.LIVE, false, WidgetPhase.IDLE) to true,
+      Triple(NodeState.LIVE, true, WidgetPhase.IDLE) to true,
+      Triple(NodeState.HOT, false, WidgetPhase.IDLE) to false,
+      Triple(NodeState.HOT, true, WidgetPhase.IDLE) to false,
+      Triple(NodeState.IDLE, false, WidgetPhase.IDLE) to true,
+      Triple(NodeState.IDLE, true, WidgetPhase.IDLE) to false,
+      Triple(NodeState.OFF, false, WidgetPhase.IDLE) to false,
+      Triple(NodeState.OFF, true, WidgetPhase.IDLE) to false,
+      Triple(NodeState.STARTING, false, WidgetPhase.IDLE) to false,
+      Triple(NodeState.STARTING, true, WidgetPhase.IDLE) to false,
+      Triple(NodeState.ERROR, false, WidgetPhase.IDLE) to false,
+      Triple(NodeState.ERROR, true, WidgetPhase.IDLE) to false,
+    )
+    val everyCombination =
+      NodeState.entries.flatMap { state -> listOf(Triple(state, false, WidgetPhase.IDLE), Triple(state, true, WidgetPhase.IDLE)) }
+        .toSet()
+    assertEquals("every NodeState × thermalHot combination needs a row here", everyCombination, expected.keys)
+    for ((key, runnable) in expected) {
+      val (state, hot, phase) = key
+      assertEquals("state=$state, thermalHot=$hot, phase=$phase", runnable, widgetCanRun(state, hot, phase))
+    }
+  }
+
+  @Test fun `widgetCanRun refuses an IDLE tap while the device is thermally hot`() {
+    assertFalse(widgetCanRun(NodeState.IDLE, thermalHot = true, phase = WidgetPhase.IDLE))
+    assertTrue(widgetCanRun(NodeState.IDLE, thermalHot = false, phase = WidgetPhase.IDLE))
+  }
+
+  @Test fun `widgetCanRun never re-triggers while a run is already LOADING, in every state and thermal reading`() {
+    for (state in NodeState.entries) {
+      for (hot in listOf(false, true)) {
+        assertFalse(
+          "state=$state, thermalHot=$hot should not run while LOADING",
+          widgetCanRun(state, hot, WidgetPhase.LOADING),
+        )
       }
     }
   }
