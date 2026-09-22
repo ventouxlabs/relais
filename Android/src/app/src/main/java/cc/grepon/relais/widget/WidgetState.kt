@@ -12,6 +12,9 @@
 
 package cc.grepon.relais.widget
 
+import cc.grepon.relais.core.NodeState
+import kotlinx.coroutines.delay
+
 /** Bound on persisted model output in the launcher (a public surface). Mirrors the tile's cap. */
 const val RESPONSE_CAP = 600
 
@@ -59,9 +62,110 @@ data class WidgetUiState(
 fun capResponse(text: String): String = text.take(RESPONSE_CAP)
 
 /**
- * Cold-start guard (pure, unit-tested): a widget tap may run a prompt ONLY when the engine is already
- * [ready] AND a non-blank [prompt] is present. False when the node is off (a tap must never cold-start
- * a multi-GB engine) or the prompt is missing/blank. Mirrors the QS tile's `isReady` gate.
+ * What a widget tap resolves to (feature-22, task 4(c)):
+ *  - [RUN]: the engine is resident — run the prompt now.
+ *  - [WARM_THEN_RUN]: the node is up but its engine was released by idle-TTL — kick a reload, then
+ *    run once it is back.
+ *  - [IGNORE]: nothing to run and nothing to warm.
  */
-fun shouldRunWidgetPrompt(ready: Boolean, prompt: String?): Boolean =
-  ready && !prompt.isNullOrBlank()
+enum class WidgetTapAction { RUN, WARM_THEN_RUN, IGNORE }
+
+/**
+ * Cold-start guard (pure, unit-tested), keyed on the COMPUTED [nodeState] — the single source of
+ * truth ([cc.grepon.relais.core.computeNodeState]) — never on raw engine flags:
+ *  - a null/blank [prompt] is [WidgetTapAction.IGNORE] in every state (nothing to run, nothing to
+ *    warm for);
+ *  - LIVE → [WidgetTapAction.RUN] (the engine is resident and the device is not throttling);
+ *  - HOT → [WidgetTapAction.IGNORE] (engine resident but the device is throttling; never add
+ *    inference heat while hot — the tile's policy, and the policy [widgetCanRun] already renders.
+ *    This is the one row the boolean `isReady` gate this replaced got wrong);
+ *  - IDLE while thermally hot ([thermalHot] true, Codex P2) → [WidgetTapAction.IGNORE].
+ *    [cc.grepon.relais.core.computeNodeState] can only report HOT for a RESIDENT engine (`ready &&
+ *    listenersUp`); an idle-unloaded node reads IDLE regardless of raw thermal status, so without
+ *    this row a tap warmed the engine and ran inference throttled — the exact heat HOT's policy
+ *    exists to refuse. Mirrors HOT's IGNORE, extended to an engine that isn't resident yet;
+ *  - IDLE otherwise → [WidgetTapAction.WARM_THEN_RUN]. IDLE already implies `shouldRun && listenersUp &&
+ *    idleUnloaded`, a STRONGER proof that the foreground service is alive than the `wasIdleUnloaded`
+ *    flag [cc.grepon.relais.core.RelaisInference]'s self-heal keys on — so the warm is a reload
+ *    behind a live service, not the cold start this guard exists to prevent;
+ *  - OFF / STARTING / ERROR → [WidgetTapAction.IGNORE]. A stale tap on a node the operator has since
+ *    stopped is `OFF` (`shutdown()` clears `idleUnloaded`), so it can never warm — the second
+ *    defence after the flag itself.
+ */
+fun shouldRunWidgetPrompt(nodeState: NodeState, thermalHot: Boolean, prompt: String?): WidgetTapAction = when {
+  prompt.isNullOrBlank() -> WidgetTapAction.IGNORE
+  nodeState == NodeState.IDLE && thermalHot -> WidgetTapAction.IGNORE
+  else -> when (nodeState) {
+    NodeState.LIVE -> WidgetTapAction.RUN
+    NodeState.IDLE -> WidgetTapAction.WARM_THEN_RUN
+    NodeState.HOT, NodeState.OFF, NodeState.STARTING, NodeState.ERROR -> WidgetTapAction.IGNORE
+  }
+}
+
+/**
+ * Whether the widget's prompt buttons should accept a tap (pure, unit-tested) — the VISUAL half of
+ * the cold-start guard; [shouldRunWidgetPrompt] remains the authoritative gate re-checked inside
+ * [RunPromptAction] at tap time (this is only what [RelaisWidget] renders as enabled/disabled).
+ *  - a [phase] already [WidgetPhase.LOADING] never re-triggers a second tap, in any state;
+ *  - LIVE → runnable (the engine is resident and, by construction, not thermally hot — `HOT` would
+ *    have fired first in [cc.grepon.relais.core.computeNodeState]);
+ *  - IDLE while thermally hot ([thermalHot] true, Codex P2 fixwave round 2) → NOT runnable. Without
+ *    this row the buttons stayed enabled and the status line still said "tap to warm" while a tap
+ *    silently no-opped via [shouldRunWidgetPrompt]'s `IGNORE` — the same defect as the tile's stale
+ *    "tap to warm" label, on the widget's render instead of its subtitle;
+ *  - IDLE otherwise → runnable (mirrors [shouldRunWidgetPrompt]'s `WARM_THEN_RUN`);
+ *  - HOT / OFF / STARTING / ERROR → never runnable (mirrors [shouldRunWidgetPrompt]'s `IGNORE` rows).
+ */
+fun widgetCanRun(nodeState: NodeState, thermalHot: Boolean, phase: WidgetPhase): Boolean =
+  phase != WidgetPhase.LOADING &&
+    when (nodeState) {
+      NodeState.LIVE -> true
+      NodeState.IDLE -> !thermalHot
+      NodeState.HOT, NodeState.OFF, NodeState.STARTING, NodeState.ERROR -> false
+    }
+
+/**
+ * Whether [WidgetPromptWorker] should wait for a reload before re-checking readiness (pure,
+ * unit-tested): only when the engine is not [ready] AND either the tap that enqueued it [warm]ed the
+ * node or a reload is in flight ([startupInProgress]) for some other reason. `warm` is an INPUT, not
+ * a flag re-read: by the time WorkManager runs `doWork` a fast reload may have begun and ended, so
+ * `startupInProgress` alone would let the worker fall straight through to "node off".
+ */
+fun shouldAwaitWarm(ready: Boolean, warm: Boolean, startupInProgress: Boolean): Boolean =
+  !ready && (warm || startupInProgress)
+
+/**
+ * Whether the warm the worker is waiting on has FAILED, so the wait can settle now instead of
+ * running out the cap (pure, unit-tested): no reload in flight ([startupInProgress] false) AND the
+ * last attempt recorded a failure ([lastInitFailed]). Sound because the kick publishes
+ * `startupInProgress` on the caller before returning and `ensureInitialized` clears `lastInitFailed`
+ * at attempt START with `endStartup()` as its LAST write — so a reader that sees the flag clear sees
+ * the verdict of the attempt that just ended, and a stale `lastInitFailed` beside an in-flight retry
+ * keeps polling (slot 3 > 4, exactly as `computeNodeState` orders them). The `!isReady` conjunct is
+ * the [awaitEngineReady] check that precedes it. Readers take the liveness snapshot FIRST, then the
+ * engine flag (`core/NodeState.kt`'s read-order rule).
+ */
+fun shouldGiveUpWarm(startupInProgress: Boolean, lastInitFailed: Boolean): Boolean =
+  !startupInProgress && lastInitFailed
+
+/**
+ * Polls [isReady] every [intervalMs] for at most [maxIterations] sleeps and returns the final answer
+ * — the ENGINE's readiness, never a liveness flag the reload may already have cleared. Returns
+ * immediately (no sleep) when already ready. [giveUp] is consulted AFTER [isReady] on every
+ * iteration, so a reload that just finished always wins over a same-poll give-up; when it fires the
+ * wait settles `false` at once instead of running out the cap. Pure over its inputs; unit-tested on
+ * virtual time.
+ */
+suspend fun awaitEngineReady(
+  isReady: () -> Boolean,
+  giveUp: () -> Boolean,
+  intervalMs: Long,
+  maxIterations: Int,
+): Boolean {
+  repeat(maxIterations) {
+    if (isReady()) return true
+    if (giveUp()) return false // AFTER isReady: a reload that just finished wins
+    delay(intervalMs)
+  }
+  return isReady()
+}

@@ -118,16 +118,26 @@ class RelaisShellViewModel(app: Application) : AndroidViewModel(app) {
 
   private fun snapshotPanelState(): RelaisControlPanelState {
     val ctx = getApplication<Application>()
+    // Snapshot FIRST, engine flags after (the read-order rule in computeNodeState's KDoc):
+    // endStartup() is the last write of every init attempt, so a reader that sees
+    // startupInProgress=false for an attempt sees every flag write of that attempt. Reading isReady
+    // before the snapshot was the one reader of six that had it backwards (feature-22 review).
+    val liveness = RelaisLivenessState.snapshot
     val ready = RelaisEngine.isReady
     val running = RelaisConfig.shouldRun(ctx)
-    val liveness = RelaisLivenessState.snapshot
 
     // #217: "running" with no init actually in flight means the service died (OS kill, crash, or an
     // APK reinstall under a persisted shouldRun). `startupInProgress` is the right signal because
     // RelaisNodeService holds it across the WHOLE init — including a multi-GB download — so a slow
     // first start can never be mistaken for a stall.
     stalledTicks =
-      if (running && !ready && !liveness.startupInProgress) stalledTicks + 1 else 0
+      if (looksStalled(
+          running = running,
+          ready = ready,
+          startupInProgress = liveness.startupInProgress,
+          idleUnloaded = liveness.idleUnloaded,
+        )
+      ) stalledTicks + 1 else 0
 
     return computeControlPanelState(
       ready = ready,
@@ -139,6 +149,7 @@ class RelaisShellViewModel(app: Application) : AndroidViewModel(app) {
       downloadTotalBytes = RelaisNodeProgress.downloadTotalBytes,
       startupInProgress = liveness.startupInProgress,
       listenersUp = liveness.listenersUp,
+      idleUnloaded = liveness.idleUnloaded,
       initFailed = RelaisEngine.lastInitFailed,
       stalledStart = isStalledStart(stalledTicks),
     )
@@ -151,3 +162,13 @@ internal const val STALLED_START_TICKS = 3
 /** Pure so the debounce threshold is unit-testable without a ViewModel or a Context (#217). */
 internal fun isStalledStart(consecutiveStalledPolls: Int): Boolean =
   consecutiveStalledPolls >= STALLED_START_TICKS
+
+/**
+ * One poll's verdict on the #217 stall: "running" with no init in flight means the service died.
+ * That premise predates idle-unload (#178), and an idle node is running, not ready, and has nothing
+ * in flight BY DESIGN — so [idleUnloaded] is excluded, or a healthy idle node reads "node not
+ * running · press START" after three polls and START is a full service re-init with a listener
+ * bounce. Pure, so the exclusion is pinned by a JVM test (RelaisShellPollingTest).
+ */
+internal fun looksStalled(running: Boolean, ready: Boolean, startupInProgress: Boolean, idleUnloaded: Boolean): Boolean =
+  running && !ready && !startupInProgress && !idleUnloaded

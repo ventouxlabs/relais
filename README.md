@@ -156,6 +156,9 @@ not coupled to any gateway.
 ## Operating it as an appliance
 
 - **Auto-start on boot:** opt-in in the control panel (off by default).
+- **Idle unload:** the resident engine releases itself after an idle period (default 15 min,
+  operator-configurable in CONFIGURE, or off entirely) to free memory; `/health` then reports
+  `state: IDLE` — a healthy node, not a dead one — and warms again on the next request.
 - **Unattended / force-stop resilience:** the control panel is excluded from the
   recents switcher, so a "clear all recent apps" sweep won't force-stop the node.
   For Doze survival, the panel shows a **POWER** readout — tap **ALLOW UNRESTRICTED**

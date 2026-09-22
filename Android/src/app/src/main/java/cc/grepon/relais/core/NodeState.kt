@@ -12,6 +12,8 @@
 
 package cc.grepon.relais.core
 
+import cc.grepon.relais.ThermalGovernor
+
 /**
  * Unified node state for UI surfaces (QS tile #2, widget #3) and `/health`. [IDLE] (feature-22) is
  * "running and reachable, engine gracefully released by idle-TTL (#178), warms on the next request"
@@ -20,8 +22,13 @@ package cc.grepon.relais.core
  */
 enum class NodeState { OFF, STARTING, LIVE, HOT, ERROR, IDLE }
 
-/** thermalStatus at/above this reads as HOT (PowerManager.THERMAL_STATUS_SEVERE == 3). Informational —
- *  the authoritative shed decision is [cc.grepon.relais.ThermalGovernor.shouldShed]. */
+/** thermalStatus at/above this reads as HOT (PowerManager.THERMAL_STATUS_SEVERE == 3) — both for a
+ *  resident engine via [computeNodeState]'s HOT arm and for a not-yet-resident one via [thermalHot]
+ *  (the idle-node warm gates on the tile/widget). Deliberately NOT
+ *  [cc.grepon.relais.ThermalGovernor.shouldShed]: that is the broader in-flight-inference shed
+ *  decision (SEVERE OR forecast headroom OR a decode-throughput EWMA that nothing clears across an
+ *  idle unload), so gating a warm on it would let a stale slow-decode sample from before the idle
+ *  window refuse every future warm with no operator escape. */
 private const val THERMAL_HOT_THRESHOLD = 3
 
 /**
@@ -77,3 +84,12 @@ fun computeNodeState(
   shouldRun -> NodeState.STARTING
   else -> NodeState.OFF
 }
+
+/**
+ * Whether the device's raw thermal status alone would already read HOT if an engine were resident
+ * (i.e. [computeNodeState]'s HOT arm would fire). The idle-node warm gates (`RunPromptAction`,
+ * `RelaisTileService.onClick`, `WidgetPromptWorker`) call this to refuse warming an [NodeState.IDLE]
+ * node while thermally hot — parity with the HOT policy those same surfaces already apply to a
+ * resident engine, extended to one that isn't resident yet.
+ */
+internal fun thermalHot(): Boolean = ThermalGovernor.statusValue >= THERMAL_HOT_THRESHOLD

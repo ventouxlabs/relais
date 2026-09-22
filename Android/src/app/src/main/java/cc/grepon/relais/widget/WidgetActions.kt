@@ -18,7 +18,9 @@ import androidx.glance.GlanceId
 import androidx.glance.action.ActionParameters
 import androidx.glance.appwidget.action.ActionCallback
 import androidx.glance.appwidget.state.updateAppWidgetState
-import cc.grepon.relais.core.RelaisInference
+import cc.grepon.relais.RelaisEngine
+import cc.grepon.relais.core.RelaisNodeController
+import cc.grepon.relais.core.thermalHot
 
 private const val TAG = "WidgetActions"
 
@@ -28,11 +30,17 @@ val TemplateIdKey = ActionParameters.Key<String>("template_id")
 /**
  * RUN: fires the canned prompt for the supplied template — but ONLY behind the cold-start guard.
  *
- * Re-reads [RelaisInference.isReady] HERE (the tap is the gate, not the render): if the node went OFF
- * since the widget last rendered, [shouldRunWidgetPrompt] is false and we DO NOT enqueue inference —
- * a tap can never cold-start the multi-GB engine. When the gate passes we flip the persisted state to
- * LOADING immediately (responsive UI) and hand the long inference to [WidgetPromptWorker] (a Worker,
- * so it survives the ~10 s broadcast limit).
+ * Re-derives the [cc.grepon.relais.core.NodeState] HERE via [RelaisNodeController.state] (the tap is
+ * the gate, not the render): if the node went OFF since the widget last rendered,
+ * [shouldRunWidgetPrompt] is IGNORE and we DO NOT enqueue inference — a tap can never cold-start the
+ * multi-GB engine. On IDLE (feature-22) it is WARM_THEN_RUN — UNLESS the device is already
+ * thermally hot ([thermalHot], Codex P2), which is IGNORE: an idle-unloaded engine reads IDLE, never
+ * HOT, at any thermal status, so this is the only place that guard applies before a reload starts.
+ * WARM_THEN_RUN kicks the single-flight reload ([RelaisEngine.ensureInitializedInBackground], which
+ * publishes `startupInProgress` on this thread before returning) and tells the worker it did
+ * (`warm = true`) so the worker waits for the ENGINE rather than a flag the reload may already have
+ * cleared. Either way the persisted state flips to LOADING immediately (responsive UI) and the long
+ * inference goes to [WidgetPromptWorker] (a Worker, so it survives the ~10 s broadcast limit).
  */
 class RunPromptAction : ActionCallback {
   override suspend fun onAction(
@@ -41,17 +49,38 @@ class RunPromptAction : ActionCallback {
     parameters: ActionParameters,
   ) {
     val templateId = parameters[TemplateIdKey]?.takeIf { it.isNotBlank() }
-    if (!shouldRunWidgetPrompt(RelaisInference.isReady(), WIDGET_PROMPT)) {
-      Log.i(TAG, "node not ready; widget tap ignored (cold-start guard)")
-      // Re-render the (now off) status without enqueuing inference; leave any prior state intact.
-      RelaisWidget().update(context, glanceId)
-      return
+    val nodeState = RelaisNodeController.state(context)
+    val warm = when (shouldRunWidgetPrompt(nodeState, thermalHot(), WIDGET_PROMPT)) {
+      WidgetTapAction.IGNORE -> {
+        Log.i(TAG, "node $nodeState; widget tap ignored (cold-start guard)")
+        // Re-render the (now off/starting/error) status without enqueuing inference; leave any
+        // prior state intact.
+        RelaisWidget().update(context, glanceId)
+        return
+      }
+      WidgetTapAction.RUN -> false
+      WidgetTapAction.WARM_THEN_RUN -> {
+        // applicationContext: the reload thread outlives this broadcast. Publishes startupInProgress
+        // on THIS thread before returning, so the worker enqueued below is guaranteed to observe
+        // either the reload in flight or its outcome — never a not-yet-begun reload. The kick can
+        // only throw when Thread.start() itself fails (the engine has already ended its startup and
+        // reset the single-flight guard): drop the tap rather than enqueue a worker that would wait
+        // the full cap for a reload that never began.
+        val kicked = runCatching {
+          RelaisEngine.ensureInitializedInBackground(context.applicationContext)
+        }.onFailure { Log.e(TAG, "warm kick failed; widget tap dropped", it) }.isSuccess
+        if (!kicked) {
+          RelaisWidget().update(context, glanceId)
+          return
+        }
+        true
+      }
     }
     updateAppWidgetState(context, glanceId) { prefs ->
       writeState(prefs, WidgetUiState.idle().loading(WIDGET_PROMPT))
     }
     RelaisWidget().update(context, glanceId)
-    WidgetPromptWorker.enqueue(context, glanceId, templateId)
+    WidgetPromptWorker.enqueue(context, glanceId, templateId, warm = warm)
   }
 }
 

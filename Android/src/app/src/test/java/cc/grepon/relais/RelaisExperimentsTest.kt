@@ -38,7 +38,15 @@ class RelaisExperimentsTest {
     startupInProgress: Boolean = false,
     modelId: String = "gemma-3n-e4b",
     capabilities: String = "multimodal,tools,reasoning",
-  ) = assembleExperimentsStatus(engineReady, listenersUp, startupInProgress, modelId, capabilities)
+    idleUnloaded: Boolean = false,
+  ) = assembleExperimentsStatus(
+    engineReady = engineReady,
+    listenersUp = listenersUp,
+    startupInProgress = startupInProgress,
+    currentModelId = modelId,
+    capabilities = capabilities,
+    idleUnloaded = idleUnloaded,
+  )
 
   // ---- assembler: status mapping mirrors the dashboard (DESIGN.md) ----
 
@@ -57,7 +65,7 @@ class RelaisExperimentsTest {
   }
 
   @Test
-  fun `assembleExperimentsStatus maps idle to OFFLINE`() {
+  fun `assembleExperimentsStatus maps a stopped node to OFFLINE`() {
     val s = status(engineReady = false, startupInProgress = false)
     assertEquals("OFFLINE", s.statusLabel)
     assertFalse(s.live)
@@ -80,6 +88,51 @@ class RelaisExperimentsTest {
     val s = status(engineReady = true, listenersUp = false, startupInProgress = true)
     assertEquals("STARTING", s.statusLabel)
     assertFalse(s.live)
+  }
+
+  // ---- IDLE (feature-22): mirrors the dashboard's slot-5 label ----
+
+  @Test
+  fun `assembleExperimentsStatus reads IDLE for a released engine behind bound listeners`() {
+    val s = status(engineReady = false, listenersUp = true, startupInProgress = false, idleUnloaded = true)
+    assertEquals("IDLE", s.statusLabel)
+    assertFalse("the beacon pulses for LIVE only", s.live)
+  }
+
+  @Test
+  fun `assembleExperimentsStatus lets LIVE beat a stale idleUnloaded flag`() {
+    val s = status(engineReady = true, listenersUp = true, idleUnloaded = true)
+    assertEquals("LIVE", s.statusLabel)
+    assertTrue(s.live)
+  }
+
+  @Test
+  fun `assembleExperimentsStatus lets STARTING beat idleUnloaded`() {
+    val s = status(engineReady = false, listenersUp = true, startupInProgress = true, idleUnloaded = true)
+    assertEquals("STARTING", s.statusLabel)
+  }
+
+  @Test
+  fun `assembleExperimentsStatus reads OFFLINE, not IDLE, when idleUnloaded but the listeners are down`() {
+    val s = status(engineReady = false, listenersUp = false, startupInProgress = false, idleUnloaded = true)
+    assertEquals("OFFLINE", s.statusLabel)
+    assertNotEquals("IDLE", s.statusLabel)
+  }
+
+  @Test
+  fun `assembleExperimentsStatus defaults idleUnloaded to false — omission fails closed to OFFLINE`() {
+    // Called WITHOUT the trailing parameter, on purpose: the helper above always passes it, so
+    // this is the one row that exercises the default itself.
+    val s = assembleExperimentsStatus(false, true, false, "gemma-3n-e4b", "tools")
+    assertEquals("OFFLINE", s.statusLabel)
+  }
+
+  @Test
+  fun `beacon is amber 60 when IDLE and does not pulse`() {
+    val html = renderExperimentsHtml(status(engineReady = false, listenersUp = true, idleUnloaded = true), nonce)
+    assertTrue(html.contains("background: rgba(255,176,0,0.6);"))
+    assertFalse("IDLE must not borrow the muted OFFLINE colour", html.contains("background: #8A8780;"))
+    assertFalse(html.contains("dot-pulse\"></span>"))
   }
 
   // ---- palette guards (DESIGN.md: amber-on-charcoal, no new hues) ----

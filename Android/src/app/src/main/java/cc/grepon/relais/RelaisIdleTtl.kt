@@ -90,3 +90,46 @@ fun shouldUnloadIdleEngine(
   if (consecutiveCloseFailures >= IDLE_TTL_MAX_CONSECUTIVE_CLOSE_FAILURES) return false // circuit breaker
   return nowMs - lastActivityAtMs >= ttlMs
 }
+
+/**
+ * Fixed stepper ladder for the Configure screen's IDLE AFTER control (feature-22 PR-B, task 3;
+ * decided by JD 2026-09-07): the stepper moves along these rungs instead of a fixed increment. A
+ * fixed increment (e.g. +-5, or the triage screen's +-15) either overshoots the existing
+ * [IDLE_TTL_MIN_MINUTES] (1) floor or needs an awkward number of taps to reach it — deliberately
+ * non-linear so the floor is always exactly one rung away.
+ *
+ * The ladder tops at 60 while [IDLE_TTL_MAX_MINUTES] is `24 * 60` (1440) — 61..1440 are
+ * unreachable from this stepper today (there is no production caller that writes an idle-TTL value
+ * above 60 via the UI). A config value already above 60 — from a future caller, or a manual
+ * override — is a one-way trip down the moment the operator taps "-": [nextRung] moves it to the
+ * top rung (60) on the way down, but leaves it untouched on the way up (see [nextRung]'s KDoc for
+ * why "up" must not clamp it back down to 60).
+ */
+internal val IDLE_TTL_LADDER = intArrayOf(1, 5, 15, 30, 60)
+
+/**
+ * Pure stepper move (feature-22 PR-B, task 3): given the current idle-TTL [current] value and a
+ * fixed ascending [ladder] (no duplicates), returns the adjacent rung in the requested direction —
+ * never a fixed increment.
+ *
+ * - `up = true`: the first rung strictly greater than [current]; if none exists (current is at or
+ *   above the top rung), returns [current] unchanged. Deliberately NOT "else the top rung" — that
+ *   would send a stored value above the ladder's ceiling (e.g. 90) *down* to 60 on an increment
+ *   tap, the one-way trip in the direction the operator least expects.
+ * - `up = false`: the last rung strictly smaller than [current]; if none exists (current is at or
+ *   below the bottom rung), returns [current] unchanged — the stepper never reaches
+ *   [IDLE_TTL_DISABLED_MINUTES] (0) this way; only the IDLE UNLOAD toggle may write that sentinel.
+ *
+ * An off-ladder starting value (e.g. 10, preserved by `RelaisConfig.sanitizeIdleTtlMinutes`'s
+ * `1..1440` clamp from an older config) moves to its nearest neighbour in the requested direction —
+ * 10 up -> 15, 10 down -> 5 — never skipping past an intermediate rung. An earlier wording
+ * ("first/last index whose value is `>=`/`<=` current, then +-1") sent 10 up to 30, skipping 15;
+ * considered and rejected 2026-09-07.
+ *
+ * [RelaisConfig.setIdleTtlMinutes] is still called with the resulting rung value afterward, so its
+ * existing `1..1440` clamp remains a no-op safety net here, not the mechanism that keeps this
+ * function in band.
+ */
+fun nextRung(current: Int, ladder: IntArray, up: Boolean): Int =
+  if (up) ladder.filter { it > current }.minOrNull() ?: current
+  else ladder.filter { it < current }.maxOrNull() ?: current

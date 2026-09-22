@@ -37,7 +37,7 @@ data class RequestLogEntry(val endpoint: String, val status: Int, val ageSeconds
 data class DashboardStatus(
   /** True only when the engine is initialized AND the node's listeners are up — i.e. reachable. */
   val live: Boolean,
-  /** Human label for the node state: "LIVE" | "STARTING" | "OFFLINE" (DESIGN.md status mapping). */
+  /** Human label for the node state: "LIVE" | "STARTING" | "IDLE" | "OFFLINE" (DESIGN.md status mapping). */
   val statusLabel: String,
   /** Human label for Android thermal level: "NONE".."SHUTDOWN" or "UNKNOWN". */
   val thermalLabel: String,
@@ -98,7 +98,23 @@ fun maskApiKey(key: String): String {
  * Status label follows DESIGN.md:
  *  - LIVE     = engineReady && listenersUp (initialized AND actually reachable)
  *  - STARTING = otherwise, while startupInProgress (provision/download, or listeners still binding)
- *  - OFFLINE  = neither
+ *  - IDLE     = otherwise, while listenersUp && idleUnloaded (feature-22: the engine was released by
+ *               the idle TTL, the node is reachable, and the next request reloads the model —
+ *               `computeNodeState`'s slot 5, same `listenersUp` guard)
+ *  - OFFLINE  = none of the above
+ *
+ * [idleUnloaded] is the one defaulted lifecycle input, and only because the pure assemblers have
+ * many named-arg test callers whose omission fails CLOSED (to OFFLINE) — the opposite of what
+ * omitting `listenersUp` would do. Production callers pass the value from the same snapshot as
+ * [listenersUp] and [startupInProgress].
+ *
+ * The model selector on an idle node: `POST /select-model` has no readiness gate, and the swap
+ * thread cold-loads the target under `beginStartup()`, so the page reads STARTING → LIVE and
+ * [pendingModelId] stays correct because `shutdown()` never clears `residentModelId`. Two edges
+ * the page cannot show: a swap that FAILS from IDLE rolls back by cold-loading the previous model,
+ * so the operator's failed action silently undoes the idle unload (the node ends LIVE on the old
+ * model); and a swap whose target is not on disk bails before touching the engine and leaves the
+ * node IDLE, with the pending hint stating the fact.
  *
  * No I/O, no Context, no Android — fully unit-testable on the JVM.
  */
@@ -125,16 +141,19 @@ fun assembleDashboardStatus(
   switchLocked: Boolean = false,
   /** Configured id when it differs from the resident one. See [pendingModelIdFor]. */
   pendingModelId: String? = null,
+  idleUnloaded: Boolean = false,
 ): DashboardStatus {
   // [engineReady] answers "did the model load?"; only [listenersUp] answers "can anyone reach this
   // node?". A bind failure leaves the engine deliberately resident with both listeners torn down, so
   // keying LIVE on readiness alone made this page report a healthy node while printing a base URL
-  // that refuses connections. Same predicate as [cc.grepon.relais.core.computeNodeState] and the
-  // control panel — one meaning of LIVE across every surface.
+  // that refuses connections. Same LIVE predicate as [cc.grepon.relais.core.computeNodeState] and
+  // the control panel — one meaning of LIVE across every surface; IDLE mirrors its slot 5, with the
+  // same `listenersUp` guard and below STARTING for the same reason (a reload in flight is not idle).
   val live = engineReady && listenersUp
   val statusLabel = when {
     engineReady && listenersUp -> "LIVE"
     startupInProgress -> "STARTING"
+    listenersUp && idleUnloaded -> "IDLE"
     else -> "OFFLINE"
   }
   return DashboardStatus(
@@ -258,12 +277,13 @@ fun escapeHtml(text: String): String =
  *  - All dynamic values are HTML-escaped via [escapeHtml] before interpolation
  */
 fun renderDashboardHtml(status: DashboardStatus): String {
-  // dotColor: derived from a closed `when` over the fixed literal set {"LIVE","STARTING","OFFLINE"} —
-  // always one of three compile-time CSS color strings. Not user content; HTML-escaping is wrong here
-  // (CSS context, not HTML text/attribute) and unnecessary.
+  // dotColor: derived from a closed `when` over the fixed literal set {"LIVE","STARTING","IDLE",
+  // "OFFLINE"} — always one of three compile-time CSS color strings. Not user content; HTML-escaping
+  // is wrong here (CSS context, not HTML text/attribute) and unnecessary. IDLE takes the STARTING
+  // treatment (dimmed amber, no pulse): DESIGN.md has no idle colour, and Muted would read OFFLINE.
   val dotColor = when (status.statusLabel) {
     "LIVE" -> "#FFB000"
-    "STARTING" -> "rgba(255,176,0,0.6)"
+    "STARTING", "IDLE" -> "rgba(255,176,0,0.6)"
     else -> "#8A8780"
   }
   // dotPulse: derived from a boolean — either literal " dot-pulse" or "". Closed set, CSS class name,

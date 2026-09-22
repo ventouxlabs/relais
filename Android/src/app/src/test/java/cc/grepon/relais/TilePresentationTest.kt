@@ -23,47 +23,59 @@ import org.junit.Test
 class TilePresentationTest {
 
   @Test fun `live maps to active with a live label`() {
-    val p = tilePresentation(NodeState.LIVE)
+    val p = tilePresentation(NodeState.LIVE, thermalHot = false)
     assertEquals(TileState.ACTIVE, p.tileState)
     assertEquals("Relais · live", p.label)
   }
 
   @Test fun `hot maps to active and signals throttling`() {
-    val p = tilePresentation(NodeState.HOT)
+    val p = tilePresentation(NodeState.HOT, thermalHot = false)
     assertEquals(TileState.ACTIVE, p.tileState)
     assertEquals("Relais · hot", p.label)
     assertTrue("hot subtitle should mention throttling", p.subtitle?.contains("throttling") == true)
   }
 
   @Test fun `starting maps to active with a starting label`() {
-    val p = tilePresentation(NodeState.STARTING)
+    val p = tilePresentation(NodeState.STARTING, thermalHot = false)
     assertEquals(TileState.ACTIVE, p.tileState)
     assertEquals("Relais · starting…", p.label)
   }
 
   @Test fun `off maps to inactive with an off label`() {
-    val p = tilePresentation(NodeState.OFF)
+    val p = tilePresentation(NodeState.OFF, thermalHot = false)
     assertEquals(TileState.INACTIVE, p.tileState)
     assertEquals("Relais · off", p.label)
   }
 
   @Test fun `error maps to inactive with an error label`() {
-    val p = tilePresentation(NodeState.ERROR)
+    val p = tilePresentation(NodeState.ERROR, thermalHot = false)
     assertEquals(TileState.INACTIVE, p.tileState)
     assertEquals("Relais · error", p.label)
   }
 
-  @Test fun `idle maps to active with an idle label — the node is up, the engine is released`() {
-    // feature-22 PR-A: minimal arm that preserves today's behaviour (an idle node used to read
-    // STARTING → ACTIVE). PR-B (task 4(c)) keeps ACTIVE and changes the tap to WARM.
-    val p = tilePresentation(NodeState.IDLE)
+  @Test fun `idle maps to active and invites a warm — the node is up, the engine is released`() {
+    // feature-22 PR-B (task 4(c)): ACTIVE because the node is running (a lit tile reads "I asked for
+    // this", as for STARTING); the subtitle names the tap's action the way OFF's "tap to start node"
+    // does, since the tap now WARMs the engine in place.
+    val p = tilePresentation(NodeState.IDLE, thermalHot = false)
     assertEquals(TileState.ACTIVE, p.tileState)
     assertEquals("Relais · idle", p.label)
-    assertEquals("engine released — wakes on request", p.subtitle)
+    assertEquals("tap to warm", p.subtitle)
+  }
+
+  @Test fun `idle while thermally hot stays active but the subtitle matches the STOP tap — Codex P2 follow-up`() {
+    // tileAction's IDLE+hot row is STOP (parity with the HOT arm), not WARM — a label promising
+    // "tap to warm" while the tap actually stops the node would misinform the operator. Compare HOT's
+    // "throttling — thermal", which exists for the same reason: the subtitle must match the tap.
+    val p = tilePresentation(NodeState.IDLE, thermalHot = true)
+    assertEquals(TileState.ACTIVE, p.tileState)
+    assertEquals("Relais · idle", p.label)
+    assertEquals("hot — tap to stop", p.subtitle)
   }
 
   @Test fun `live and hot are among the active states`() {
-    val active = NodeState.entries.filter { tilePresentation(it).tileState == TileState.ACTIVE }.toSet()
+    val active =
+      NodeState.entries.filter { tilePresentation(it, thermalHot = false).tileState == TileState.ACTIVE }.toSet()
     // STARTING and IDLE are also ACTIVE (a lit tile that's coming up / a lit node whose engine is
     // released on purpose), so assert the resident-engine pair is a subset.
     assertTrue("LIVE must be active", NodeState.LIVE in active)
@@ -71,16 +83,19 @@ class TilePresentationTest {
   }
 
   @Test fun `off and error are inactive`() {
-    assertEquals(TileState.INACTIVE, tilePresentation(NodeState.OFF).tileState)
-    assertEquals(TileState.INACTIVE, tilePresentation(NodeState.ERROR).tileState)
+    assertEquals(TileState.INACTIVE, tilePresentation(NodeState.OFF, thermalHot = false).tileState)
+    assertEquals(TileState.INACTIVE, tilePresentation(NodeState.ERROR, thermalHot = false).tileState)
   }
 
   @Test fun `every node state has a non-blank label`() {
     // Exhaustive: a future NodeState value forces a compile error in the mapping (no else branch),
-    // and this guards every present value renders a usable label.
+    // and this guards every present value renders a usable label. Both thermalHot values, since a
+    // future arm could blank out only one of them.
     for (state in NodeState.entries) {
-      val p = tilePresentation(state)
-      assertTrue("label must be non-blank for $state", p.label.isNotBlank())
+      for (hot in listOf(false, true)) {
+        val p = tilePresentation(state, thermalHot = hot)
+        assertTrue("label must be non-blank for $state, thermalHot=$hot", p.label.isNotBlank())
+      }
     }
   }
 
