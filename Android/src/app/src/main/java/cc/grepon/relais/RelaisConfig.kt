@@ -59,6 +59,7 @@ object RelaisConfig {
   private const val KEY_WEBHOOK_HMAC_SECRET = "webhook_hmac_secret"
   private const val KEY_WEBHOOK_ALLOWLIST = "webhook_allowlist"
   private const val KEY_IDLE_TTL_MINUTES = "idle_ttl_minutes"
+  private const val KEY_IDLE_TTL_LAST_NONZERO_MINUTES = "idle_ttl_last_nonzero_minutes"
 
   // Server-side session memory (Feature #5) — DEFAULT-OFF. When disabled the HTTP path never reads
   // the header, opens the DB, or persists anything (zero behavior change). TTL + per-session turn
@@ -480,6 +481,33 @@ object RelaisConfig {
   private fun sanitizeIdleTtlMinutes(v: Int): Int =
     if (v <= IDLE_TTL_DISABLED_MINUTES) IDLE_TTL_DISABLED_MINUTES
     else v.coerceIn(IDLE_TTL_MIN_MINUTES, IDLE_TTL_MAX_MINUTES)
+
+  /**
+   * Last non-zero idle-TTL value the operator had configured before turning the Configure screen's
+   * IDLE UNLOAD toggle off (feature-22 PR-B, task 3) — restored when the operator turns it back on,
+   * so disabling and re-enabling doesn't silently reset a customized window back to
+   * [IDLE_TTL_DEFAULT_MINUTES]. Falls back to [IDLE_TTL_DEFAULT_MINUTES] itself when nothing has
+   * ever been remembered (fresh install, or the toggle has never been turned off) — the prefs
+   * "missing key" default doubles as [IDLE_TTL_DISABLED_MINUTES] (0) here, which
+   * [setIdleTtlLastNonZeroMinutes] never persists, so a stored 0 can only mean "never set."
+   */
+  fun idleTtlLastNonZeroMinutes(context: Context): Int {
+    val stored = prefs(context).getInt(KEY_IDLE_TTL_LAST_NONZERO_MINUTES, IDLE_TTL_DISABLED_MINUTES)
+    return if (stored <= IDLE_TTL_DISABLED_MINUTES) IDLE_TTL_DEFAULT_MINUTES
+    else stored.coerceIn(IDLE_TTL_MIN_MINUTES, IDLE_TTL_MAX_MINUTES)
+  }
+
+  /**
+   * Remembers [value] for a later [idleTtlLastNonZeroMinutes] restore. A no-op for
+   * [IDLE_TTL_DISABLED_MINUTES] (0) or below — this key exists only to remember a legitimate
+   * *enabled* value, never the disabled sentinel itself.
+   */
+  fun setIdleTtlLastNonZeroMinutes(context: Context, value: Int) {
+    if (value <= IDLE_TTL_DISABLED_MINUTES) return
+    prefs(context).edit()
+      .putInt(KEY_IDLE_TTL_LAST_NONZERO_MINUTES, value.coerceIn(IDLE_TTL_MIN_MINUTES, IDLE_TTL_MAX_MINUTES))
+      .apply()
+  }
 
   /**
    * Optional canned-prompt template id run on a QS-tile tap (Feature #2). Null (the default) =

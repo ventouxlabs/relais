@@ -65,4 +65,47 @@ class RelaisIdleTtlConfigTest {
     RelaisConfig.setIdleTtlMinutes(context, 30)
     assertEquals(30, RelaisConfig.idleTtlMinutes(context))
   }
+
+  // -------------------------------------------------------------------------
+  // KEY_IDLE_TTL_LAST_NONZERO_MINUTES: the Configure-screen IDLE UNLOAD toggle's memory (feature-22
+  // PR-B, task 3). The toggle itself is Compose-local and not JVM-testable; these pin the
+  // RelaisConfig contract it's built on.
+  // -------------------------------------------------------------------------
+
+  @Test fun `disabling idle-ttl remembers the current value as last-non-zero`() {
+    RelaisConfig.setIdleTtlMinutes(context, 30)
+    // Mirrors the Configure-screen toggle's off path: save current, then disable.
+    RelaisConfig.setIdleTtlLastNonZeroMinutes(context, RelaisConfig.idleTtlMinutes(context))
+    RelaisConfig.setIdleTtlMinutes(context, IDLE_TTL_DISABLED_MINUTES)
+    assertEquals(IDLE_TTL_DISABLED_MINUTES, RelaisConfig.idleTtlMinutes(context))
+    assertEquals(30, RelaisConfig.idleTtlLastNonZeroMinutes(context))
+  }
+
+  @Test fun `re-enabling restores the remembered last-non-zero value, not the default`() {
+    RelaisConfig.setIdleTtlLastNonZeroMinutes(context, 45)
+    RelaisConfig.setIdleTtlMinutes(context, IDLE_TTL_DISABLED_MINUTES)
+    // Mirrors the Configure-screen toggle's on path: restore the remembered value.
+    val restored = RelaisConfig.idleTtlLastNonZeroMinutes(context)
+    RelaisConfig.setIdleTtlMinutes(context, restored)
+    assertEquals(45, RelaisConfig.idleTtlMinutes(context))
+  }
+
+  @Test fun `re-enabling with nothing ever remembered falls back to the default`() {
+    assertEquals(IDLE_TTL_DEFAULT_MINUTES, RelaisConfig.idleTtlLastNonZeroMinutes(context))
+  }
+
+  @Test fun `setIdleTtlLastNonZeroMinutes ignores an attempt to remember the disabled sentinel`() {
+    RelaisConfig.setIdleTtlLastNonZeroMinutes(context, 20)
+    RelaisConfig.setIdleTtlLastNonZeroMinutes(context, IDLE_TTL_DISABLED_MINUTES) // must be a no-op
+    assertEquals(20, RelaisConfig.idleTtlLastNonZeroMinutes(context))
+  }
+
+  @Test fun `stepper decrement at the floor never reaches the disabled sentinel`() {
+    // Pins the toggle/stepper boundary: the ladder's bottom rung is IDLE_TTL_MIN_MINUTES, never 0 —
+    // only the IDLE UNLOAD toggle may write IDLE_TTL_DISABLED_MINUTES.
+    val next = nextRung(IDLE_TTL_MIN_MINUTES, IDLE_TTL_LADDER, up = false)
+    assertEquals(IDLE_TTL_MIN_MINUTES, next)
+    RelaisConfig.setIdleTtlMinutes(context, next)
+    assertEquals(IDLE_TTL_MIN_MINUTES, RelaisConfig.idleTtlMinutes(context))
+  }
 }
