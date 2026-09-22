@@ -6,6 +6,58 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
+## 2026-09-22 — ⏩ START HERE. **feature-22 is COMPLETE. PR-B MERGED as #342 (`ac71c3a7`), #336 auto-closed, CI green (Build Android APK 11m4s, JVM unit tests 8m11s). The widget half is DEVICE-SMOKED — the widget was already on rango all along. One new issue filed (#343). Nothing is in flight.**
+
+`main` = `ac71c3a7` (#342). PR-A merged as #339. PR-B was branch `feat/22-idle-unload-b`, head `9eb9addf`, 18 commits — squash-merged 2026-09-22 11:35 UTC.
+
+### What this session did
+
+1. **Rebased onto `origin/main`.** The branch's 19th commit was the handoff doc, which had already merged as #341; `git rebase` dropped it as an empty cherry-pick and the tree hash was **byte-identical** (`b5b6faff`) before and after. 18 commits remain.
+2. **Rebuilt + installed the rebased head on rango.** The device had been running `c9c551b3` — one commit *behind* the tip, and `a13d6607` is exactly the commit that rewrote `widgetCanRun`/the "hot, cooling" status line, i.e. the code the widget smoke exists to exercise. Verified by content, not by the build log: `unzip -p …apk classes*.dex | grep -a 'hot, cooling'`, cert `55e9…` matching the device, then `lastUpdateTime` moved to 07:00:01.
+3. **Smoked the widget** (the one thing #336 was missing). Full record + screenshots in the SDD ledger; the PR body carries it inline because `.superpowers/` is git-ignored and dies with the worktree.
+4. **Opened #342** and **filed #343**.
+
+### The handoff was wrong about one thing
+
+**The widget was already placed on rango.** `adb shell dumpsys appwidget` showed `id=10` bound to the launcher host (`hostId:1024`) with live `RemoteViews`. The 2026-09-21 note said no widget was placed and the widget half could not be smoked; it could, and it now has been.
+
+### Widget smoke results (rango, 07:00–07:15 EDT, build `9eb9addf`)
+
+- **IDLE render**: `relais  ○ idle — tap to warm`, amber 60 %, prompt buttons **enabled**, `/health` `IDLE` at the same instant.
+- **WARM_THEN_RUN**: tap 07:07:24.5 → engine init 07:07:25.311 → worker *"engine warming; waiting for it to come up"* 07:07:25.506 → engine ready 07:07:43.759 (**~19 s**, matching the probe's 19.4–19.8 s) → `Worker result SUCCESS` 07:07:52.831 → widget re-renders `● live` + the model's answer. `/health` went `IDLE → STARTING` (immediately on tap) `→ LIVE`. **Zero** `stopListeners`/NSD markers: the widget warm does not bounce the listeners, same property the tile has.
+- **Failed warm** (model file renamed away with the node idle): `/health` `ERROR` within <1 s; the worker settled in **70 ms** (07:09:52.266 → .336). Honest limit: the kick failed *synchronously* on `require(File(modelPath).exists())`, so `shouldGiveUpWarm` was already true at the worker's **first** evaluation — this proves "settles immediately", **not** "waits, then gives up mid-poll". Model restored → watchdog recovered to LIVE at 07:12:56.
+- **Not smoked**: the worker's post-reload **thermal re-check** — the device never went thermally hot. JVM-verified only, and it stays that way until someone can heat a phone on purpose.
+
+### New finding → #343: the widget never refreshes on a state change
+
+`relais_widget_info.xml` sets no `updatePeriodMillis` and nothing outside `RunPromptAction`/`ClearAction`/`WidgetPromptWorker` calls `RelaisWidget().update()`. The status line therefore shows the state as of the last tap. Two consequences, both seen: an idle node's widget reads `● live` until tapped; and **a render that left the buttons disabled cannot be tapped back to life** — `PromptButton` attaches no click action, so nothing can re-render it. After the 07:00 install the widget sat at `○ starting…` with dead buttons over an `IDLE` node for ~6 minutes.
+
+**Checked before claiming it wasn't a regression** — the first draft of this asserted "not a PR-B regression" from the general fact that staleness predates PR-B, which is one step further than the evidence went. `git show origin/main:…/RelaisWidget.kt` line 95 is `canRun = nodeState == NodeState.LIVE && phase != LOADING`: every non-LIVE render already had dead buttons on `main`, and PR-B strictly *widens* the runnable set to `{LIVE, IDLE-not-hot}`. Genuinely pre-existing — but the diff is what says so.
+
+### Device notes (add to the running list)
+
+- **A resize is the only shell-reachable way to refresh a widget.** `adb shell am broadcast … APPWIDGET_UPDATE` is refused (`SecurityException: not allowed to send … from unknown caller`) and `cmd appwidget` has *"No shell command implementation"*. Long-press the widget (`input swipe x y x y 900`), drag a resize handle, tap empty space to commit — `onAppWidgetOptionsChanged` fires a live re-render **without** killing the process (a reinstall re-renders too, but kills the process first, so the node is never LIVE at render time). This is the `add-tile`-shaped prerequisite for the widget.
+- **`screencap` needs an explicit display on the Fold.** With two displays it writes a *warning banner into the PNG file* and the file is text, not an image. Use the physical id: `adb exec-out screencap -d 4619827677550801153 -p` (outer display; `-d 0` is rejected as "not a valid display id").
+- The `izzy` flavor is what's installed (`com.ventouxlabs.relais.izzy`), not `cc.grepon.relais` — `run-as` fails on the wrong package name.
+- `idle_ttl_last_nonzero_minutes` reading stale (1, while the TTL is 15) is **not** a defect: `RelaisConfigureActivity.kt:284` writes the current value on the way *off*, so the next toggle-off overwrites it.
+
+### Device left as found
+
+TTL back to 15 min (pref-verified), node LIVE, model file restored at its original path and size, widget back to its original width with its response cleared.
+
+### Next
+
+feature-22 is **done**. Task 6 was decided by measurement (document the hold, build nothing; audio keeps its 503), so there is no remaining code in the feature. No PR is open and no branch is in flight.
+
+Two caveats that rode along with the merge, recorded so they are not mistaken for verified:
+
+- **codex round 3 returned an untagged body** — *"No actionable regressions were identified in the idle-state mappings, TTL controls, or tile/widget warm-up paths."* By the review skill's gate rule an untagged result is fail-closed and a human judges it; rounds 1 and 2 were GATE PASS with P2s, all fixed. JD read it and merged.
+- **The worker's post-reload thermal re-check is JVM-verified only** — rango never went thermally hot, so the one path that needs a hot phone is still unsmoked. Everything else in #336's widget half has device evidence with timestamps.
+
+Carried forward, unchanged: BouncyCastle 1.78.1 → 1.85 after the R8 baseline (needs an on-device *inference* check); `RelaisHttpServer.kt` must be **extracted** from, not appended to, on its next change; #337's real close (invalidate `cachedPath` on id change); the two copy follow-ups on the ledger; #300 #288 #122 #102 #97 #69 open and none blocking.
+
+---
+
 ## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. PR-A MERGED (#339). PR-B BUILT + reviewed + smoked on rango, 18 commits on `feat/22-idle-unload-b`, UNPUSHED; next = push + PR-B (Closes #336), merge; feature-22 then complete.**
 
 `main` = `2d25736a` (#332). Everything the two 2026-09-12 sections below describe as pending has since
