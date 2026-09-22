@@ -20,6 +20,7 @@ import androidx.glance.appwidget.action.ActionCallback
 import androidx.glance.appwidget.state.updateAppWidgetState
 import cc.grepon.relais.RelaisEngine
 import cc.grepon.relais.core.RelaisNodeController
+import cc.grepon.relais.core.thermalHot
 
 private const val TAG = "WidgetActions"
 
@@ -32,12 +33,14 @@ val TemplateIdKey = ActionParameters.Key<String>("template_id")
  * Re-derives the [cc.grepon.relais.core.NodeState] HERE via [RelaisNodeController.state] (the tap is
  * the gate, not the render): if the node went OFF since the widget last rendered,
  * [shouldRunWidgetPrompt] is IGNORE and we DO NOT enqueue inference — a tap can never cold-start the
- * multi-GB engine. On IDLE (feature-22) it is WARM_THEN_RUN: kick the single-flight reload
- * ([RelaisEngine.ensureInitializedInBackground], which publishes `startupInProgress` on this thread
- * before returning) and tell the worker it did (`warm = true`) so the worker waits for the ENGINE
- * rather than a flag the reload may already have cleared. Either way the persisted state flips to
- * LOADING immediately (responsive UI) and the long inference goes to [WidgetPromptWorker] (a Worker,
- * so it survives the ~10 s broadcast limit).
+ * multi-GB engine. On IDLE (feature-22) it is WARM_THEN_RUN — UNLESS the device is already
+ * thermally hot ([thermalHot], Codex P2), which is IGNORE: an idle-unloaded engine reads IDLE, never
+ * HOT, at any thermal status, so this is the only place that guard applies before a reload starts.
+ * WARM_THEN_RUN kicks the single-flight reload ([RelaisEngine.ensureInitializedInBackground], which
+ * publishes `startupInProgress` on this thread before returning) and tells the worker it did
+ * (`warm = true`) so the worker waits for the ENGINE rather than a flag the reload may already have
+ * cleared. Either way the persisted state flips to LOADING immediately (responsive UI) and the long
+ * inference goes to [WidgetPromptWorker] (a Worker, so it survives the ~10 s broadcast limit).
  */
 class RunPromptAction : ActionCallback {
   override suspend fun onAction(
@@ -47,7 +50,7 @@ class RunPromptAction : ActionCallback {
   ) {
     val templateId = parameters[TemplateIdKey]?.takeIf { it.isNotBlank() }
     val nodeState = RelaisNodeController.state(context)
-    val warm = when (shouldRunWidgetPrompt(nodeState, WIDGET_PROMPT)) {
+    val warm = when (shouldRunWidgetPrompt(nodeState, thermalHot(), WIDGET_PROMPT)) {
       WidgetTapAction.IGNORE -> {
         Log.i(TAG, "node $nodeState; widget tap ignored (cold-start guard)")
         // Re-render the (now off/starting/error) status without enqueuing inference; leave any

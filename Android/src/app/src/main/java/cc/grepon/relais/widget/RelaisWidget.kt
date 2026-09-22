@@ -70,7 +70,9 @@ private const val MAX_PROMPT_BUTTONS = 4
  * [NodeState] and refuses to enqueue inference unless the node is LIVE (run) or IDLE (warm the
  * idle-released engine behind the still-live service, then run — feature-22). A tap can NEVER
  * cold-start the engine on a node that is off, and never adds inference heat while the device is
- * throttling: OFF/STARTING/ERROR/HOT are ignored. When off, the status
+ * throttling: OFF/STARTING/ERROR/HOT are ignored, and so is an IDLE tap while the device is already
+ * thermally hot (Codex P2 — mirrors HOT's policy for an engine that isn't resident yet; see
+ * [cc.grepon.relais.widget.shouldRunWidgetPrompt]). When off, the status
  * line reads "open app to start" and the prompt buttons are rendered disabled (no click action
  * attached); when idle it reads "tap to warm" and the buttons are enabled.
  */
@@ -126,7 +128,7 @@ private fun StatusLine(nodeState: NodeState) {
     NodeState.STARTING -> "○ starting…" to Muted
     NodeState.ERROR -> "○ error — open app" to Muted
     NodeState.OFF -> "○ off — open app to start" to Muted
-    NodeState.IDLE -> "○ idle — tap to warm" to Muted // DESIGN.md: non-live is muted, no new colour
+    NodeState.IDLE -> "○ idle — tap to warm" to Amber.copy(alpha = 0.6f) // DESIGN.md: IDLE = amber 60%
   }
   Text(text = "relais  $label", style = TextStyle(color = ColorProvider(accent), fontSize = 13.sp))
 }

@@ -30,6 +30,7 @@ import cc.grepon.relais.ModelSwitch
 import cc.grepon.relais.RelaisEngine
 import cc.grepon.relais.RelaisLivenessState
 import cc.grepon.relais.core.RelaisInference
+import cc.grepon.relais.core.thermalHot
 import cc.grepon.relais.templates.WorkflowRegistry
 
 private const val TAG = "WidgetPromptWorker"
@@ -70,7 +71,11 @@ fun readState(prefs: Preferences): WidgetUiState {
  * reload is otherwise in flight, it first waits for the engine — [awaitEngineReady] on
  * [ModelSwitch]'s poll constants, a 60 s cap, giving up within one poll once [shouldGiveUpWarm] says
  * the reload failed — and settles the existing "node off" error if the engine never comes back.
- * Enqueued with `enqueueUniqueWork(KEEP)` so rapid taps don't stack inferences on the single engine.
+ * Once the engine IS ready, re-asserts [thermalHot] too (Codex P2, defense in depth): the ~20 s
+ * reload window is long enough for the device to heat up after the tap-time gate already passed, so
+ * this is the same "never add inference heat while hot" HOT already enforces for a resident engine,
+ * checked again just before the prompt actually runs. Enqueued with `enqueueUniqueWork(KEEP)` so
+ * rapid taps don't stack inferences on the single engine.
  */
 class WidgetPromptWorker(context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
@@ -116,6 +121,14 @@ class WidgetPromptWorker(context: Context, params: WorkerParameters) :
     if (!RelaisInference.isReady()) {
       Log.i(TAG, "engine not resident at run time; skipping widget prompt")
       settle(glanceId, WidgetUiState.idle().error("node off — open app to start"))
+      return Result.failure()
+    }
+    if (thermalHot()) {
+      // Codex P2: the engine came up (or was already up) but the device is thermally hot NOW — the
+      // ~20 s reload window is enough time for that to change since the tap-time gate passed. Never
+      // add inference heat while hot, same as the HOT NodeState's policy for a resident engine.
+      Log.i(TAG, "device thermally hot at run time; skipping widget prompt")
+      settle(glanceId, WidgetUiState.idle().error("hot — throttling, try later"))
       return Result.failure()
     }
 

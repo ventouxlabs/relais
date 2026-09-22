@@ -21,6 +21,7 @@ import cc.grepon.relais.RelaisConfig
 import cc.grepon.relais.RelaisEngine
 import cc.grepon.relais.core.RelaisInference
 import cc.grepon.relais.core.RelaisNodeController
+import cc.grepon.relais.core.thermalHot
 
 private const val TAG = "RelaisTileService"
 
@@ -32,12 +33,14 @@ private const val TAG = "RelaisTileService"
  *
  * Tap semantics are decided purely by [tileAction] from the current [NodeState] + config: OFF→start,
  * STARTING/HOT→stop, IDLE→warm (feature-22: re-warm the idle-released engine in place, no listener
- * bounce), LIVE→stop (default) or run the canned prompt when a template is configured and the engine
- * is ready. Cold-start safety: RUN_PROMPT is only chosen when [RelaisInference.isReady] is already
- * true, so a tap can NEVER kick off inference (and thus never provision a multi-GB model) when the
- * engine isn't resident, and never fires a prompt on the same tap that stops the node. WARM is not a
- * cold start: IDLE implies `shouldRun && listenersUp && idleUnloaded`, i.e. the foreground service
- * that owns the idle-TTL is provably alive behind the reload.
+ * bounce) UNLESS the device is already thermally hot (Codex P2), which stops it instead — parity
+ * with the HOT arm for an engine that isn't resident yet — LIVE→stop (default) or run the canned
+ * prompt when a template is configured and the engine is ready. Cold-start safety: RUN_PROMPT is
+ * only chosen when [RelaisInference.isReady] is already true, so a tap can NEVER kick off inference
+ * (and thus never provision a multi-GB model) when the engine isn't resident, and never fires a
+ * prompt on the same tap that stops the node. WARM is not a cold start: IDLE implies `shouldRun &&
+ * listenersUp && idleUnloaded`, i.e. the foreground service that owns the idle-TTL is provably alive
+ * behind the reload.
  */
 class RelaisTileService : TileService() {
 
@@ -49,7 +52,7 @@ class RelaisTileService : TileService() {
   override fun onClick() {
     super.onClick()
     val templateId = RelaisConfig.tileCannedTemplateId(this)
-    when (tileAction(RelaisNodeController.state(this), templateId, RelaisInference.isReady())) {
+    when (tileAction(RelaisNodeController.state(this), templateId, RelaisInference.isReady(), thermalHot())) {
       TileAction.START -> RelaisNodeController.start(this)
       TileAction.STOP -> RelaisNodeController.stop(this)
       TileAction.WARM -> warm()

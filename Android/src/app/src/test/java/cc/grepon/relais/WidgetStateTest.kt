@@ -101,25 +101,48 @@ class WidgetStateTest {
     assertEquals(RESPONSE_CAP, state.response?.length)
   }
 
-  @Test fun `shouldRunWidgetPrompt keys on NodeState — LIVE runs, IDLE warms first, the rest ignore`() {
+  @Test fun `shouldRunWidgetPrompt keys on NodeState and thermalHot — LIVE runs, IDLE warms unless hot, the rest ignore`() {
     // feature-22 PR-B (task 4(c)): the decision takes the COMPUTED state, not raw flags. IDLE already
     // implies shouldRun && listenersUp && idleUnloaded (computeNodeState slot 5), which is a stronger
     // proof that the foreground service is alive than the `wasIdleUnloaded` flag RelaisInference's
     // self-heal keys on — so warming from a tap is a reload behind a live service, never a cold start.
     // HOT is IGNORE (review ruling R1): the engine is resident but the device is throttling, and the
     // tile's "never add inference heat while hot" is also what the widget's canRun already renders.
+    // Codex P2 (PR-B fixwave): an IDLE tap while the device is ALREADY thermally hot must also
+    // IGNORE — computeNodeState can only report HOT for a resident engine, so an idle-unloaded node
+    // reads IDLE at any thermal status, and without this row the tap warmed the engine and ran it
+    // throttled. (LIVE, thermalHot=true) is unreachable by construction — computeNodeState's HOT arm
+    // fires first whenever ready && listenersUp — asserted here only for totality, matching today's
+    // LIVE-not-hot verdict (thermalHot is otherwise inert outside the IDLE arm).
     val expected = mapOf(
-      NodeState.LIVE to WidgetTapAction.RUN,
-      NodeState.HOT to WidgetTapAction.IGNORE,
-      NodeState.IDLE to WidgetTapAction.WARM_THEN_RUN,
-      NodeState.OFF to WidgetTapAction.IGNORE,
-      NodeState.STARTING to WidgetTapAction.IGNORE,
-      NodeState.ERROR to WidgetTapAction.IGNORE,
+      (NodeState.LIVE to false) to WidgetTapAction.RUN,
+      (NodeState.LIVE to true) to WidgetTapAction.RUN,
+      (NodeState.HOT to false) to WidgetTapAction.IGNORE,
+      (NodeState.HOT to true) to WidgetTapAction.IGNORE,
+      (NodeState.IDLE to false) to WidgetTapAction.WARM_THEN_RUN,
+      (NodeState.IDLE to true) to WidgetTapAction.IGNORE,
+      (NodeState.OFF to false) to WidgetTapAction.IGNORE,
+      (NodeState.OFF to true) to WidgetTapAction.IGNORE,
+      (NodeState.STARTING to false) to WidgetTapAction.IGNORE,
+      (NodeState.STARTING to true) to WidgetTapAction.IGNORE,
+      (NodeState.ERROR to false) to WidgetTapAction.IGNORE,
+      (NodeState.ERROR to true) to WidgetTapAction.IGNORE,
     )
-    assertEquals("every NodeState value needs a row here", NodeState.entries.toSet(), expected.keys)
-    for ((state, action) in expected) {
-      assertEquals("tap on $state", action, shouldRunWidgetPrompt(state, "status check"))
+    val everyCombination = NodeState.entries.flatMap { state -> listOf(state to false, state to true) }.toSet()
+    assertEquals("every NodeState × thermalHot combination needs a row here", everyCombination, expected.keys)
+    for ((key, action) in expected) {
+      val (state, hot) = key
+      assertEquals("tap on $state, thermalHot=$hot", action, shouldRunWidgetPrompt(state, hot, "status check"))
     }
+  }
+
+  @Test fun `shouldRunWidgetPrompt refuses to warm an IDLE node while the device is thermally hot`() {
+    // Codex P2 (PR-B fixwave): without this guard the widget's cold-start gate let a tap on an
+    // idle-unloaded node kick a reload and then run inference while THERMAL_STATUS_SEVERE+ — the
+    // guard HOT already provides for a resident engine, bypassed because computeNodeState can only
+    // ever report HOT when the engine is resident. Mirrors the tile's IDLE+hot -> STOP.
+    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.IDLE, true, "status check"))
+    assertEquals(WidgetTapAction.WARM_THEN_RUN, shouldRunWidgetPrompt(NodeState.IDLE, false, "status check"))
   }
 
   @Test fun `shouldRunWidgetPrompt ignores a stale tap on a stopped or throttling node — the cold-start guard`() {
@@ -127,23 +150,30 @@ class WidgetStateTest {
     // (the widget rendered IDLE, the operator pressed STOP, the tap landed afterwards — shutdown()
     // cleared idleUnloaded, so the state is OFF, and OFF is IGNORE). Same for a node that is still
     // coming up or whose last init failed: nothing to run, nothing to warm.
-    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.OFF, "status check"))
-    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.STARTING, "status check"))
-    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.ERROR, "status check"))
+    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.OFF, false, "status check"))
+    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.STARTING, false, "status check"))
+    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.ERROR, false, "status check"))
     // HOT: the engine IS resident, so this is the one row the old isReady gate got wrong — a tap that
     // lands while the device throttles (rendered LIVE, tapped after the thermal flip) must not run.
-    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.HOT, "status check"))
+    assertEquals(WidgetTapAction.IGNORE, shouldRunWidgetPrompt(NodeState.HOT, false, "status check"))
   }
 
   @Test fun `shouldRunWidgetPrompt warms an IDLE node — neither a plain run nor an ignored tap`() {
-    assertEquals(WidgetTapAction.WARM_THEN_RUN, shouldRunWidgetPrompt(NodeState.IDLE, "status check"))
+    assertEquals(WidgetTapAction.WARM_THEN_RUN, shouldRunWidgetPrompt(NodeState.IDLE, false, "status check"))
   }
 
   @Test fun `shouldRunWidgetPrompt ignores a null or blank prompt in every state, IDLE included`() {
-    // A blank prompt beats every state: nothing to run means nothing to warm for either.
+    // A blank prompt beats every state (and the thermal guard): nothing to run means nothing to warm
+    // for either.
     for (state in NodeState.entries) {
-      for (prompt in listOf(null, "", "   ")) {
-        assertEquals("$state × '$prompt'", WidgetTapAction.IGNORE, shouldRunWidgetPrompt(state, prompt))
+      for (hot in listOf(false, true)) {
+        for (prompt in listOf(null, "", "   ")) {
+          assertEquals(
+            "$state × thermalHot=$hot × '$prompt'",
+            WidgetTapAction.IGNORE,
+            shouldRunWidgetPrompt(state, hot, prompt),
+          )
+        }
       }
     }
   }

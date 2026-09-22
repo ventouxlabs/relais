@@ -78,19 +78,25 @@ enum class TileAction { START, STOP, RUN_PROMPT, WARM }
  *    live, configured tile runs the canned prompt and KEEPS the node up; stop it from the app/control
  *    panel or by clearing the template).
  *  - LIVE with no template (the default) → STOP (a plain start/stop toggle).
- *  - IDLE → WARM regardless of template or [ready] (the node is running; its engine was released by
- *    idle-TTL, so re-warm it behind the live listeners — never RUN_PROMPT, the engine is not
- *    resident; never START, that would bounce the listeners; never STOP, the operator asked for
- *    this node). IDLE + [ready]=true is reachable by a tear between the two reads and still WARMs —
- *    an idempotent no-op once the engine is in fact ready.
+ *  - IDLE while thermally hot ([thermalHot] true, Codex P2) → STOP, parity with the HOT arm above.
+ *    [cc.grepon.relais.core.computeNodeState] can only report HOT for a RESIDENT engine
+ *    (`ready && listenersUp`); an idle-unloaded node reads IDLE regardless of raw thermal status, so
+ *    without this row a tap re-warmed the engine and ran it throttled — never add inference heat
+ *    while hot applies just as much to an engine that isn't resident yet.
+ *  - IDLE otherwise → WARM regardless of template or [ready] (the node is running; its engine was
+ *    released by idle-TTL, so re-warm it behind the live listeners — never RUN_PROMPT, the engine is
+ *    not resident; never START, that would bounce the listeners; never STOP while NOT hot, the
+ *    operator asked for this node). IDLE + [ready]=true is reachable by a tear between the two reads
+ *    and still WARMs — an idempotent no-op once the engine is in fact ready.
  *
  * RUN_PROMPT is returned ONLY when [ready] is true and the template is non-blank, so a tap can never
  * cold-start the engine, never fire a prompt on the same tap that stops the node, and never fire while
  * the node is merely STARTING (not yet resident).
  */
-fun tileAction(state: NodeState, templateId: String?, ready: Boolean): TileAction = when (state) {
-  NodeState.OFF, NodeState.ERROR -> TileAction.START
-  NodeState.STARTING, NodeState.HOT -> TileAction.STOP
-  NodeState.IDLE -> TileAction.WARM
-  NodeState.LIVE -> if (ready && !templateId.isNullOrBlank()) TileAction.RUN_PROMPT else TileAction.STOP
-}
+fun tileAction(state: NodeState, templateId: String?, ready: Boolean, thermalHot: Boolean): TileAction =
+  when (state) {
+    NodeState.OFF, NodeState.ERROR -> TileAction.START
+    NodeState.STARTING, NodeState.HOT -> TileAction.STOP
+    NodeState.IDLE -> if (thermalHot) TileAction.STOP else TileAction.WARM
+    NodeState.LIVE -> if (ready && !templateId.isNullOrBlank()) TileAction.RUN_PROMPT else TileAction.STOP
+  }

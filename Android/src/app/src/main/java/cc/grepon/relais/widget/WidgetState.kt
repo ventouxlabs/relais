@@ -79,7 +79,12 @@ enum class WidgetTapAction { RUN, WARM_THEN_RUN, IGNORE }
  *  - HOT → [WidgetTapAction.IGNORE] (engine resident but the device is throttling; never add
  *    inference heat while hot — the tile's policy, and the policy [RelaisWidget]'s `canRun` already
  *    renders. This is the one row the boolean `isReady` gate this replaced got wrong);
- *  - IDLE → [WidgetTapAction.WARM_THEN_RUN]. IDLE already implies `shouldRun && listenersUp &&
+ *  - IDLE while thermally hot ([thermalHot] true, Codex P2) → [WidgetTapAction.IGNORE].
+ *    [cc.grepon.relais.core.computeNodeState] can only report HOT for a RESIDENT engine (`ready &&
+ *    listenersUp`); an idle-unloaded node reads IDLE regardless of raw thermal status, so without
+ *    this row a tap warmed the engine and ran inference throttled — the exact heat HOT's policy
+ *    exists to refuse. Mirrors HOT's IGNORE, extended to an engine that isn't resident yet;
+ *  - IDLE otherwise → [WidgetTapAction.WARM_THEN_RUN]. IDLE already implies `shouldRun && listenersUp &&
  *    idleUnloaded`, a STRONGER proof that the foreground service is alive than the `wasIdleUnloaded`
  *    flag [cc.grepon.relais.core.RelaisInference]'s self-heal keys on — so the warm is a reload
  *    behind a live service, not the cold start this guard exists to prevent;
@@ -87,8 +92,9 @@ enum class WidgetTapAction { RUN, WARM_THEN_RUN, IGNORE }
  *    stopped is `OFF` (`shutdown()` clears `idleUnloaded`), so it can never warm — the second
  *    defence after the flag itself.
  */
-fun shouldRunWidgetPrompt(nodeState: NodeState, prompt: String?): WidgetTapAction = when {
+fun shouldRunWidgetPrompt(nodeState: NodeState, thermalHot: Boolean, prompt: String?): WidgetTapAction = when {
   prompt.isNullOrBlank() -> WidgetTapAction.IGNORE
+  nodeState == NodeState.IDLE && thermalHot -> WidgetTapAction.IGNORE
   else -> when (nodeState) {
     NodeState.LIVE -> WidgetTapAction.RUN
     NodeState.IDLE -> WidgetTapAction.WARM_THEN_RUN
