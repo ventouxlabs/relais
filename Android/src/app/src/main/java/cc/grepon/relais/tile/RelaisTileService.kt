@@ -13,6 +13,7 @@
 package cc.grepon.relais.tile
 
 import android.service.quicksettings.TileService
+import android.util.Log
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
@@ -20,6 +21,8 @@ import cc.grepon.relais.RelaisConfig
 import cc.grepon.relais.RelaisEngine
 import cc.grepon.relais.core.RelaisInference
 import cc.grepon.relais.core.RelaisNodeController
+
+private const val TAG = "RelaisTileService"
 
 /**
  * Quick Settings tile (Feature #2): live node status + one-tap start/stop, optionally a canned-prompt
@@ -49,15 +52,26 @@ class RelaisTileService : TileService() {
     when (tileAction(RelaisNodeController.state(this), templateId, RelaisInference.isReady())) {
       TileAction.START -> RelaisNodeController.start(this)
       TileAction.STOP -> RelaisNodeController.stop(this)
-      // applicationContext, never `this`: the reload thread lives for the whole (~20 s) engine load
-      // and must not pin a TileService the system may unbind meanwhile. Single-flight, and it
-      // publishes startupInProgress on THIS thread before returning, so the render() below already
-      // reads STARTING ("Relais · starting…") instead of a stale "idle".
-      TileAction.WARM -> RelaisEngine.ensureInitializedInBackground(applicationContext)
+      TileAction.WARM -> warm()
       // RUN_PROMPT implies a non-blank templateId (see tileAction); let keeps it non-null without `!!`.
       TileAction.RUN_PROMPT -> templateId?.let { enqueueCannedPrompt(it) }
     }
     render() // optimistic refresh; onStartListening re-renders the settled state on next listen
+  }
+
+  /**
+   * Re-warm the idle-released engine (only reached via [TileAction.WARM], i.e. the node is running
+   * with its listeners up). `applicationContext`, never `this`: the reload thread lives for the whole
+   * (~20 s) engine load and must not pin a TileService the system may unbind meanwhile. Single-flight,
+   * and it publishes `startupInProgress` on THIS thread before returning, so the `render()` that
+   * follows already reads STARTING ("Relais · starting…") instead of a stale "idle". The kick can only
+   * throw when `Thread.start()` itself fails (the engine has already ended its startup and reset the
+   * single-flight guard by then) — caught here because `onClick` runs on the main thread, where an
+   * escaping Throwable would take the whole app process down for a tile tap; logged, never swallowed.
+   */
+  private fun warm() {
+    runCatching { RelaisEngine.ensureInitializedInBackground(applicationContext) }
+      .onFailure { Log.e(TAG, "warm kick failed; tile tap dropped", it) }
   }
 
   /** Enqueue the canned prompt (only reached via [TileAction.RUN_PROMPT], i.e. engine already resident). */

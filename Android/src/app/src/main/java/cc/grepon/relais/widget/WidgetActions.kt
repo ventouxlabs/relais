@@ -59,8 +59,17 @@ class RunPromptAction : ActionCallback {
       WidgetTapAction.WARM_THEN_RUN -> {
         // applicationContext: the reload thread outlives this broadcast. Publishes startupInProgress
         // on THIS thread before returning, so the worker enqueued below is guaranteed to observe
-        // either the reload in flight or its outcome — never a not-yet-begun reload.
-        RelaisEngine.ensureInitializedInBackground(context.applicationContext)
+        // either the reload in flight or its outcome — never a not-yet-begun reload. The kick can
+        // only throw when Thread.start() itself fails (the engine has already ended its startup and
+        // reset the single-flight guard): drop the tap rather than enqueue a worker that would wait
+        // the full cap for a reload that never began.
+        val kicked = runCatching {
+          RelaisEngine.ensureInitializedInBackground(context.applicationContext)
+        }.onFailure { Log.e(TAG, "warm kick failed; widget tap dropped", it) }.isSuccess
+        if (!kicked) {
+          RelaisWidget().update(context, glanceId)
+          return
+        }
         true
       }
     }
