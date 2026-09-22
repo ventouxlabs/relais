@@ -6,7 +6,7 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
-## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. PR-A = #339, CI running, codex ×3 applied, probe 2× PASS on rango (reload ~19.5 s → Task 6 = no code); next = merge #339, then PR-B.**
+## 2026-09-20 — ⏩ START HERE. **Steps 0–4 MERGED; housekeeping done; feature-22 plan reconciled + 2 review rounds (rev 3 = `7bfe773a`). Unpushed on `docs/handoff-2026-09-20`. PR-A MERGED (#339). PR-B BUILT + reviewed + smoked on rango, 18 commits on `feat/22-idle-unload-b`, UNPUSHED; next = push + PR-B (Closes #336), merge; feature-22 then complete.**
 
 `main` = `2d25736a` (#332). Everything the two 2026-09-12 sections below describe as pending has since
 shipped: #323 (PR-A), #325 (#324 TLS-handshake 500s), #326 (#319 auto-start), #327 (#322 atomic
@@ -80,7 +80,59 @@ is the artefact to implement from. What happened to it today, in order:
 **Decisions JD made (2026-09-20, all four approved):** split step 5 into PR-A/PR-B as proposed; push
 the docs branch (PR **#338**, open); file the five defects (**#333–#337**); build PR-A now.
 
-### PR-A — **PR #339 open, CI running; codex ×3 applied; probe 2× on rango; merge is the next click**
+### PR-B — **BUILT, reviewed, smoked on rango, NOT pushed** (branch `feat/22-idle-unload-b`, 18 commits over `df5d1a44`, head `a13d6607`)
+
+Tasks 4(c)(e)(f), 3, 7. Same SDD process as PR-A (ledger + every review in
+`.claude/worktrees/f22-b/.superpowers/sdd/feature-22-idle-unload.plan/`): four task reviews (three
+needed one fix round each), whole-branch review + security pass (clean), one fix wave, **three codex
+rounds** (P2 · P2 · then an *untagged* "no actionable regressions" body — by the review skill's gate rule
+that is a fail-closed result a human must read, not a PASS; the verbatim text is in the ledger), and a
+**manual smoke on rango** with screenshots
+(`smoke-*.png` in the session scratchpad, evidence lines in the ledger). What the smoke proved on a
+phone: the six surfaces agree on IDLE; the in-app panel reads *"idle · engine released — wakes on the
+next request"* instead of *"node not running · press START"*; Configure's POWER section has IDLE
+UNLOAD / IDLE AFTER, the ladder steps 15→5→1 and floors at 1; the idle unload fires at the 1-min rung;
+the tile **warms** an idle node (IDLE→STARTING→LIVE in ~4.6 s, zero `stopListeners`/NSD markers — #336);
+IDLE UNLOAD off keeps the node resident for 130 s, on restores the rung not 15; a forced failed warm
+reads `ERROR` within ~1 s and the watchdog recovers to LIVE — #333's lane end to end. **NOT smoked: the
+widget** — no widget is placed on rango, so the widget half of #336 (`widgetCanRun`, `RunPromptAction`'s
+warm kick, the worker's `giveUp` poll and thermal recheck) is JVM-verified only; place the widget and
+tap RUN on an idle node before calling #336 device-verified.
+
+**Three things codex caught that every Claude lane missed, all fixed:** (1) `computeNodeState`'s HOT
+branch requires `ready`, so a thermally-severe *idle* node reads IDLE and the new warm paths would have
+loaded — and, for the widget, run inference — while throttled → `thermalHot()` (the HOT threshold, NOT
+`shouldShed()` whose stale decode-EWMA would refuse every future warm) is a required parameter of
+`tileAction`, `tilePresentation`, `shouldRunWidgetPrompt`, `widgetCanRun`; (2) the tile label said
+"tap to warm" where the tap did STOP; (3) the widget enabled a button whose tap IGNOREd — I had
+deferred that one; codex round 2 found exactly it. **Rulings I reversed during PR-B:** the hero LAN row
+stays LIVE-only (DESIGN.md; the plan wanted it on IDLE); the in-app panel's MODEL row is locked on IDLE
+(#337 residual window, widened to the bottom-nav and chat-sheet paths on the issue).
+
+**Device notes learned the hard way:** `am force-stop` leaves the app in Android's *stopped state* — its
+tile, widget and receivers are inert until an activity launches; the QS tile must be in the active set
+(`cmd statusbar add-tile …`) before `click-tile` does anything (yesterday's "tile started the node" was
+the watchdog); the OFF and LIVE panels have different layouts (LIVE adds a LOCAL row, so CONFIGURE sits
+~170 px lower) — re-screenshot before tapping by coordinate; two stepper taps <1 s apart drop the second.
+
+**Resume from cold — exact steps:**
+```
+cd /var/home/user/Documents/vibe-code/relais/.claude/worktrees/f22-b   # branch feat/22-idle-unload-b, head = the tip of this file's commit
+cat .superpowers/sdd/feature-22-idle-unload.plan/progress.md            # the ledger: every ruling, review verdict, codex output, smoke line
+ls  .superpowers/sdd/feature-22-idle-unload.plan/                       # task-*-review.md, final-review.md, security-review.md, codexfix-*.md, smoke/*.png
+git log --oneline origin/main..HEAD                                     # 19 commits; nothing is pushed
+```
+To push and open the PR (nothing here has been pushed): `git push -u origin feat/22-idle-unload-b`, then
+`gh pr create` with `Closes #336`, the evidence lines from the ledger, and the two caveats above (codex
+round 3 untagged; widget not device-smoked). Build for rango: `ANDROID_USER_HOME=/home/user/.android
+./gradlew :app:installFullOpenDebug` from `Android/src` (the XDG keystore trap, see the PR-A section).
+
+**Next:** place the Relais widget on rango and smoke the warm-then-run path (idle → RUN → prompt answers; failed warm settles ~1 s); push `feat/22-idle-unload-b`, open PR-B citing `Closes #336`, CI, merge. Follow-ups on the
+ledger: "node off" copy after a failed warm (`WidgetPromptWorker`), stepper readout should read back
+the persisted value, #337 (the real close: invalidate `cachedPath` on id change + registry-resolved
+default path). feature-22 is then complete except Task 6, which the measurement decided (no code).
+
+### PR-A — merged as #339 (`fc071dae`); handoff #340 (`df5d1a44`)
 
 Head `03d9584d`, 17 commits. Three `/codex review` rounds on the diff, each GATE PASS (P2-only), each
 applied and pushed — see the PR comment for the list. The one that matters for every future probe:
