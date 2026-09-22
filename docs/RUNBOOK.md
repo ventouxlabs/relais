@@ -27,6 +27,48 @@ adb -s <serial> shell am start -n <appId>/cc.grepon.relais.RelaisControlActivity
 - Reach a node: `adb -s <serial> forward tcp:8443 tcp:8443` → `curl -k https://localhost:8443/health`.
 - LAN discovery: mDNS `_relais._tcp`; HTTPS `0.0.0.0:8443` (bearer), loopback HTTP `127.0.0.1:8080`.
 
+### Idle unload
+
+The resident engine (the chat/completions model) releases itself after a configurable idle period
+to free memory on a node that isn't serving. Default **15 min**. Change it in **Configure → POWER →
+IDLE UNLOAD** (toggle) / **IDLE AFTER** (stepper, ladder 1 / 5 / 15 / 30 / 60 min); toggling
+**IDLE UNLOAD** off writes the disabled sentinel — `0` = never, and the engine then stays resident
+until STOP, matching pre-idle-unload behavior. A change takes effect within one 60 s tick; no
+restart needed.
+
+The foreground service, the mDNS advertisement, and the HTTPS/loopback listeners all **stay up**
+while idle — only the model weights are released. `GET /health` reflects this: `ready:false` with
+`state:IDLE` is a healthy node, not a dead one (see above).
+
+Memory reclaim is **the resident chat engine only** — the embeddings model (EmbeddingGemma, used by
+`/v1/embeddings`, `/v1/rerank`, and RAG) has no unload path and stays resident regardless of the
+idle-TTL setting.
+
+The first request after an idle unload pays a cold start: on the order of **20 s** on a Pixel 10
+with `gemma-4-E2B` (measured 19.4–19.8 s, 2026-09-20). Two endpoints handle that wait differently,
+by design:
+
+- **`/v1/chat/completions` and `/generate` hold the request synchronously through the reload** —
+  a client's first request after idle simply takes ~19.5 s longer, which is under the threshold at
+  which a bounded 503 would have been worth adding, and most OpenAI SDK defaults (60 s+ read
+  timeout) tolerate it without a retry.
+- **`/v1/audio/transcriptions` (and `/translations`) answer `503` + `Retry-After: 10`** instead and
+  kick the reload in the background — retry after the delay rather than waiting on the connection.
+
+#### Idle-unload metrics
+
+`GET /metrics` carries three idle-unload series, in both the Prometheus and JSON renders:
+
+| Series | Type | Meaning |
+|---|---|---|
+| `relais_engine_unloads_total` | counter | Idle-TTL evictions of the resident engine — includes a release whose native `close()` failed (see `consecutiveCloseFailures`) |
+| `relais_engine_idle_seconds` | gauge | Seconds since the engine was last active (a request, or a load); nonzero on a healthy node; omitted until the engine has been active at least once |
+| `relais_engine_load_duration_seconds` | histogram | Real init time only (the already-ready fast path records nothing); JSON also carries `engine_load_p50_seconds` |
+
+**`/metrics` cannot tell a healthy idle node from one whose listeners failed and then idled out** —
+`relais_engine_ready` reads `0` in both cases. `GET /health`'s `state` can (`IDLE` vs `ERROR`).
+Alert on `state`, not on `relais_engine_ready`.
+
 ### Reading time-to-first-token (and why there are two series)
 
 On an on-device node prefill usually dominates the wait, so end-to-end latency alone can't tell you

@@ -31,7 +31,9 @@ The one thing to remember: an amber relay light on a black panel.
 - **Muted text / labels:** `#8A8780`
 - **Stop / destructive:** `#FF5247` (used only for Stop)
 - **Status mapping:** LIVE = full amber + pulsing dot; STARTING = amber 60%, static dot, with a
-  phase line (resolve / download+progress / engine load); OFFLINE = muted. THERMAL SHED = a LIVE
+  phase line (resolve / download+progress / engine load); IDLE = amber 60%, static dot, copy
+  "idle · engine released — wakes on the next request", no phase line, no hero row (the hero LAN
+  endpoint stays LIVE-only); OFFLINE = muted. THERMAL SHED = a LIVE
   sub-state, not a fourth status: dot stays pulsing amber; the detail line reads
   `thermal · shedding load` in Paper (salience by brightness — no new color). StopRed covers STOP
   and CANCEL-start (both are "stop the node").
@@ -84,3 +86,4 @@ The one thing to remember: an amber relay light on a black panel.
 | 2026-07-11 | Unified app shell: single launcher, one Compose NavHost hosted by MainActivity, node dashboard as home; new DESIGN.md-conformant bottom nav (DASHBOARD/CHAT/MODELS, charcoal Panel surface, Line hairline divider, amber-active monospace labels, no ripple/elevation); Configure + Benchmark reachable off the shell | docs/superpowers/specs/2026-07-11-unified-app-shell-design.md |
 | 2026-07-26 | In-app speech playback: assistant turns gain a third action label, `SPEAK`, alongside `COPY`/`REGEN` — same 11sp bold monospace amber treatment, no new colour, no new motion. The label doubles as the readout for its own state (`SYNTHESIZING` / `STOP` / `FETCHING VOICE`, and `SPEECH FAILED` in StopRed, self-clearing like the `COPIED` ack), so playback needs no spinner, no progress bar, and no second control. Hidden entirely when no TTS engine is registered or the turn is an `[error]` turn | Issue #211 (split from the #168 TTS epic) |
 | 2026-07-11 | Chat depth: persistent Room-backed conversations, hybrid HTTP/in-process transport, generation controls (stop/regenerate/edit/copy), reused compose-richtext markdown, in-chat model switch with reload state, Markdown share/export. Assistant prose renders in platform `FontFamily.SansSerif` (the prose pairing anticipated in §Typography); monospace elsewhere | docs/superpowers/specs/2026-07-11-chat-depth-design.md |
+| 2026-09-22 | IDLE status on every surface (feature-22); tile/widget warm an idle node; Configure POWER gains IDLE UNLOAD / IDLE AFTER | feature-22 idle-unload plan |
