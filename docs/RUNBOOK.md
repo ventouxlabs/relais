@@ -34,7 +34,9 @@ to free memory on a node that isn't serving. Default **15 min**. Change it in **
 IDLE UNLOAD** (toggle) / **IDLE AFTER** (stepper, ladder 1 / 5 / 15 / 30 / 60 min); toggling
 **IDLE UNLOAD** off writes the disabled sentinel — `0` = never, and the engine then stays resident
 until STOP, matching pre-idle-unload behavior. A change takes effect within one 60 s tick; no
-restart needed.
+restart needed. That tick governs future eviction only — toggling **IDLE UNLOAD** off on a node
+that is *already* IDLE does not reload it; the engine stays released until the next request (or a
+tile/widget warm) brings it back resident.
 
 The foreground service, the mDNS advertisement, and the HTTPS/loopback listeners all **stay up**
 while idle — only the model weights are released. `GET /health` reflects this: `ready:false` with
@@ -64,11 +66,11 @@ listener retry.
 
 `GET /metrics` carries three idle-unload series, in both the Prometheus and JSON renders:
 
-| Series | Type | Meaning |
-|---|---|---|
-| `relais_engine_unloads_total` | counter | Idle-TTL evictions of the resident engine — includes a release whose native `close()` failed (see `consecutiveCloseFailures`) |
-| `relais_engine_idle_seconds` | gauge | Seconds since the engine was last active (a request, or a load); nonzero on a healthy node; omitted until the engine has been active at least once |
-| `relais_engine_load_duration_seconds` | histogram | Real init time only (the already-ready fast path records nothing); JSON also carries `engine_load_p50_seconds` |
+| Series | Type | JSON key | Meaning |
+|---|---|---|---|
+| `relais_engine_unloads_total` | counter | `engine_unloads_total` | Idle-TTL evictions of the resident engine — includes a release whose native `close()` failed (see `consecutiveCloseFailures`) |
+| `relais_engine_idle_seconds` | gauge | `idle_seconds` | Seconds since the engine was last active (a request, or a load); nonzero on a healthy node; omitted until the engine has been active at least once |
+| `relais_engine_load_duration_seconds` | histogram | `engine_load_p50_seconds` (scalar p50, not the histogram) | Real init time only (the already-ready fast path records nothing) |
 
 **`/metrics` cannot tell a healthy idle node from one whose listeners failed and then idled out** —
 `relais_engine_ready` reads `0` in both cases. `GET /health`'s `state` can (`IDLE` vs `ERROR`).
