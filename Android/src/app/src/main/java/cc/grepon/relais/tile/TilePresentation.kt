@@ -47,16 +47,26 @@ object TileState {
  * - OFF → INACTIVE "Relais · off".
  * - ERROR → INACTIVE "Relais · error" (asked-to-run but last init failed; tap re-toggles, the
  *   control panel is where the operator diagnoses).
- * - IDLE → ACTIVE "Relais · idle" (running, engine released by idle-TTL — ACTIVE for the STARTING
- *   reason: the node IS up; the subtitle names the tap's action the way OFF's does).
+ * - IDLE while thermally hot ([thermalHot] true, Codex P2 fixwave follow-up) → ACTIVE "Relais · idle"
+ *   / "hot — tap to stop": the tap now calls [tileAction]'s IDLE+hot row, which is STOP, not WARM, so
+ *   the subtitle must say so — the same reasoning that gives HOT's subtitle "throttling — thermal"
+ *   instead of a generic one.
+ * - IDLE otherwise → ACTIVE "Relais · idle" / "tap to warm" (running, engine released by idle-TTL —
+ *   ACTIVE for the STARTING reason: the node IS up; the subtitle names the tap's action the way
+ *   OFF's does).
  */
-fun tilePresentation(state: NodeState): TilePresentation = when (state) {
+fun tilePresentation(state: NodeState, thermalHot: Boolean): TilePresentation = when (state) {
   NodeState.LIVE -> TilePresentation("Relais · live", "engine resident", TileState.ACTIVE)
   NodeState.HOT -> TilePresentation("Relais · hot", "throttling — thermal", TileState.ACTIVE)
   NodeState.STARTING -> TilePresentation("Relais · starting…", "coming up", TileState.ACTIVE)
   NodeState.OFF -> TilePresentation("Relais · off", "tap to start node", TileState.INACTIVE)
   NodeState.ERROR -> TilePresentation("Relais · error", "init failed — tap to retry", TileState.INACTIVE)
-  NodeState.IDLE -> TilePresentation("Relais · idle", "tap to warm", TileState.ACTIVE)
+  NodeState.IDLE ->
+    if (thermalHot) {
+      TilePresentation("Relais · idle", "hot — tap to stop", TileState.ACTIVE)
+    } else {
+      TilePresentation("Relais · idle", "tap to warm", TileState.ACTIVE)
+    }
 }
 
 /**

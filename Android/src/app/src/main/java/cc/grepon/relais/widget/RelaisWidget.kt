@@ -119,16 +119,20 @@ private fun WidgetContent(state: WidgetUiState) {
   }
 }
 
-/** The node status line, derived from the single [NodeState] source of truth. */
+/**
+ * The node status line, derived from the single [NodeState] source of truth. Colour follows
+ * DESIGN.md's status mapping: LIVE/HOT = full amber; STARTING/IDLE = amber 60% (both resident-or-
+ * coming-up-or-warmable — a live node, not an off one); OFF/ERROR = muted.
+ */
 @Composable
 private fun StatusLine(nodeState: NodeState) {
   val (label, accent) = when (nodeState) {
     NodeState.LIVE -> "● live" to Amber
     NodeState.HOT -> "● hot — throttling" to Amber
-    NodeState.STARTING -> "○ starting…" to Muted
+    NodeState.STARTING -> "○ starting…" to Amber.copy(alpha = 0.6f)
     NodeState.ERROR -> "○ error — open app" to Muted
     NodeState.OFF -> "○ off — open app to start" to Muted
-    NodeState.IDLE -> "○ idle — tap to warm" to Amber.copy(alpha = 0.6f) // DESIGN.md: IDLE = amber 60%
+    NodeState.IDLE -> "○ idle — tap to warm" to Amber.copy(alpha = 0.6f)
   }
   Text(text = "relais  $label", style = TextStyle(color = ColorProvider(accent), fontSize = 13.sp))
 }

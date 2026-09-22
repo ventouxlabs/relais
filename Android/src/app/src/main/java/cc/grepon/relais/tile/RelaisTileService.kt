@@ -28,8 +28,9 @@ private const val TAG = "RelaisTileService"
 /**
  * Quick Settings tile (Feature #2): live node status + one-tap start/stop, optionally a canned-prompt
  * run on tap. State is DERIVED from [RelaisNodeController.state] (the single
- * OFF/STARTING/LIVE/HOT/ERROR/IDLE source of truth) via the pure [tilePresentation] mapping — the
- * tile never re-implements state logic.
+ * OFF/STARTING/LIVE/HOT/ERROR/IDLE source of truth) via the pure [tilePresentation] mapping (plus the
+ * raw [thermalHot] reading, for the IDLE subtitle to agree with [tileAction]'s IDLE+hot verdict) —
+ * the tile never re-implements state logic.
  *
  * Tap semantics are decided purely by [tileAction] from the current [NodeState] + config: OFF→start,
  * STARTING/HOT→stop, IDLE→warm (feature-22: re-warm the idle-released engine in place, no listener
@@ -46,20 +47,23 @@ class RelaisTileService : TileService() {
 
   override fun onStartListening() {
     super.onStartListening()
-    render()
+    render(thermalHot())
   }
 
   override fun onClick() {
     super.onClick()
     val templateId = RelaisConfig.tileCannedTemplateId(this)
-    when (tileAction(RelaisNodeController.state(this), templateId, RelaisInference.isReady(), thermalHot())) {
+    // Read once and reuse for the optimistic render below — tileAction's IDLE+hot decision and
+    // tilePresentation's IDLE+hot subtitle must agree on the SAME reading within one tap.
+    val hot = thermalHot()
+    when (tileAction(RelaisNodeController.state(this), templateId, RelaisInference.isReady(), hot)) {
       TileAction.START -> RelaisNodeController.start(this)
       TileAction.STOP -> RelaisNodeController.stop(this)
       TileAction.WARM -> warm()
       // RUN_PROMPT implies a non-blank templateId (see tileAction); let keeps it non-null without `!!`.
       TileAction.RUN_PROMPT -> templateId?.let { enqueueCannedPrompt(it) }
     }
-    render() // optimistic refresh; onStartListening re-renders the settled state on next listen
+    render(hot) // optimistic refresh; onStartListening re-renders the settled state on next listen
   }
 
   /**
@@ -88,9 +92,9 @@ class RelaisTileService : TileService() {
       .enqueueUniqueWork(CANNED_WORK_NAME, ExistingWorkPolicy.KEEP, request)
   }
 
-  private fun render() {
+  private fun render(thermalHot: Boolean) {
     val tile = qsTile ?: return
-    val presentation = tilePresentation(RelaisNodeController.state(this))
+    val presentation = tilePresentation(RelaisNodeController.state(this), thermalHot)
     tile.state = presentation.tileState // value-aligned with Tile.STATE_* (see TilePresentation)
     tile.label = presentation.label
     tile.subtitle = presentation.subtitle // API 29+; minSdk is 31
