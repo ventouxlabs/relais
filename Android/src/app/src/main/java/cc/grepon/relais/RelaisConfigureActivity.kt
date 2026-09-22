@@ -118,7 +118,15 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
   // Liveness snapshot FIRST, engine flags after (the read-order rule in computeNodeState's KDoc).
   // `idle` is polled INTO Compose state here rather than read raw where it is used: a raw
   // `RelaisLivenessState.snapshot` read inside a derived `val` would not invalidate the composition.
-  var idle by remember { mutableStateOf(RelaisLivenessState.snapshot.idleUnloaded) }
+  // `idle` mirrors the control panel's IDLE arm exactly (RelaisControlPanelState.kt: `running &&
+  // listenersUp && idleUnloaded && !startupInProgress`), not the raw flag alone: a swap's
+  // resolveModel window (or a bind-failed-then-idled node) publishes startupInProgress/tears down
+  // listenersUp before the real-init branch clears idleUnloaded, and every other surface reads
+  // STARTING/ERROR through that window — this caption must not be the one that still says IDLE.
+  var idle by remember {
+    val s = RelaisLivenessState.snapshot
+    mutableStateOf(s.idleUnloaded && s.listenersUp && !s.startupInProgress)
+  }
   var ready by remember { mutableStateOf(RelaisEngine.isReady) }
   var running by remember { mutableStateOf(RelaisConfig.shouldRun(ctx)) }
   val powerManager = remember { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
@@ -130,7 +138,7 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
   LaunchedEffect(Unit) {
     while (true) {
       val liveness = RelaisLivenessState.snapshot
-      idle = liveness.idleUnloaded
+      idle = liveness.idleUnloaded && liveness.listenersUp && !liveness.startupInProgress
       ready = RelaisEngine.isReady
       running = RelaisConfig.shouldRun(ctx)
       batteryUnrestricted = powerManager.isIgnoringBatteryOptimizations(ctx.packageName)
