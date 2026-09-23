@@ -124,7 +124,10 @@ class IdleUnloadProbe {
   fun setUp() {
     assumeTrue("On-device probe; pass -e RELAIS_PROBE 1 to run", args.getString("RELAIS_PROBE") == "1")
     val modelPath = RelaisModelProvisioner.pathFor(context, RelaisConfig.modelId(context))
-    assumeTrue("no staged model at $modelPath — provision one before running this probe", File(modelPath).exists())
+    assumeTrue(
+      "no model file on this device for ${RelaisConfig.modelId(context)} — provision one before running this probe",
+      modelPath != null && File(modelPath).exists(),
+    )
 
     nodeWasRunning = RelaisConfig.shouldRun(context)
     // @After always runs — even when @Before throws or skips via assumeTrue above (JUnit's

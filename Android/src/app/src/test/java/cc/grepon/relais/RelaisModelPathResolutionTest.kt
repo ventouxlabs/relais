@@ -13,6 +13,7 @@
 package cc.grepon.relais
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -33,6 +34,9 @@ class RelaisModelPathResolutionTest {
 
   private val default = "/data/default/gemma-4-E4B-it.litertlm"
 
+  /** The id whose file [default] literally is. Distinct from every other id used below. */
+  private val DEFAULT_ID = "vendor/the-default-model"
+
   private fun m(id: String, path: String) = ProvisionedModel(id, path, id)
 
   /** Every path in this suite "exists" unless a test names the missing ones. */
@@ -46,12 +50,12 @@ class RelaisModelPathResolutionTest {
       "/data/a.litertlm",
       RelaisModelProvisioner.resolveModelPath(
         modelId = "a",
-        cachedId = "a",
-        cachedPath = "/data/a.litertlm",
+        cached = RelaisModelProvisioner.CachedModelPath(modelId = "a", path = "/data/a.litertlm"),
         configuredId = "a",
         persistedPath = null,
         provisioned = emptyList(),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists(),
       ),
     )
@@ -65,30 +69,30 @@ class RelaisModelPathResolutionTest {
       "/data/new.litertlm",
       RelaisModelProvisioner.resolveModelPath(
         modelId = "new",
-        cachedId = "old",
-        cachedPath = "/data/old.litertlm",
+        cached = RelaisModelProvisioner.CachedModelPath(modelId = "old", path = "/data/old.litertlm"),
         configuredId = "new",
         persistedPath = null,
         provisioned = listOf(m("new", "/data/new.litertlm")),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists(),
       ),
     )
   }
 
   @Test
-  fun `an untagged cache is never readable`() {
-    // Nothing has been provisioned this process; a null id must not match a null-ish anything.
-    assertEquals(
-      default,
+  fun `an empty cache is never readable`() {
+    // Nothing provisioned this process. There is deliberately no "path without an id" case to test:
+    // CachedModelPath carries both or the cache is null, so an untagged path cannot be expressed.
+    assertNull(
       RelaisModelProvisioner.resolveModelPath(
         modelId = "a",
-        cachedId = null,
-        cachedPath = "/data/stale.litertlm",
+        cached = null,
         configuredId = "a",
         persistedPath = null,
         provisioned = emptyList(),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists(),
       ),
     )
@@ -100,12 +104,12 @@ class RelaisModelPathResolutionTest {
       "/data/registry-a.litertlm",
       RelaisModelProvisioner.resolveModelPath(
         modelId = "a",
-        cachedId = "a",
-        cachedPath = "/data/gone.litertlm",
+        cached = RelaisModelProvisioner.CachedModelPath(modelId = "a", path = "/data/gone.litertlm"),
         configuredId = "a",
         persistedPath = null,
         provisioned = listOf(m("a", "/data/registry-a.litertlm")),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists("/data/gone.litertlm"),
       ),
     )
@@ -121,12 +125,12 @@ class RelaisModelPathResolutionTest {
       "/data/b.litertlm",
       RelaisModelProvisioner.resolveModelPath(
         modelId = "b",
-        cachedId = null,
-        cachedPath = null,
+        cached = null,
         configuredId = "a",
         persistedPath = "/data/a.litertlm",
         provisioned = listOf(m("a", "/data/a.litertlm"), m("b", "/data/b.litertlm")),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists(),
       ),
     )
@@ -138,12 +142,12 @@ class RelaisModelPathResolutionTest {
       "/data/a-pref.litertlm",
       RelaisModelProvisioner.resolveModelPath(
         modelId = "a",
-        cachedId = null,
-        cachedPath = null,
+        cached = null,
         configuredId = "a",
         persistedPath = "/data/a-pref.litertlm",
         provisioned = listOf(m("a", "/data/pruned.litertlm")),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists("/data/pruned.litertlm"),
       ),
     )
@@ -157,12 +161,12 @@ class RelaisModelPathResolutionTest {
       "/data/a-pref.litertlm",
       RelaisModelProvisioner.resolveModelPath(
         modelId = "a",
-        cachedId = null,
-        cachedPath = null,
+        cached = null,
         configuredId = "a",
         persistedPath = "/data/a-pref.litertlm",
         provisioned = emptyList(),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists(),
       ),
     )
@@ -172,33 +176,31 @@ class RelaisModelPathResolutionTest {
   fun `the persisted pref is REFUSED for any other id`() {
     // KEY_MODEL_PATH is cleared on an id change, so when it is set it describes the configured
     // model. Handing it to a swap target's id would re-create #337 one fallback further down.
-    assertEquals(
-      default,
+    assertNull(
       RelaisModelProvisioner.resolveModelPath(
         modelId = "b",
-        cachedId = null,
-        cachedPath = null,
+        cached = null,
         configuredId = "a",
         persistedPath = "/data/a-pref.litertlm",
         provisioned = emptyList(),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists(),
       ),
     )
   }
 
   @Test
-  fun `a persisted pref whose file is gone falls through to the default`() {
-    assertEquals(
-      default,
+  fun `a persisted pref whose file is gone leaves nothing to serve`() {
+    assertNull(
       RelaisModelProvisioner.resolveModelPath(
         modelId = "a",
-        cachedId = null,
-        cachedPath = null,
+        cached = null,
         configuredId = "a",
         persistedPath = "/data/gone.litertlm",
         provisioned = emptyList(),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists("/data/gone.litertlm"),
       ),
     )
@@ -207,37 +209,77 @@ class RelaisModelPathResolutionTest {
   // ---- the floor ----
 
   @Test
-  fun `nothing known yields the default path`() {
-    assertEquals(
-      default,
+  fun `nothing known about a non-default id yields null, never another model's file`() {
+    assertNull(
       RelaisModelProvisioner.resolveModelPath(
         modelId = "a",
-        cachedId = null,
-        cachedPath = null,
+        cached = null,
         configuredId = "a",
         persistedPath = null,
         provisioned = emptyList(),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists(),
       ),
     )
   }
 
   @Test
-  fun `the default is returned unchecked - it is the pre-provision location`() {
+  fun `the default is returned unchecked for its OWN id - it is the pre-provision location`() {
     // The default is where a provision will WRITE, so it must be returned even when absent;
     // ensureInitialized's own require() is what reports a missing file.
     assertEquals(
       default,
       RelaisModelProvisioner.resolveModelPath(
-        modelId = "a",
-        cachedId = null,
-        cachedPath = null,
+        modelId = DEFAULT_ID,
+        cached = null,
         configuredId = "a",
         persistedPath = null,
         provisioned = emptyList(),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists(default),
+      ),
+    )
+  }
+
+  // ---- rung 4 is id-bound too: the default path is ONE model's file name ----
+
+  @Test
+  fun `the default path is refused for an id that is not the default model`() {
+    // The sideload-adoption gate in ensureModel makes this exact distinction, and for the same
+    // reason: that file name is the default model's file. Before this gate existed, an operator who
+    // typed a raw model id got the default model's weights stamped with their id on the next
+    // reload — #337 surviving one rung below where it was found.
+    assertNull(
+      RelaisModelProvisioner.resolveModelPath(
+        modelId = "operator/typed-this-by-hand",
+        cached = null,
+        configuredId = "operator/typed-this-by-hand",
+        persistedPath = null,
+        provisioned = emptyList(),
+        defaultPath = default,
+        defaultModelId = DEFAULT_ID,
+        fileExists = exists(),
+      ),
+    )
+  }
+
+  @Test
+  fun `a pre-staged sideload still boots the default model`() {
+    // The case the default rung exists for: a fresh install whose model was pushed to the
+    // conventional location by adb, with nothing cached, registered or persisted yet.
+    assertEquals(
+      default,
+      RelaisModelProvisioner.resolveModelPath(
+        modelId = DEFAULT_ID,
+        cached = null,
+        configuredId = DEFAULT_ID,
+        persistedPath = null,
+        provisioned = emptyList(),
+        defaultPath = default,
+        defaultModelId = DEFAULT_ID,
+        fileExists = exists(),
       ),
     )
   }
@@ -246,23 +288,25 @@ class RelaisModelPathResolutionTest {
 
   @Test
   fun `cache outranks registry outranks pref for the configured id`() {
-    val cached = "/data/cached.litertlm"
+    val cachedFile = "/data/cached.litertlm"
     val registry = "/data/registry.litertlm"
     val pref = "/data/pref.litertlm"
     fun resolve(vararg missing: String) =
       RelaisModelProvisioner.resolveModelPath(
         modelId = "a",
-        cachedId = "a",
-        cachedPath = cached,
+        cached = RelaisModelProvisioner.CachedModelPath(modelId = "a", path = cachedFile),
         configuredId = "a",
         persistedPath = pref,
         provisioned = listOf(m("a", registry)),
         defaultPath = default,
+        defaultModelId = DEFAULT_ID,
         fileExists = exists(*missing),
       )
-    assertEquals(cached, resolve())
-    assertEquals(registry, resolve(cached))
-    assertEquals(pref, resolve(cached, registry))
-    assertEquals(default, resolve(cached, registry, pref))
+    assertEquals(cachedFile, resolve())
+    assertEquals(registry, resolve(cachedFile))
+    assertEquals(pref, resolve(cachedFile, registry))
+    // Not `default`: "a" is not the default model, and the default file holds the default model's
+    // weights. With every id-bound source exhausted there is nothing honest left to return.
+    assertNull(resolve(cachedFile, registry, pref))
   }
 }

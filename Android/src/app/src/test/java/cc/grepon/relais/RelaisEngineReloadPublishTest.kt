@@ -54,7 +54,12 @@ class RelaisEngineReloadPublishTest {
     assertFalse("precondition: no startup in flight", RelaisLivenessState.snapshot.startupInProgress)
     // The background path resolves the default model path; it must NOT exist, or the attempt would
     // reach native engine-create instead of failing fast at `require`.
-    val defaultPath = RelaisModelProvisioner.pathFor(ctx, RelaisConfig.modelId(ctx))
+    // Non-null here because a Robolectric context reports the DEFAULT model id, which is the one
+    // id the default path is allowed to answer for (#337's rung-4 gate).
+    val defaultPath =
+      requireNotNull(RelaisModelProvisioner.pathFor(ctx, RelaisConfig.modelId(ctx))) {
+        "expected the default model id to resolve to the default path"
+      }
     assertFalse("precondition: default model path must not exist ($defaultPath)", File(defaultPath).exists())
     RelaisEngine.lastInitFailed = false
     RelaisLivenessState.publishIdleUnloaded(false)

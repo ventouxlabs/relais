@@ -401,15 +401,6 @@ object RelaisEngine {
     modelId: String = RelaisConfig.modelId(context),
   ) {
     if (isReady) return
-    // Resolved HERE rather than as `modelPath`'s default (#337). Two reasons, both load-bearing:
-    // the path must be resolved FOR [modelId], and a Kotlin default can only see parameters
-    // declared before it — while swapping the declaration order would silently rebind the six call
-    // sites that pass the path positionally, since both parameters are String. Resolving in the
-    // body also means the id is read ONCE: the old pair of defaults each called
-    // RelaisConfig.modelId independently, so an id change landing between them could pair a path
-    // resolved for one model with the other model's id — the very defect this closes.
-    @Suppress("NAME_SHADOWING")
-    val modelPath = modelPath ?: RelaisModelProvisioner.pathFor(context, modelId)
     synchronized(lock) {
       if (isReady) return
       // BEFORE the try: endStartup() `check`s its pairing, so a throw between try-entry and an inner
@@ -426,7 +417,23 @@ object RelaisEngine {
         // here — the first statement inside the try — so it never includes an isReady fast-path (both
         // re-checks above return before this point). Fed to RelaisMetrics on the success path only.
         val startNs = System.nanoTime()
-        require(File(modelPath).exists()) { "Model not found: $modelPath" }
+        // Resolved HERE rather than as `modelPath`'s default (#337). Three reasons, all
+        // load-bearing: the path must be resolved FOR `modelId`; a Kotlin default can only see
+        // parameters declared before it, and swapping the declaration order would silently rebind
+        // the six call sites that pass the path positionally, since both parameters are String;
+        // and resolving here keeps the failure INSIDE this try, so an unresolvable model records
+        // `lastInitFailed` and publishes `endStartup` exactly like a missing file does, instead of
+        // throwing past the bookkeeping and leaving the node's state machine unaware.
+        // Resolving in the body also means the id is read ONCE — the old pair of defaults each
+        // called RelaisConfig.modelId independently, so an id change landing between them could
+        // pair a path resolved for one model with the other model's id.
+        val resolvedPath =
+          requireNotNull(modelPath ?: RelaisModelProvisioner.pathFor(context, modelId)) {
+            // Deliberately a failure rather than a fallback: the only paths left to guess with
+            // belong to OTHER models, and loading those under this id is the defect #337 closed.
+            "No model file on this device holds the weights for $modelId"
+          }
+        require(File(resolvedPath).exists()) { "Model not found: $resolvedPath" }
         // NOTE: the former Pixel-10/Tensor-G5 pre-flight gate that refused gemma-4-E4B is gone —
         // E4B was verified to init + serve (text, sustained decode, and vision) on G5 with no SIGSEGV
         // on litertlm 0.12.0 (2026-07-12, on rango), so the model×SoC crash it guarded is resolved.
@@ -435,9 +442,9 @@ object RelaisEngine {
         // but MEASURED A REGRESSION on this E4B/GPU/Tensor-G4 config: ~2.56 tok/s with it on vs
         // ~5.63 tok/s off (draft overhead > gains, no draft model bundled). Left OFF deliberately.
         ExperimentalFlags.enableSpeculativeDecoding = false
-        engine = buildResidentEngine(modelPath, cacheDir, context.applicationInfo.nativeLibraryDir)
+        engine = buildResidentEngine(resolvedPath, cacheDir, context.applicationInfo.nativeLibraryDir)
         residentModelId = modelId // #180: the source of truth for what the resident engine is serving
-        residentModelPath = modelPath
+        residentModelPath = resolvedPath
         lastActivityAtMs = System.currentTimeMillis() // idle-TTL clock (#178): init counts as activity
         RelaisMetrics.recordEngineLoad((System.nanoTime() - startNs) / 1e9)
       } catch (t: Throwable) {
