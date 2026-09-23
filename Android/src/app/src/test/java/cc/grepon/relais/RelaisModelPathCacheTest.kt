@@ -40,6 +40,17 @@ class RelaisModelPathCacheTest {
 
   private val ctx get() = ApplicationProvider.getApplicationContext<android.app.Application>()
 
+  private companion object {
+    const val OPERATOR_ID = "operator/typed-this"
+
+    /**
+     * The prefs read to flip the model id on: one call after `ensureModel`'s `idAtStart` capture
+     * (modelRef, modelId, idAtStart, then modelPath for fast path 1). Asserted in the test, never
+     * assumed — a read-order change must fail loudly rather than silently flipping too late.
+     */
+    const val FLIP_ON_PREFS_CALL = 4
+  }
+
   /** A real file, because every resolution step below the default is gated on the file existing. */
   private fun stage(name: String): String =
     File(ctx.cacheDir, name).apply { parentFile?.mkdirs() }.also { it.writeText("weights") }.absolutePath
@@ -102,6 +113,60 @@ class RelaisModelPathCacheTest {
   }
 
   @Test
+  fun `the staged default file is not adopted for a non-default id`() {
+    // The window is an id change landing between ensureModel's `idAtStart` capture and the
+    // staged-adoption gate. Driving it needs no concurrency: RelaisConfig.prefs is a plain per-call
+    // getSharedPreferences, so every RelaisConfig.xxx(context) is one observable call on a wrapper,
+    // and flipping the id from inside the Nth call is synchronously equivalent to a racing write.
+    //
+    // The dangerous direction is non-default -> default: a gate that re-read the id would see
+    // DEFAULT and adopt, while `remember` tags with the captured `idAtStart`, binding the default
+    // model's file to the operator's id. `pathFor`'s rung 1 then trusts that tag.
+    val staged = File(RelaisEngine.defaultModelPath(ctx)).apply { parentFile?.mkdirs() }
+    staged.writeText("default model weights")
+    RelaisConfig.setModelId(ctx, OPERATOR_ID)
+    // Fast path 1 must miss, or it returns before the staged branch is ever reached.
+    RelaisConfig.setModelPath(ctx, File(ctx.cacheDir, "absent.litertlm").absolutePath)
+
+    var prefsCalls = 0
+    var flippedAt = -1
+    val flipping = object : android.content.ContextWrapper(ctx) {
+      override fun getSharedPreferences(name: String?, mode: Int): android.content.SharedPreferences {
+        val real = super.getSharedPreferences(name, mode)
+        prefsCalls++
+        // One call AFTER idAtStart is captured. Asserted below rather than trusted: if a future
+        // read-order change moves the capture, the flip would land after the gate and this test
+        // would go quietly vacuous instead of failing.
+        if (prefsCalls == FLIP_ON_PREFS_CALL) {
+          flippedAt = prefsCalls
+          real.edit().putString("model_id", RelaisConfig.DEFAULT_MODEL_ID).commit()
+        }
+        return real
+      }
+    }
+
+    try {
+      // With the gate reading idAtStart this falls through to allowlist resolution, which cannot
+      // reach the network under Robolectric. The throw is expected; the binding is the assertion.
+      runCatching { RelaisModelProvisioner.ensureModel(flipping) }
+
+      assertEquals("the flip must land after idAtStart is captured, not later", FLIP_ON_PREFS_CALL, flippedAt)
+      assertEquals(
+        "the id really did change mid-call, or the test proves nothing",
+        RelaisConfig.DEFAULT_MODEL_ID,
+        RelaisConfig.modelId(ctx),
+      )
+      assertNotEquals(
+        "the default model's file must never be remembered under the operator's id",
+        staged.absolutePath,
+        RelaisModelProvisioner.pathFor(ctx, OPERATOR_ID),
+      )
+    } finally {
+      staged.delete()
+    }
+  }
+
+  @Test
   fun `a model still in the registry is found after the cache moves on`() {
     // The registry is the id-keyed fallback that makes a switch BACK cheap, and the reason a swap
     // target that was never the configured model can still be located.
@@ -111,7 +176,6 @@ class RelaisModelPathCacheTest {
     RelaisModelProvisioner.remember(ctx, alpha, persistForId = "alpha")
     RelaisConfig.setModelId(ctx, "beta")
     RelaisModelProvisioner.remember(ctx, beta, persistForId = "beta")
-
     assertEquals("alpha is still provisioned, so it resolves from the registry", alpha, RelaisModelProvisioner.pathFor(ctx, "alpha"))
     assertEquals(beta, RelaisModelProvisioner.pathFor(ctx, "beta"))
   }

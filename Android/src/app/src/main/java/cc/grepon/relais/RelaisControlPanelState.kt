@@ -151,10 +151,12 @@ fun computeControlPanelState(
   // a mid-download model change could resurrect a superseded path once the in-flight ensureModel()
   // resolves. A failed attempt is not "provisioning" — the row must stay open so the likely fix
   // (a different model/token) is reachable without a detour.
-  // Also locked on IDLE (#337): the picker persists the new path through the download funnel, but
-  // `RelaisModelProvisioner.cachedPath` is never invalidated on an id change, so until `remember`
-  // completes an idle reload can load the OLD weights under the NEW id. This does not close that
-  // window (MODELS is one bottom-nav tap away); it refuses to widen it onto the idle dashboard.
+  // Also locked on IDLE. The reason has narrowed since #337's first half: the resolver is now
+  // id-bound (`RelaisModelProvisioner.pathFor` resolves a path FOR a model id and refuses every
+  // source that belongs to a different one), so an idle reload after a pick loads the model that
+  // was actually picked. What remains is that the pick is LAZY — nothing dispatches a swap, so it
+  // takes effect on the next reload rather than immediately. Unlocking means routing the pick
+  // through the dashboard's targeted swap and verifying on hardware: the open half of #337.
   val nodeBusy = status == NodeStatus.STARTING || status == NodeStatus.IDLE
   val progressVisible = status == NodeStatus.STARTING && phase == ProvisionPhase.DOWNLOADING && downloadTotalBytes > 0
   val thermalShed = status == NodeStatus.LIVE && thermalShedding

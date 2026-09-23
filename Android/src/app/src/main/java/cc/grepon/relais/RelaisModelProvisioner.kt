@@ -284,6 +284,14 @@ object RelaisModelProvisioner {
     // Capture the id AFTER substitution so the issue-#11 drift guard doesn't see false drift
     // (the id is now E2B, and idAtStart must match for the persist gate to pass).
     val idAtStart = RelaisConfig.modelId(context)
+    // Decided HERE, beside the capture, and never re-read further down. The staged-adoption branch
+    // below adopts a file whose model identity is fixed by its NAME, so it may only ever be
+    // remembered for DEFAULT_MODEL_ID; asking a fresh `RelaisConfig.modelId(context)` down there
+    // would let the gate and the tag it authorises disagree, binding that file to another id.
+    // Hoisting makes reintroducing that a visible new prefs call inside the branch, not a one-token
+    // edit. Pinned by `the staged default file is not adopted for a non-default id` (the test flips
+    // the id between this capture and the branch).
+    val stagedFileIsAdoptable = idAtStart == RelaisConfig.DEFAULT_MODEL_ID
     // #220 follow-up: refuse a MEASURED-incompatible model HERE, before any fast path.
     //
     // NOT "the single chokepoint" — an earlier revision of this comment claimed that and was wrong.
@@ -315,7 +323,7 @@ object RelaisModelProvisioner {
     RelaisConfig.modelPath(context)?.let { saved ->
       if (File(saved).exists()) {
         Log.i(TAG, "Using persisted model path (no allowlist fetch needed): $saved")
-        // Route through remember() rather than assigning cachedPath directly: this is the MOST
+        // Route through remember() rather than assigning cachedModelPath directly: this is the MOST
         // common start path (a node booting from an already-provisioned model), and skipping
         // remember() meant the #180 registry never learned about the resident model — /v1/models
         // reported it as not-provisioned and a request naming it would 404. Idempotent here: the
@@ -329,7 +337,12 @@ object RelaisModelProvisioner {
     // re-downloading multiple GB over a slow link. Persisting it here means subsequent boots take
     // fast path 1 above. Gated to the default model id because that path's file name is the default
     // model's file specifically; a non-default id is resolved against the allowlist below instead.
-    if (RelaisConfig.modelId(context) == RelaisConfig.DEFAULT_MODEL_ID) {
+    // Gated on idAtStart, NOT a fresh read: the tag below is idAtStart, and a gate that reads a
+    // DIFFERENT id than the tag it authorises can bind this file to a model it does not hold. The
+    // file's identity is DEFAULT_MODEL_ID by construction (its NAME is the default model's file —
+    // the same reasoning resolveModelPath's rung 4 encodes), so the only id it may ever be
+    // remembered for is that one. Every other branch in this function already tags with idAtStart.
+    if (stagedFileIsAdoptable) {
       val staged = File(RelaisEngine.defaultModelPath(context))
       // length() > 0 (returns 0 when absent) also rejects an interrupted/empty `adb push` so a
       // 0-byte stub isn't adopted and then fails opaquely later in Engine init.
@@ -410,8 +423,10 @@ object RelaisModelProvisioner {
   /**
    * Caches the resolved path in-memory (always — it's what this boot actually provisioned) and
    * persists it to [RelaisConfig] only if the model id hasn't drifted since provisioning started.
-   * Pass [persistForId] = the id captured at [ensureModel] entry to enable the drift guard;
-   * omit it (null) to always persist (legacy / callers without an id snapshot).
+   * [persistForId] is the id captured at [ensureModel] entry and has **no default**: it is the
+   * value the drift gate keys on AND the identity this file is remembered under, so a caller that
+   * declines to state it cannot be answered with a fresh `RelaisConfig.modelId` read —
+   * [recordProvisioned]'s KDoc forbids exactly that, and the old `?: currentId` fallback did it.
    */
   /**
    * Add (or refresh) this model in the provisioned registry (#180), pruning entries whose file has
@@ -439,7 +454,7 @@ object RelaisModelProvisioner {
       .onFailure { Log.w(TAG, "Could not update provisioned-model registry: ${it.message}") }
   }
 
-  internal fun remember(context: Context, path: String, persistForId: String? = null): String {
+  internal fun remember(context: Context, path: String, persistForId: String): String {
     // Read the current id once: it drives the gate AND the drift warning, and re-reading risks a
     // TOCTOU mismatch between the decision and the logged value.
     val currentId = RelaisConfig.modelId(context)
@@ -447,7 +462,7 @@ object RelaisModelProvisioner {
     // halves can never disagree about which model they describe. Still written unconditionally —
     // it is what this boot actually provisioned — but on drift that tag is the OUTGOING id, so a
     // read for the incoming model correctly misses instead of serving the wrong weights (#337).
-    cachedModelPath = CachedModelPath(modelId = persistForId ?: currentId, path = path)
+    cachedModelPath = CachedModelPath(modelId = persistForId, path = path)
     if (shouldPersistPath(persistForId, currentId)) {
       RelaisConfig.setModelPath(context, path)
       // #180: the ONE funnel both the already-present and freshly-downloaded paths pass through, so
@@ -459,7 +474,7 @@ object RelaisModelProvisioner {
       // refuse both. Recording it above the gate — with a fresh read of RelaisConfig.modelId —
       // reintroduced the issue-#11 race one line before the guard that exists to stop it: an
       // operator switching models mid-download would bind the NEW id to the OLD model's file.
-      recordProvisioned(context, path, persistForId ?: currentId)
+      recordProvisioned(context, path, persistForId)
     } else {
       Log.w(
         TAG,

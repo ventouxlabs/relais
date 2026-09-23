@@ -86,6 +86,39 @@ class RelaisEngineReloadPublishTest {
   }
 
   /**
+   * `ensureInitialized`'s `modelId` actually steers resolution (#337).
+   *
+   * Without this, the parameter the KDoc calls load-bearing is a no-op at every call site in the
+   * tree: every caller that omits `modelPath` also omits `modelId`, and every caller that passes a
+   * non-default `modelId` passes `modelPath` too, skipping resolution entirely. Replacing
+   * `pathFor(context, modelId)` with `pathFor(context, RelaisConfig.modelId(context))` would pass
+   * the whole suite.
+   *
+   * The discriminator is the failure: the configured model has a path on disk that EXISTS, and the
+   * asked-about model has nothing. Resolving for the configured id would therefore succeed and run
+   * on to native engine-create; resolving for the asked-about id fails first, and the message names
+   * which model could not be located.
+   */
+  @Test fun `the modelId argument steers resolution, not the configured id`() {
+    val configured = File(ctx.cacheDir, "configured-model.litertlm").apply { writeBytes(byteArrayOf(0x00)) }
+    try {
+      RelaisConfig.setModelId(ctx, "configured/id")
+      RelaisConfig.setModelPath(ctx, configured.absolutePath) // set AFTER the id: setModelId clears it
+
+      val thrown = assertThrows(IllegalArgumentException::class.java) {
+        RelaisEngine.ensureInitialized(ctx, modelId = "asked/about")
+      }
+      assertTrue(
+        "the failure must name the model that was ASKED about, not the configured one — " +
+          "message was: ${thrown.message}",
+        thrown.message?.contains("asked/about") == true,
+      )
+    } finally {
+      configured.delete()
+    }
+  }
+
+  /**
    * Observes the flags INSIDE a real init attempt, deterministically: with the model file present,
    * `require` passes and the very next call is `context.getExternalFilesDir(null)` — before any
    * litertlm class is touched — so a [ContextWrapper] that records the flags there and throws a
