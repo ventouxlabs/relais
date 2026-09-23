@@ -54,7 +54,7 @@ class RelaisEngineReloadPublishTest {
     assertFalse("precondition: no startup in flight", RelaisLivenessState.snapshot.startupInProgress)
     // The background path resolves the default model path; it must NOT exist, or the attempt would
     // reach native engine-create instead of failing fast at `require`.
-    val defaultPath = RelaisModelProvisioner.cachedPathOrDefault(ctx)
+    val defaultPath = RelaisModelProvisioner.pathFor(ctx, RelaisConfig.modelId(ctx))
     assertFalse("precondition: default model path must not exist ($defaultPath)", File(defaultPath).exists())
     RelaisEngine.lastInitFailed = false
     RelaisLivenessState.publishIdleUnloaded(false)
@@ -123,10 +123,11 @@ class RelaisEngineReloadPublishTest {
    * PLUS the outer thread's `finally` (which ends the caller-side begin too) before this test's next
    * line reads the snapshot back — a genuine scheduling race, not a hypothetical one. Pin it
    * deterministically by holding the worker at the first `Context` call `ensureInitialized`'s
-   * default arguments make (`RelaisModelProvisioner.cachedPathOrDefault` / `RelaisConfig.modelId`
-   * both resolve through `RelaisConfig`'s private `prefs(context)`, i.e. `getSharedPreferences` —
-   * whichever of the two resolves first, that is always the first Context touch) — well before the
-   * worker can even enter `ensureInitialized`'s body, let alone its own begin/end pair.
+   * sole Context-touching default argument makes (`modelId = RelaisConfig.modelId(context)`, which
+   * resolves through `RelaisConfig`'s private `prefs(context)`, i.e. `getSharedPreferences`). Since
+   * #337 that is the ONLY default that touches Context — `modelPath` defaults to null and is
+   * resolved inside the body — so the latch fires strictly before the body, well before the worker
+   * can enter `ensureInitialized`'s begin/end pair.
    */
   @Test fun `the background reload publishes STARTING on the caller before returning`() {
     RelaisLivenessState.publishIdleUnloaded(true)

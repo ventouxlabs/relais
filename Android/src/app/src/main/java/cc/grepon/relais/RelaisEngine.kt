@@ -397,10 +397,19 @@ object RelaisEngine {
   @OptIn(ExperimentalApi::class)
   fun ensureInitialized(
     context: Context,
-    modelPath: String = RelaisModelProvisioner.cachedPathOrDefault(context),
+    modelPath: String? = null,
     modelId: String = RelaisConfig.modelId(context),
   ) {
     if (isReady) return
+    // Resolved HERE rather than as `modelPath`'s default (#337). Two reasons, both load-bearing:
+    // the path must be resolved FOR [modelId], and a Kotlin default can only see parameters
+    // declared before it — while swapping the declaration order would silently rebind the six call
+    // sites that pass the path positionally, since both parameters are String. Resolving in the
+    // body also means the id is read ONCE: the old pair of defaults each called
+    // RelaisConfig.modelId independently, so an id change landing between them could pair a path
+    // resolved for one model with the other model's id — the very defect this closes.
+    @Suppress("NAME_SHADOWING")
+    val modelPath = modelPath ?: RelaisModelProvisioner.pathFor(context, modelId)
     synchronized(lock) {
       if (isReady) return
       // BEFORE the try: endStartup() `check`s its pairing, so a throw between try-entry and an inner

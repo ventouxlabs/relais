@@ -107,8 +107,25 @@ object RelaisModelProvisioner {
       G5_DEFAULT_REF
     else null
 
-  /** Last resolved/downloaded model path, cached so the engine can re-read it without a refetch. */
-  @Volatile private var cachedPath: String? = null
+  /** A provisioned file together with the model id it holds the weights for. */
+  private data class CachedModelPath(val modelId: String, val path: String)
+
+  /**
+   * Last resolved/downloaded model path, cached so the engine can re-read it without a refetch —
+   * **tagged with the id it was provisioned for, and readable only for that id** (#337).
+   *
+   * The tag is the invariant, not an optimisation. This used to be a bare path, and "which model
+   * does it describe?" was answered by whoever happened to write it last. A model switch left it
+   * naming the OUTGOING model while config named the incoming one, [resolveModelPath]'s caller
+   * paired the two, and [RelaisEngine.ensureInitialized] wrote them as the resident pair — old
+   * weights served under the new id, with #180's mismatch check then seeing agreement and never
+   * swapping. The durable half (`KEY_MODEL_PATH`) was already cleared on every id change; this
+   * process-local half was not, which is why the symptom disappeared across a restart.
+   *
+   * Tagging makes the stale read impossible to express rather than relying on each future writer of
+   * the model id to remember an invalidation call.
+   */
+  @Volatile private var cachedModelPath: CachedModelPath? = null
 
   /**
    * The upstream catalog revision this build reads (#227).
@@ -413,10 +430,14 @@ object RelaisModelProvisioner {
   }
 
   internal fun remember(context: Context, path: String, persistForId: String? = null): String {
-    cachedPath = path
     // Read the current id once: it drives the gate AND the drift warning, and re-reading risks a
     // TOCTOU mismatch between the decision and the logged value.
     val currentId = RelaisConfig.modelId(context)
+    // Tag the cache with the SAME id the persist gate below keys on, so the in-memory and durable
+    // halves can never disagree about which model they describe. Still written unconditionally —
+    // it is what this boot actually provisioned — but on drift that tag is the OUTGOING id, so a
+    // read for the incoming model correctly misses instead of serving the wrong weights (#337).
+    cachedModelPath = CachedModelPath(modelId = persistForId ?: currentId, path = path)
     if (shouldPersistPath(persistForId, currentId)) {
       RelaisConfig.setModelPath(context, path)
       // #180: the ONE funnel both the already-present and freshly-downloaded paths pass through, so
@@ -440,13 +461,65 @@ object RelaisModelProvisioner {
   }
 
   /**
-   * The last provisioned path (in-memory, then persisted), or the legacy hardcoded location as a
-   * fallback (e.g. pre-provision). The persisted path is only used if the file still exists.
+   * Where the weights for [modelId] live on this device.
+   *
+   * Replaces the former `cachedPathOrDefault(context)`, whose signature asked "which path?" without
+   * an id in the question and so **failed open**: after a switch it answered with the outgoing
+   * model's file (#337). The id is a required parameter for the same reason
+   * [ModelSwitch.applyManualId]'s `resolvedPath` has no default — the caller must state which model
+   * it means, because the wrong answer is silent.
+   *
+   * Callers wanting the operator's configured model pass `RelaisConfig.modelId(context)`; a swap
+   * passes the target's id.
    */
-  fun cachedPathOrDefault(context: Context): String =
-    cachedPath
-      ?: RelaisConfig.modelPath(context)?.takeIf { File(it).exists() }
-      ?: RelaisEngine.defaultModelPath(context)
+  fun pathFor(context: Context, modelId: String): String =
+    resolveModelPath(
+      modelId = modelId,
+      cachedId = cachedModelPath?.modelId,
+      cachedPath = cachedModelPath?.path,
+      configuredId = RelaisConfig.modelId(context),
+      persistedPath = RelaisConfig.modelPath(context),
+      provisioned = RelaisConfig.provisionedModels(context),
+      defaultPath = RelaisEngine.defaultModelPath(context),
+      fileExists = { File(it).exists() },
+    )
+
+  /**
+   * The pure resolution behind [pathFor] (#337) — unit-tested in `RelaisModelPathResolutionTest`.
+   *
+   * Precedence, each step gated on the answer actually belonging to [modelId]:
+   *  1. the in-memory cache, **only when [cachedId] is [modelId]** — the tag is what makes a
+   *     post-switch read miss instead of serving the outgoing model;
+   *  2. the provisioned registry (#180), which is keyed by id and so can answer for ANY model on
+   *     the device, including a swap target that is not the configured one;
+   *  3. the persisted `KEY_MODEL_PATH`, **only when [modelId] is [configuredId]** — that pref holds
+   *     a single un-keyed path and is cleared on every id change, so it describes the configured
+   *     model and nothing else. Handing it to another id would re-create #337 one rung lower;
+   *  4. [defaultPath], the conventional side-load location.
+   *
+   * Steps 1–3 are skipped when the file is gone (a model deleted out from under the registry), so a
+   * pruned entry degrades to the next source instead of returning a path that cannot load. Step 4
+   * is returned UNCHECKED: it is where a provision will write, and a missing file there is reported
+   * by [RelaisEngine.ensureInitialized]'s own `require`, which names the path.
+   *
+   * [fileExists] has no default, deliberately: with one, a whole table of cases would silently run
+   * against the real filesystem and stop discriminating.
+   */
+  internal fun resolveModelPath(
+    modelId: String,
+    cachedId: String?,
+    cachedPath: String?,
+    configuredId: String,
+    persistedPath: String?,
+    provisioned: List<ProvisionedModel>,
+    defaultPath: String,
+    fileExists: (String) -> Boolean,
+  ): String {
+    val fromCache = cachedPath?.takeIf { cachedId == modelId }
+    val fromRegistry = swapTargetFor(modelId, provisioned)?.path
+    val fromPrefs = persistedPath?.takeIf { modelId == configuredId }
+    return listOfNotNull(fromCache, fromRegistry, fromPrefs).firstOrNull(fileExists) ?: defaultPath
+  }
 
   /**
    * Enqueues [DownloadWorker] with the same [Data] contract as
