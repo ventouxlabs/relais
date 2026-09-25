@@ -6,6 +6,131 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
+## 2026-09-24 — ⏩ START HERE. **feature-22 is DONE and merged. #337's correctness half is BUILT, fully verified and UNPUSHED on `fix/337-model-path-id-binding` (4 commits over `1dad086b`). Next: push, open the PR, then answer the two open reviewer questions.**
+
+`main` = `1dad086b` (#344). #342 merged PR-B (`ac71c3a7`) and auto-closed #336 — **feature-22 is complete**; Task 6 was decided by measurement, so no code remains in it.
+
+### Branch `fix/337-model-path-id-binding` — 4 commits, NOT pushed, green
+
+```
+0b7efdc8 fix(model): round-4 review fixes — required persistForId, id-consistent staged-adoption gate, stale-claim sweep
+d6016d9f fix(model): close both review findings — tear-proof the cache pair, id-gate the default path
+c32eae1f test(model): pin the cache's WRITE side — the id a path is tagged with (#337)
+19af1143 fix(model): resolve the model path FOR an id, not 'whatever was last provisioned'
+```
+9 files, +716/−45. **Verified 2026-09-24 after the contamination fix below:** three flavors
+**1493 tests each, 0 failures** (`--rerun-tasks`, XML-verified), `compileFullOpenDebugAndroidTestKotlin`
+green, **11/11 mutations killed**, working tree clean afterwards.
+
+**The defect.** `RelaisModelProvisioner`'s in-memory path cache was a bare `String?` with no record of
+which model it held weights for. `setModelId`/`setModelRef` both clear the durable `KEY_MODEL_PATH` on
+an id change, but nothing invalidated the process-local cache — so after a switch
+`cachedPathOrDefault(context)` returned the OUTGOING model's file, `ensureInitialized` paired it with
+the INCOMING id and wrote both as resident. Old weights served under the new id, and #180's mismatch
+check then saw `residentModelId == configured` and never swapped. The symptom vanished across a
+process restart, which is why it read as flaky.
+
+**What shipped.** `cachedPath` → `cachedModelPath(modelId, path)`, tagged by `remember` with the same
+id the persist gate keys on · `cachedPathOrDefault(context)` → **`pathFor(context, modelId)`**, id
+required, returning `String?` · a pure `resolveModelPath`: cache (id-gated) → provisioned registry
+(id-keyed) → `KEY_MODEL_PATH` (configured id only) → default path (**only for `DEFAULT_MODEL_ID`**) ·
+`ensureInitialized`'s `modelPath` defaults to null and resolves in the body, failing closed via
+`requireNotNull` **inside the try** · Configure's picks funnel through `ModelSwitch`.
+
+**Do not "simplify" these three — each is a fixed defect, and all are mutation-covered:**
+- `resolveModelPath` takes the whole `CachedModelPath?` **by value**, not an id and a path as two
+  parameters. Reading the `@Volatile` field twice is a torn read that pairs one write's id with
+  another's path, which makes the gate MATCH and returns the wrong file — #337 inside the function
+  written to close it. The old bare `cachedPath` was a *single* volatile read, atomic by construction.
+- **No parameter reorder in `ensureInitialized`.** Six call sites pass the path positionally and both
+  params are `String`, so reordering rebinds them with no compile error.
+- `ensureModel`'s staged-adoption gate reads `idAtStart`, the same id it tags with, hoisted to the
+  capture site. A gate reading a *different* id than the tag it authorises binds the default model's
+  file to another id — and `pathFor`'s rung 1 trusts the tag.
+
+### Review: two lanes, four rounds, and what they cost
+
+`code-reviewer` (opus) and `security-reviewer` ran in parallel and **independently found the same two
+HIGHs** — unusual here, where the lanes are normally disjoint ([[relais-dual-review-disjoint]]), and
+a strong signal both were real. Both were defects **I had written**:
+
+1. **Torn read** (above) — introduced by the first cut of the fix.
+2. **Rung 4 ungated** — the default path ends in one model's file name, and `ensureModel:332` already
+   gates its own adoption on `DEFAULT_MODEL_ID` for exactly that reason. Before the branch a
+   hand-typed id got the OUTGOING model's weights; after the first cut it got the DEFAULT model's.
+   Same class, one rung lower. **Taken into this PR** rather than filed, because shipping rungs 1–3
+   fixed and calling the class closed is the failure this repo has logged before.
+
+Round 4 then found a **split claim** — Configure's lock rationale was updated here while its paired
+twin in `RelaisControlPanelState.kt` still named the deleted `cachedPath`, three lines above a comment
+asserting the two screens never disagree. The earlier sweep missed it because it grepped
+`cachedPathOrDefault`, not `cachedPath`. Grep the *claim*, not the symbol you happened to rename.
+
+**Security verdict:** no CRITICAL, nothing blocking. Path traversal via a crafted model id is
+*unrepresentable* (the id is never joined into a path; the LAN lane never reaches `pathFor` because
+the swap passes a non-null `modelPath`). The branch closes a real MEDIUM **integrity** defect: every
+reporting surface — `/v1/models`, the response echo, the dashboard, the mDNS TXT record — agreed with
+the operator and all were wrong, and `resolveModelRequest`'s `requested == residentModelId` check made
+it self-sustaining, so nothing ever re-swapped.
+
+### Two tests that would have shipped as decoration
+
+- **A vacuous one of mine.** My first test for the staged-adoption gate passed with the fix reverted —
+  it never drove `ensureModel`, so nothing wrote the cache. Deleted, then rebuilt on the seam the
+  reviewer supplied: `RelaisConfig.prefs` is a plain per-call `getSharedPreferences`, so a
+  `ContextWrapper` that flips the id from inside the Nth read is synchronously equivalent to a racing
+  write. It asserts the flip *index* rather than hardcoding it, so a read-order change fails loudly
+  instead of going vacuous again. **Proven RED: with the gate reverted it is the only test that fails.**
+- **`ensureInitialized`'s `modelId` was a no-op at every call site** — `pathFor(ctx, modelId)` →
+  `pathFor(ctx, configuredId)` passed the whole suite. The new test discriminates on the failure path:
+  the configured model's file exists and the asked-about model's does not, so resolving for the wrong
+  one runs on to native while the right one fails first with a message naming it.
+
+### ⚠ The incident worth reading before you run the mutation harness
+
+Three sibling tests started failing with *false model→path bindings* — the exact defect class the
+branch closes — so it read as a regression in the fix. It was **contamination I caused**: while the
+background harness had `M2 cache id gate inverted` applied, I ran `cp <file> file.bak` to snapshot a
+"known good" copy, captured the **mutated** file, and later restored from it. One character (`!=` for
+`==`) went into the source and into a commit.
+
+- **A mutation harness owns its file for the whole run.** Never snapshot it mid-run, and never run a
+  background job that rewrites source while doing anything else to that source.
+- **After a harness run, diff the WHOLE file against the last good commit.** I checked the gate line,
+  saw it correct, and called the tree clean while an inverted gate sat 200 lines away.
+- What finally found it was a `python` replacement asserting `count == 1` and **failing** — proving
+  the line I had been hand-tracing for twenty minutes did not exist on disk. Recorded in
+  [[mutation-testing-own-failure-modes]].
+
+Two more traps fired and were caught: a `BUILD SUCCESSFUL` whose XML was **stale** because the task was
+up-to-date and never ran (always `--rerun-tasks` when a mutation is applied), and the harness reporting
+`NOT APPLIED` — never `SURVIVED` — three separate times as fixes moved its target lines.
+
+### Next, in order
+
+1. `git push -u origin fix/337-model-path-id-binding`, open the PR. **#337 stays OPEN**: this is the
+   correctness half only. The MODEL row is still locked while idle; unlocking means dispatching a
+   targeted swap from Configure plus hardware verification. Say so in the PR body so nobody reads
+   "fixed" and unlocks the row.
+2. Two reviewer questions are still unanswered — the `f337-review` agent has them: **MEDIUM-4 onward**
+   (its report truncated), and whether **`RelaisHttpServer.kt:1427`** (`if (!RelaisEngine.isReady)
+   return false`, which skips model classification entirely while idle-unloaded) is a defect in its
+   own right worth filing.
+3. Follow-ups accepted but deliberately NOT in this PR: `remember` returns the superseded path on the
+   issue-#11 drift branch, which `RelaisNodeService.kt:281` pairs with a fresh id read (the new
+   resolver never runs there, `modelPath` is non-null) · `resolveModel` re-reads the id mid-provision,
+   so the download can be for a different model than `idAtStart` · **`residentModelId` still derives
+   from the PARAMETER, not from the file loaded** — resolving `(path, id)` as one value at a single
+   choke point is the durable end of this class, the same move made inside `resolveModelPath`, one
+   level up.
+4. Open issues: **#343** (widget never refreshes on a node state change — filed 2026-09-22, a render
+   that left the buttons disabled cannot be tapped back to life), #337, plus #300 #288 #122 #102 #97
+   #69, none blocking.
+5. Carried forward, unchanged: BouncyCastle 1.78.1 → 1.85 after the R8 baseline (needs an on-device
+   *inference* check) · `RelaisHttpServer.kt` must be **extracted** from, not appended to.
+
+---
+
 ## 2026-09-22 — ⏩ START HERE. **feature-22 is COMPLETE. PR-B MERGED as #342 (`ac71c3a7`), #336 auto-closed, CI green (Build Android APK 11m4s, JVM unit tests 8m11s). The widget half is DEVICE-SMOKED — the widget was already on rango all along. One new issue filed (#343). Nothing is in flight.**
 
 `main` = `ac71c3a7` (#342). PR-A merged as #339. PR-B was branch `feat/22-idle-unload-b`, head `9eb9addf`, 18 commits — squash-merged 2026-09-22 11:35 UTC.
