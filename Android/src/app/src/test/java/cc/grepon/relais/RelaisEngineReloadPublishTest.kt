@@ -54,7 +54,12 @@ class RelaisEngineReloadPublishTest {
     assertFalse("precondition: no startup in flight", RelaisLivenessState.snapshot.startupInProgress)
     // The background path resolves the default model path; it must NOT exist, or the attempt would
     // reach native engine-create instead of failing fast at `require`.
-    val defaultPath = RelaisModelProvisioner.cachedPathOrDefault(ctx)
+    // Non-null here because a Robolectric context reports the DEFAULT model id, which is the one
+    // id the default path is allowed to answer for (#337's rung-4 gate).
+    val defaultPath =
+      requireNotNull(RelaisModelProvisioner.pathFor(ctx, RelaisConfig.modelId(ctx))) {
+        "expected the default model id to resolve to the default path"
+      }
     assertFalse("precondition: default model path must not exist ($defaultPath)", File(defaultPath).exists())
     RelaisEngine.lastInitFailed = false
     RelaisLivenessState.publishIdleUnloaded(false)
@@ -78,6 +83,39 @@ class RelaisEngineReloadPublishTest {
     assertFalse("idleUnloaded is cleared at attempt start, not on success", after.idleUnloaded)
     assertFalse("endStartup() must run in the finally — a leaked begin shields the watchdog forever", after.startupInProgress)
     assertTrue("a throwing attempt records lastInitFailed so the node reads ERROR, not IDLE", RelaisEngine.lastInitFailed)
+  }
+
+  /**
+   * `ensureInitialized`'s `modelId` actually steers resolution (#337).
+   *
+   * Without this, the parameter the KDoc calls load-bearing is a no-op at every call site in the
+   * tree: every caller that omits `modelPath` also omits `modelId`, and every caller that passes a
+   * non-default `modelId` passes `modelPath` too, skipping resolution entirely. Replacing
+   * `pathFor(context, modelId)` with `pathFor(context, RelaisConfig.modelId(context))` would pass
+   * the whole suite.
+   *
+   * The discriminator is the failure: the configured model has a path on disk that EXISTS, and the
+   * asked-about model has nothing. Resolving for the configured id would therefore succeed and run
+   * on to native engine-create; resolving for the asked-about id fails first, and the message names
+   * which model could not be located.
+   */
+  @Test fun `the modelId argument steers resolution, not the configured id`() {
+    val configured = File(ctx.cacheDir, "configured-model.litertlm").apply { writeBytes(byteArrayOf(0x00)) }
+    try {
+      RelaisConfig.setModelId(ctx, "configured/id")
+      RelaisConfig.setModelPath(ctx, configured.absolutePath) // set AFTER the id: setModelId clears it
+
+      val thrown = assertThrows(IllegalArgumentException::class.java) {
+        RelaisEngine.ensureInitialized(ctx, modelId = "asked/about")
+      }
+      assertTrue(
+        "the failure must name the model that was ASKED about, not the configured one — " +
+          "message was: ${thrown.message}",
+        thrown.message?.contains("asked/about") == true,
+      )
+    } finally {
+      configured.delete()
+    }
   }
 
   /**
@@ -123,10 +161,11 @@ class RelaisEngineReloadPublishTest {
    * PLUS the outer thread's `finally` (which ends the caller-side begin too) before this test's next
    * line reads the snapshot back — a genuine scheduling race, not a hypothetical one. Pin it
    * deterministically by holding the worker at the first `Context` call `ensureInitialized`'s
-   * default arguments make (`RelaisModelProvisioner.cachedPathOrDefault` / `RelaisConfig.modelId`
-   * both resolve through `RelaisConfig`'s private `prefs(context)`, i.e. `getSharedPreferences` —
-   * whichever of the two resolves first, that is always the first Context touch) — well before the
-   * worker can even enter `ensureInitialized`'s body, let alone its own begin/end pair.
+   * sole Context-touching default argument makes (`modelId = RelaisConfig.modelId(context)`, which
+   * resolves through `RelaisConfig`'s private `prefs(context)`, i.e. `getSharedPreferences`). Since
+   * #337 that is the ONLY default that touches Context — `modelPath` defaults to null and is
+   * resolved inside the body — so the latch fires strictly before the body, well before the worker
+   * can enter `ensureInitialized`'s begin/end pair.
    */
   @Test fun `the background reload publishes STARTING on the caller before returning`() {
     RelaisLivenessState.publishIdleUnloaded(true)

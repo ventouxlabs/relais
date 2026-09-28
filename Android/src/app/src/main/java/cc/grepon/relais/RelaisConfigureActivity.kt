@@ -146,12 +146,14 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
     }
   }
   // Same lockout rule as the home screen's MODEL row (P6): a mid-download model change could
-  // resurrect a superseded path once the in-flight ensureModel() resolves. DELIBERATELY still locked
-  // while idle-unloaded (feature-22): `onPickRef` below only persists the ref — nothing dispatches a
-  // swap — and the request-driven reload pairs `cachedPathOrDefault` with the new configured id,
-  // which loads the OLD weights under the NEW id with no error anywhere (the case
-  // `ModelSwitch.applyManualId`'s KDoc describes). The dashboard's targeted swap is the mechanism
-  // that works while idle; routing this pick through it is #337. Only the caption changes.
+  // resurrect a superseded path once the in-flight ensureModel() resolves. Still locked while
+  // idle-unloaded, but the reason has narrowed: #337's first half closed the CORRECTNESS hole (the
+  // reload used to pair the outgoing model's cached path with the incoming id and serve old weights
+  // under the new id; `RelaisModelProvisioner.pathFor` now resolves the path FOR an id, so a pick
+  // made while idle reloads the model that was actually picked). What remains is that `onPickRef`
+  // below only persists the selection — nothing dispatches a swap — so the pick takes effect lazily
+  // on the next reload rather than immediately. Unlocking the row means routing this pick through
+  // the dashboard's targeted swap and verifying it on hardware: the open half of #337.
   val nodeBusy = running && !ready
 
   var modelId by remember { mutableStateOf(RelaisConfig.modelId(ctx)) }
@@ -363,7 +365,10 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
         // authenticate with the persisted token, so a gated repo needs SAVE HF TOKEN first.
         hfToken = RelaisConfig.hfToken(ctx),
         onPickRef = { ref ->
-          RelaisConfig.setModelRef(ctx, ref)
+          // Through ModelSwitch like every other surface (#337): identical behaviour to the former
+          // direct RelaisConfig.setModelRef call, but the id is no longer written anywhere that has
+          // not confronted the "which path does this id mean?" question.
+          ModelSwitch.applyRef(ctx, ref)
           modelRef = ref
           modelId = ref.modelId
           // Show the resolved file, not just the repo — an HF repo can hold several .litertlm
@@ -374,8 +379,9 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
         onPickManualId = { id ->
           // Entering a raw id is an explicit "resolve this via the allowlist" intent, so drop any
           // curated ref first — otherwise the pinned ref would keep overriding allowlist resolution.
-          RelaisConfig.clearModelRef(ctx)
-          RelaisConfig.setModelId(ctx, id)
+          // resolvedPath = null is the honest answer here: this screen does NOT bypass
+          // RelaisModelProvisioner.resolveModel, so the reload resolves and remembers on its own.
+          ModelSwitch.applyManualId(ctx, id, resolvedPath = null)
           modelRef = null
           modelId = id
           modelNote = "Set model id $id. Restart to apply."

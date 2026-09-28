@@ -61,7 +61,7 @@ import org.junit.runners.MethodSorters
  *     -e RELAIS_PROBE 1 com.ventouxlabs.relais.izzy.test/androidx.test.runner.AndroidJUnitRunner
  *   # in another shell: adb logcat -s RelaisIdleUnloadProbe:*
  *
- * Requires a staged model at [RelaisModelProvisioner.cachedPathOrDefault] (`assumeTrue`-skipped
+ * Requires a staged model at [RelaisModelProvisioner.pathFor] for the configured id (`assumeTrue`-skipped
  * otherwise) and destructive cycles belong on the spare Pixel 10 (`rango`), never the live node — a
  * keyguard/asleep device fakes mass failures across every test in this class, so unlock first.
  *
@@ -123,8 +123,11 @@ class IdleUnloadProbe {
   @Before
   fun setUp() {
     assumeTrue("On-device probe; pass -e RELAIS_PROBE 1 to run", args.getString("RELAIS_PROBE") == "1")
-    val modelPath = RelaisModelProvisioner.cachedPathOrDefault(context)
-    assumeTrue("no staged model at $modelPath — provision one before running this probe", File(modelPath).exists())
+    val modelPath = RelaisModelProvisioner.pathFor(context, RelaisConfig.modelId(context))
+    assumeTrue(
+      "no model file on this device for ${RelaisConfig.modelId(context)} — provision one before running this probe",
+      modelPath != null && File(modelPath).exists(),
+    )
 
     nodeWasRunning = RelaisConfig.shouldRun(context)
     // @After always runs — even when @Before throws or skips via assumeTrue above (JUnit's

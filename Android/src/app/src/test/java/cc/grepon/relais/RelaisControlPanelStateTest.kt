@@ -683,11 +683,10 @@ class RelaisControlPanelStateTest {
     assertFalse("idle is the quiet default, not an attention state", s.detailLineBright)
     assertFalse(s.showProgressBar)
     assertNull(s.progressFraction)
-    // The MODEL row is LOCKED on IDLE, with the same caption Configure shows (#337): the panel's
-    // picker persists the new path through the download funnel, but `cachedPath` is never
-    // invalidated on an id change, so until `remember` completes an idle reload can pair the OLD
-    // path with the NEW id. Locking here does not close that window (MODELS is one bottom-nav tap
-    // away) — it refuses to widen it onto the surface the operator is looking at.
+    // The MODEL row is LOCKED on IDLE, with the same caption Configure shows. #337's first half
+    // closed the pairing defect this lock originally guarded — the resolver is id-bound now — so
+    // what the lock still buys is that a pick made while idle is LAZY: nothing dispatches a swap,
+    // so it lands on the next reload rather than immediately. Unlocking is the open half of #337.
     assertFalse(s.modelRowEnabled)
     assertEquals("model locked while engine released · switch from the dashboard", s.modelLockedCaption)
   }
