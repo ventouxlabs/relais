@@ -583,15 +583,28 @@ object RelaisEngine {
           // would take a healthy node down until an operator restarted it.
           val previousPath = residentModelPath
           val previousId = residentModelId
+          // #347: a swap can now start from an idle-unloaded node. Captured before shutdown(), which
+          // clears idleUnloaded, so a failed swap can put the node back exactly as it found it.
+          val wasReady = isReady
+          val wasIdleUnloaded = RelaisLivenessState.snapshot.idleUnloaded
           shutdown() // close the OLD engine only now that the NEW one is confirmed present on disk
           try {
             ensureInitialized(context, modelPath = path, modelId = configuredModelId)
             swapped = true
           } catch (t: Throwable) {
-            Log.w(TAG, "swap to $configuredModelId failed (${t.message}); restoring $previousId")
-            if (previousPath != null && previousId != null) {
-              runCatching { ensureInitialized(context, modelPath = previousPath, modelId = previousId) }
-                .onFailure { Log.e(TAG, "could not restore previous model $previousId: ${it.message}") }
+            val restore = swapRollbackTarget(wasReady, previousPath, previousId)
+            if (restore != null) {
+              Log.w(TAG, "swap to $configuredModelId failed (${t.message}); restoring ${restore.second}")
+              runCatching { ensureInitialized(context, modelPath = restore.first, modelId = restore.second) }
+                .onFailure { Log.e(TAG, "could not restore previous model ${restore.second}: ${it.message}") }
+            } else {
+              Log.w(TAG, "swap to $configuredModelId failed (${t.message}); no engine was up, leaving it unloaded")
+              if (wasIdleUnloaded) {
+                // Back to the idle state the swap found: the failed attempt set lastInitFailed and
+                // shutdown() cleared idleUnloaded, which together read as a dead node to the watchdog.
+                lastInitFailed = false
+                RelaisLivenessState.publishIdleUnloaded(true)
+              }
             }
             // Deliberately NOT rethrown. The failure is fully handled here — rolled back and logged —
             // and this is a bare thread: the outer handler catches Exception, so an Error (a native
@@ -1122,8 +1135,13 @@ object RelaisEngine {
   private fun closeEngine() {
     synchronized(lock) {
       try {
-        engine?.close()
-        consecutiveCloseFailures = 0
+        // Only a close that actually ran resets the breaker ("reset to 0 on any successful close").
+        // A swap now reaches here from an idle node (#347) with no engine at all; resetting there
+        // would re-arm idle-TTL's teardown after repeated close failures without a single close.
+        engine?.let {
+          it.close()
+          consecutiveCloseFailures = 0
+        }
       } catch (e: Exception) {
         Log.e(TAG, "Error closing engine", e)
         consecutiveCloseFailures++
