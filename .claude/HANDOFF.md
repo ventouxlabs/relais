@@ -6,6 +6,55 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
+## 2026-09-27 — ⏩ START HERE. **#346 MERGED (`f12caa6c`). Its review follow-ups are PR #348, CI green, independently APPROVED, awaiting merge. #347 filed (idle-unload skips model classification). #337 stays OPEN (UI half).**
+
+`main` = `f12caa6c`. The 2026-09-24 section below is superseded on its steps 1–2: the PR was opened and merged as #346, and both open reviewer questions are answered.
+
+### PR #348 — `fix/346-review-followups`, 1 commit (`6e2b9081`), NOT merged
+
+**Unit tests:** three flavors, `--rerun-tasks`, counts from the XML: **1495 each, 0 failures** (1493 + 2 new). **CI:** Build Android APK, JVM unit tests and the scan jobs all pass. **Mutations:** four, each killed by the intended test. **Review:** the independent `code-reviewer` went REQUEST CHANGES → APPROVE. **Not hardware-verified**; the one code change is prefs-only.
+
+- **The defect.** A manual pick of the id a ref already names never applied, not even after STOP/START. The G5 TPU E2B ref shares its id with the allowlist GPU build, and Gemma3-1B-IT collides the same way. `clearModelRef` dropped only the ref; `setModelId` clears `KEY_MODEL_PATH` only when the id changes; so `ensureModel`'s first fast path re-adopted the ref's file. **Fix:** `RelaisConfig.clearModelRef` removes the path **when a ref was present**. It keeps the path when there was no ref, because an offline node boots from it. `ModelSwitchTest` pins both directions: a mutation that drops the clear and one that makes it unconditional each kill a different test.
+- **MEDIUM-4 was downgraded to a comment fix. Do not "fix" it with a file-name gate.** The cache and registry are keyed by model id, not build. After a same-id build pick, an idle reload serves the previous BUILD of the SAME model, and every reported id stays true. Configure says "Restart to apply", and STOP destroys the engine (`RelaisNodeService.kt:574` → `RelaisEngine.shutdown()`). A file-name gate would turn that announced deferral into an idle-reload ERROR for a build not yet downloaded. The reviewer verified that `residentIsTpu`, the #220 compat gate, `/v1/models`, the swap and the watchdog all stay truthful.
+- **Comments now say what the code does:**
+  - An idle reload only RESOLVES (`pathFor`); it never downloads and never `remember`s. Only `ensureModel` on a START does.
+  - A not-yet-downloaded pick fails closed to ERROR until the next START, by the operator or the watchdog's revive.
+  - Copies of the old claim were fixed in Configure, the control panel, `ModelSwitch`, `RelaisHttpPages`, `ChatViewModel` and the Provisioner KDoc.
+- **Tests:**
+  - The staged-adoption test's tautological `flippedAt` assertion is replaced. The test now also kills an extra prefs read inserted before the `idAtStart` capture, which the old version would have passed.
+  - Added `resetPathCacheForTest()`, called from `@Before` in the two test classes that read the cache.
+  - `assertNotEquals` → `assertNull`.
+
+### #347 — filed, not started
+
+The first chat request after an idle unload is served by the **configured** model whatever `model` the client named, with the client's id echoed back. Unknown and incompatible ids get a 200 instead of a 404.
+- **Where:** `RelaisHttpServer.kt:1427` and `RelaisModelSwap.kt:101` skip classification on `!isReady`, on the premise that "the normal not-ready path (503) owns this."
+- **Why the premise is false:** that is true only for `/v1/audio/*` (`:846`). The chat and messages lanes lazily re-init the configured model inside `RelaisEngine.generate` (`:764`).
+- **Reach:** idle-unload is on by default (15 min).
+- **Test to flip:** `RelaisModelSwapTest.kt:61` currently pins the buggy behaviour.
+- **Fix sketch** (in the issue): classify even when not ready; eligibility comes from the on-disk registry, which does not depend on readiness.
+
+### Lesson from this session
+
+Both review passes produced findings where **a comment was true for one lane and false for its sibling**. "Restart to apply" holds for ref picks but not for manual same-id picks. "The swap resolves through `pathFor`" holds for a targeted swap, not a null-target swap. When a claim names a mechanism ("setModelRef cleared the fast path"), grep for **every other writer of the same state** (`clearModelRef`, `setModelId`) before believing it. This is the [[grep-before-inventing]] rule applied to comments.
+
+### Next, in order
+
+1. **Merge #348.** CI is green and the review approved it.
+2. **#347.** It is the same class as #337: a model served under an id it isn't. It needs a hardware check on the first request after a real idle unload.
+3. **#337's UI half:** unlock the MODEL row while idle by routing the Configure pick through the dashboard's targeted swap. Needs hardware verification.
+4. **Follow-ups listed in #348 but not filed as issues:**
+   - The dashboard's `pendingModelIdFor` compares ids only, so a pending same-id build pick looks applied.
+   - On a Pixel 10, a manual pick of the default E4B id is replaced by `G5_DEFAULT_REF` on START. Fixing it needs an "operator chose" flag.
+   - LOW-2: `pathFor` and `ensureModel` pair a path and an id from separate prefs reads.
+   - Carried over from #346: `remember` returns the superseded path on the drift branch; `resolveModel` re-reads the id mid-provision; `residentModelId` derives from the parameter, not from the file loaded.
+5. **Unchanged:**
+   - Open issues: #343, plus #300 #288 #122 #102 #97 #69.
+   - Bump BouncyCastle 1.78.1 → 1.85 after the R8 baseline.
+   - `RelaisHttpServer.kt` is **2830** lines (measured 2026-09-27): extract from it, don't append.
+
+---
+
 ## 2026-09-24 — ⏩ START HERE. **feature-22 is DONE and merged. #337's correctness half is BUILT, fully verified and UNPUSHED on `fix/337-model-path-id-binding` (4 commits over `1dad086b`). Next: push, open the PR, then answer the two open reviewer questions.**
 
 `main` = `1dad086b` (#344). #342 merged PR-B (`ac71c3a7`) and auto-closed #336 — **feature-22 is complete**; Task 6 was decided by measurement, so no code remains in it.
