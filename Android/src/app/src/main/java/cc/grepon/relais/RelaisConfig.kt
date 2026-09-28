@@ -285,9 +285,22 @@ object RelaisConfig {
     prefs(context).edit().putString(KEY_PROVISIONED_MODELS, encodeProvisioned(entries)).apply()
   }
 
-  /** Drops the persisted ref (e.g. reverting to a pure allowlist id). Leaves [KEY_MODEL_ID] intact. */
+  /**
+   * Drops the persisted ref (e.g. reverting to a pure allowlist id). Leaves [KEY_MODEL_ID] intact.
+   *
+   * Also drops [KEY_MODEL_PATH] when a ref WAS present, for the reason [setModelRef] clears it on a
+   * change: that path is the ref's BUILD, and one id can name several builds (the G5 TPU ref shares
+   * its id with the allowlist GPU build). A manual pick of the same id leaves the id unchanged, so
+   * [setModelId] keeps the path, and ensureModel's first fast path re-adopts the ref's file on the
+   * very restart that was meant to apply the pick. With no ref there is no other build to fall back
+   * from, and keeping the path is what lets an offline node boot without the allowlist. One editor,
+   * one commit, matching [setModelRef].
+   */
   fun clearModelRef(context: Context) {
-    prefs(context).edit().remove(KEY_MODEL_REF).apply()
+    val p = prefs(context)
+    val edit = p.edit().remove(KEY_MODEL_REF)
+    if (p.contains(KEY_MODEL_REF)) edit.remove(KEY_MODEL_PATH)
+    edit.apply()
   }
 
   /**

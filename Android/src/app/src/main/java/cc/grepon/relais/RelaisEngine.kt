@@ -424,9 +424,12 @@ object RelaisEngine {
         // and resolving here keeps the failure INSIDE this try, so an unresolvable model records
         // `lastInitFailed` and publishes `endStartup` exactly like a missing file does, instead of
         // throwing past the bookkeeping and leaving the node's state machine unaware.
-        // Resolving in the body also means the id is read ONCE — the old pair of defaults each
-        // called RelaisConfig.modelId independently, so an id change landing between them could
-        // pair a path resolved for one model with the other model's id.
+        // Resolving in the body also means the id the path is resolved FOR and the id it is
+        // published under are one value — the old pair of defaults each called
+        // RelaisConfig.modelId independently, so an id change landing between them could pair a
+        // path resolved for one model with the other model's id. (pathFor still reads the
+        // configured id and KEY_MODEL_PATH as two separate prefs reads for its rung-3 gate; that
+        // microsecond window is a known, unfixed follow-up.)
         val resolvedPath =
           requireNotNull(modelPath ?: RelaisModelProvisioner.pathFor(context, modelId)) {
             // Deliberately a failure rather than a fallback: the only paths left to guess with

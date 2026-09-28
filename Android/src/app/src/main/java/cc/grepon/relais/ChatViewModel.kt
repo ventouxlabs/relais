@@ -592,8 +592,9 @@ class ChatViewModel @JvmOverloads constructor(
 
   /** Switches to a raw manual id (dropping any curated ref) and reflects the reload. */
   fun switchToManualId(modelId: String) {
-    // resolvedPath = null: this surface resolves through the allowlist on reload, so it is NOT
-    // bypassing resolveModel and must not pre-empt the path the provisioner will record.
+    // resolvedPath = null: this surface holds no path to hand over. The reload resolves the id with
+    // RelaisModelProvisioner.pathFor (on-device sources only — no allowlist, no download), and the
+    // next START's ensureModel is what records a path; this must not pre-empt that.
     ModelSwitch.applyManualId(getApplication(), modelId, resolvedPath = null)
     observeReload()
   }

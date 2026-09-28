@@ -50,13 +50,17 @@ object ModelSwitch {
    *
    *  - **A path** — the caller already knows where the model lives and is BYPASSING
    *    [RelaisModelProvisioner.resolveModel] (the dashboard's targeted swap does exactly this).
-   *    `resolveModel` is the only caller of [RelaisModelProvisioner.remember], so a bypass that
-   *    persists the id alone leaves the cached and durable path naming the OUTGOING model. The next
-   *    reload after an idle unload then loads the old weights under the new id and serves them with
-   *    no error anywhere. **Whoever bypasses resolution owns updating the cache.**
-   *  - **null** — no bypass. The reload re-resolves and `remember` runs on its own. The in-app
-   *    surfaces ([ChatViewModel], [ModelsScreen]) are in this case: their models arrive through the
-   *    download/provision funnel, which already persists the path.
+   *    [RelaisModelProvisioner.remember] runs only inside [RelaisModelProvisioner.ensureModel]'s
+   *    provisioning branches and here, so a bypass that persists the id alone leaves the cached and
+   *    durable path naming the OUTGOING model. Before #337's resolver fix the next idle reload then
+   *    served the old weights under the new id; `pathFor` is id-bound now, so it falls through to
+   *    the registry or fails closed instead — but the durable fast path a restart boots from would
+   *    still be empty. **Whoever bypasses resolution owns updating the cache.**
+   *  - **null** — no bypass. The next START provisions the id through `ensureModel`, which runs
+   *    `remember` itself; an idle reload before then only resolves, never remembers. The in-app
+   *    surfaces ([ChatViewModel], [ModelsScreen]) are in this case. [ModelsScreen]'s download runs
+   *    `ensureModel` and so persists the path; [ChatViewModel]'s pick does not, and its model is
+   *    found by `pathFor` only if it is already on the device.
    *
    * **Order is load-bearing.** [RelaisConfig.setModelId] must run BEFORE `remember`, because
    * `remember` persists only when [RelaisModelProvisioner.shouldPersistPath] finds `persistForId`

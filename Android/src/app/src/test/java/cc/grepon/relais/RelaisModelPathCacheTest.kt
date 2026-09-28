@@ -15,7 +15,8 @@ package cc.grepon.relais
 import androidx.test.core.app.ApplicationProvider
 import java.io.File
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -45,8 +46,11 @@ class RelaisModelPathCacheTest {
 
     /**
      * The prefs read to flip the model id on: one call after `ensureModel`'s `idAtStart` capture
-     * (modelRef, modelId, idAtStart, then modelPath for fast path 1). Asserted in the test, never
-     * assumed — a read-order change must fail loudly rather than silently flipping too late.
+     * (modelRef, modelId, idAtStart, then modelPath for fast path 1). Not asserted by counting —
+     * a counter only proves the Nth read happened, not which read it was. The test instead asserts
+     * that the staged file reached neither the registry nor the persisted path: if a read-order
+     * change moved the capture to or past this call, `idAtStart` would be the flipped DEFAULT id,
+     * adoption would be legitimate, `remember` would persist it, and that assertion fails loudly.
      */
     const val FLIP_ON_PREFS_CALL = 4
   }
@@ -62,6 +66,8 @@ class RelaisModelPathCacheTest {
     // registry has a public setter.
     RelaisConfig.setModelId(ctx, "test/reset-${System.nanoTime()}")
     RelaisConfig.setProvisionedModels(ctx, emptyList())
+    // The cache lives on an object that outlives a test in a shared Robolectric sandbox.
+    RelaisModelProvisioner.resetPathCacheForTest()
   }
 
   @Test
@@ -83,9 +89,10 @@ class RelaisModelPathCacheTest {
 
     RelaisConfig.setModelId(ctx, "beta")
 
-    assertNotEquals(
+    // Null, not merely "not alpha": beta is nowhere on the device, so any path at all is a wrong
+    // answer — assertNotEquals(alpha) would also pass for some third model's file.
+    assertNull(
       "an idle reload for beta must not be handed alpha's weights",
-      alpha,
       RelaisModelProvisioner.pathFor(ctx, "beta"),
     )
   }
@@ -100,9 +107,8 @@ class RelaisModelPathCacheTest {
     RelaisConfig.setModelId(ctx, "incoming")
     RelaisModelProvisioner.remember(ctx, superseded, persistForId = "outgoing")
 
-    assertNotEquals(
+    assertNull(
       "a path fetched for the outgoing id must not answer for the incoming one",
-      superseded,
       RelaisModelProvisioner.pathFor(ctx, "incoming"),
     )
     assertEquals(
@@ -129,16 +135,13 @@ class RelaisModelPathCacheTest {
     RelaisConfig.setModelPath(ctx, File(ctx.cacheDir, "absent.litertlm").absolutePath)
 
     var prefsCalls = 0
-    var flippedAt = -1
     val flipping = object : android.content.ContextWrapper(ctx) {
       override fun getSharedPreferences(name: String?, mode: Int): android.content.SharedPreferences {
         val real = super.getSharedPreferences(name, mode)
         prefsCalls++
-        // One call AFTER idAtStart is captured. Asserted below rather than trusted: if a future
-        // read-order change moves the capture, the flip would land after the gate and this test
-        // would go quietly vacuous instead of failing.
+        // One call AFTER idAtStart is captured — see FLIP_ON_PREFS_CALL for how a read-order change
+        // that moves the capture is caught.
         if (prefsCalls == FLIP_ON_PREFS_CALL) {
-          flippedAt = prefsCalls
           real.edit().putString("model_id", RelaisConfig.DEFAULT_MODEL_ID).commit()
         }
         return real
@@ -150,16 +153,25 @@ class RelaisModelPathCacheTest {
       // reach the network under Robolectric. The throw is expected; the binding is the assertion.
       runCatching { RelaisModelProvisioner.ensureModel(flipping) }
 
-      assertEquals("the flip must land after idAtStart is captured, not later", FLIP_ON_PREFS_CALL, flippedAt)
       assertEquals(
         "the id really did change mid-call, or the test proves nothing",
         RelaisConfig.DEFAULT_MODEL_ID,
         RelaisConfig.modelId(ctx),
       )
-      assertNotEquals(
+      // Catches the gate re-reading the id: adoption tagged OPERATOR_ID lands only in the cache
+      // (the drift gate refuses to persist it), so only pathFor sees it.
+      assertNull(
         "the default model's file must never be remembered under the operator's id",
-        staged.absolutePath,
         RelaisModelProvisioner.pathFor(ctx, OPERATOR_ID),
+      )
+      // Catches the flip landing at or before the capture: idAtStart would then BE the default id,
+      // adoption would be legitimate and PERSISTED, and the gate above would pass for the wrong
+      // reason. With the capture before the flip, nothing is remembered at all.
+      assertFalse(
+        "the staged file must not have been adopted under any id — if it was, the flip landed " +
+          "before idAtStart was captured and this test no longer exercises the gate",
+        RelaisConfig.provisionedModels(ctx).any { it.path == staged.absolutePath } ||
+          RelaisConfig.modelPath(ctx) == staged.absolutePath,
       )
     } finally {
       staged.delete()

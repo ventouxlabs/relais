@@ -50,6 +50,11 @@ data class ProvisionedModel(val modelId: String, val path: String, val displayNa
  * Upsert by [ProvisionedModel.modelId]. Re-provisioning the same id must REPLACE rather than
  * duplicate — the path changes when a model is re-downloaded at a new commit hash, and a stale
  * duplicate would let a swap resolve to a file that no longer exists.
+ *
+ * Consequence: the registry holds ONE build per id. Two builds sharing an id (the G5 TPU and GPU
+ * builds of E2B) replace each other, the last provisioned wins, and a swap to that id loads it.
+ * Id-level resolution is the right grain for the swap lane — a LAN client can only name an id — but
+ * it is not a record of every file on the device.
  */
 fun upsertProvisioned(
   existing: List<ProvisionedModel>,

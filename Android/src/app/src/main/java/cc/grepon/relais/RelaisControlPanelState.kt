@@ -152,11 +152,15 @@ fun computeControlPanelState(
   // resolves. A failed attempt is not "provisioning" — the row must stay open so the likely fix
   // (a different model/token) is reachable without a detour.
   // Also locked on IDLE. The reason has narrowed since #337's first half: the resolver is now
-  // id-bound (`RelaisModelProvisioner.pathFor` resolves a path FOR a model id and refuses every
-  // source that belongs to a different one), so an idle reload after a pick loads the model that
-  // was actually picked. What remains is that the pick is LAZY — nothing dispatches a swap, so it
-  // takes effect on the next reload rather than immediately. Unlocking means routing the pick
-  // through the dashboard's targeted swap and verifying on hardware: the open half of #337.
+  // id-bound (`RelaisModelProvisioner.pathFor` resolves a path FOR a model id and never hands one
+  // model id's file to another; it is keyed by id, not build). It resolves but never provisions, so
+  // an idle reload after a pick loads the picked model only when it is already on the device — a
+  // not-yet-downloaded pick fails closed to ERROR until the next START (the operator's, or the
+  // watchdog's revive) provisions it, and a same-id build pick reloads the previous build.
+  // Nothing dispatches a swap, so a pick waits for a restart or the
+  // next reload. Unlocking means routing the pick through the dashboard's targeted swap and
+  // verifying on hardware: the open half of #337. Keep in step with the twin in
+  // RelaisConfigureActivity.kt.
   val nodeBusy = status == NodeStatus.STARTING || status == NodeStatus.IDLE
   val progressVisible = status == NodeStatus.STARTING && phase == ProvisionPhase.DOWNLOADING && downloadTotalBytes > 0
   val thermalShed = status == NodeStatus.LIVE && thermalShedding
