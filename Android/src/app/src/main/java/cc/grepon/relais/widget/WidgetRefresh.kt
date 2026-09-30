@@ -18,7 +18,12 @@ import android.util.Log
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.glance.appwidget.state.updateAppWidgetState
+import cc.grepon.relais.RelaisConfig
+import cc.grepon.relais.RelaisEngine
+import cc.grepon.relais.RelaisLivenessState
+import cc.grepon.relais.ThermalGovernor
 import cc.grepon.relais.core.NodeState
+import cc.grepon.relais.core.computeNodeState
 import cc.grepon.relais.core.RelaisNodeController
 import cc.grepon.relais.core.thermalHot
 import java.util.concurrent.Executors
@@ -54,6 +59,66 @@ internal data class WidgetRenderKey(val nodeState: NodeState, val thermalHot: Bo
  * window re-renders nothing, and a STARTING render stays dead after the node goes LIVE.
  */
 private val NODE_STAMP_KEY = stringPreferencesKey("relais_widget_node_stamp")
+
+/**
+ * The node state the widget shows: [computeNodeState] and [widgetDisplayState] from ONE liveness
+ * snapshot (#358), read first, engine flags after (computeNodeState's read-order rule). Going
+ * through [RelaisNodeController.state] and then reading the snapshot again for the mapping would pair
+ * one snapshot's state with another's evidence. Shared by the render and the refresher's key so the
+ * change detector keys on exactly what is drawn.
+ */
+internal fun widgetNodeState(context: Context): NodeState {
+  val liveness = RelaisLivenessState.snapshot
+  val ready = RelaisEngine.isReady
+  val state = computeNodeState(
+    shouldRun = RelaisConfig.shouldRun(context),
+    ready = ready,
+    listenersUp = liveness.listenersUp,
+    startupInProgress = liveness.startupInProgress,
+    lastInitFailed = RelaisEngine.lastInitFailed,
+    thermalStatus = ThermalGovernor.statusValue,
+    idleUnloaded = liveness.idleUnloaded,
+  )
+  return widgetDisplayState(
+    nodeState = state,
+    startupInProgress = liveness.startupInProgress,
+    listenersUp = liveness.listenersUp,
+    ready = ready,
+    idleUnloaded = liveness.idleUnloaded,
+  )
+}
+
+/**
+ * Renders every placed widget once from the node's current state (#358), off the caller's thread.
+ * For the moments nothing else renders: the app process starting after a force-stop or an update,
+ * when the service (and its refresher) is gone. A fresh process has no open Glance session, but this
+ * goes through the same stamp-then-update path as the refresher anyway.
+ */
+internal fun refreshWidgetsOnceAsync(context: Context) {
+  thread(name = "relais-widget-launch") {
+    runCatching { renderWidgets(context, WidgetRenderKey(widgetNodeState(context), thermalHot())) }
+      .onFailure { Log.w(TAG, "launch widget render failed", it) }
+  }
+}
+
+/**
+ * Stamps [key] into every placed widget's Glance state, then updates it — the write is what makes
+ * an open session recompose (see [NODE_STAMP_KEY]). No widget placed: nothing to do.
+ */
+private fun renderWidgets(context: Context, key: WidgetRenderKey) = runBlocking {
+  val widget = RelaisWidget()
+  // A nonce so every write is a change: the stamp is persisted and outlives a service instance, so
+  // a first tick (or the final render) can write the value already stored, and an unchanged value
+  // would not recompose an open session.
+  val stamp = "${key.stamp()}@${SystemClock.elapsedRealtimeNanos()}"
+  for (id in GlanceAppWidgetManager(context).getGlanceIds(RelaisWidget::class.java)) {
+    // Per widget: one that throws must not keep the others on a stale render.
+    runCatching {
+      updateAppWidgetState(context, id) { it[NODE_STAMP_KEY] = stamp }
+      widget.update(context, id)
+    }.onFailure { Log.w(TAG, "widget $id refresh failed", it) }
+  }
+}
 
 /**
  * True when the widget must re-render. Null [lastRendered] (the first observation of a service
@@ -103,7 +168,7 @@ internal class WidgetStateRefresher(private val context: Context) {
     }
   }
 
-  private fun currentKey() = WidgetRenderKey(RelaisNodeController.state(context), thermalHot())
+  private fun currentKey() = WidgetRenderKey(widgetNodeState(context), thermalHot())
 
   private fun tick() {
     val now = currentKey()
@@ -112,23 +177,5 @@ internal class WidgetStateRefresher(private val context: Context) {
     lastRendered = now
   }
 
-  /**
-   * Stamps [key] into every placed widget's Glance state, then updates it — the write is what makes
-   * an open session recompose (see [NODE_STAMP_KEY]). No widget placed: nothing to do, and Glance
-   * renders a newly placed one itself.
-   */
-  private fun renderAll(key: WidgetRenderKey) = runBlocking {
-    val widget = RelaisWidget()
-    // A nonce so every write is a change: the stamp is persisted and outlives this service instance,
-    // so a first tick (or the final render) can write the value already stored, and an unchanged
-    // value would not recompose an open session.
-    val stamp = "${key.stamp()}@${SystemClock.elapsedRealtimeNanos()}"
-    for (id in GlanceAppWidgetManager(context).getGlanceIds(RelaisWidget::class.java)) {
-      // Per widget: one that throws must not keep the others on a stale render.
-      runCatching {
-        updateAppWidgetState(context, id) { it[NODE_STAMP_KEY] = stamp }
-        widget.update(context, id)
-      }.onFailure { Log.w(TAG, "widget $id refresh failed", it) }
-    }
-  }
+  private fun renderAll(key: WidgetRenderKey) = renderWidgets(context, key)
 }

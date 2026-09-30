@@ -23,6 +23,7 @@ import cc.grepon.relais.widget.shouldAwaitWarm
 import cc.grepon.relais.widget.shouldGiveUpWarm
 import cc.grepon.relais.widget.shouldRunWidgetPrompt
 import cc.grepon.relais.widget.widgetCanRun
+import cc.grepon.relais.widget.widgetDisplayState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
@@ -318,5 +319,37 @@ class WidgetStateTest {
     assertEquals("r", done.response)
     val error = loading.error("e")
     assertEquals("e", error.response)
+  }
+
+  // ---- widgetDisplayState (#358) ----
+
+  @Test fun `STARTING with nothing actually starting displays OFF`() {
+    // shouldRun survived a force-stop / app update that killed the service and its watchdog alarm.
+    assertEquals(
+      NodeState.OFF,
+      widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = false, ready = false, idleUnloaded = false),
+    )
+  }
+
+  @Test fun `a real start keeps reading STARTING`() {
+    // Each input alone is evidence something IS starting or up; any one of them keeps STARTING.
+    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = true, listenersUp = false, ready = false, idleUnloaded = false))
+    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = true, ready = false, idleUnloaded = false))
+    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = false, ready = true, idleUnloaded = false))
+  }
+
+  @Test fun `an idle-unloaded node whose listeners dropped keeps STARTING (#358 review)`() {
+    // A failed HTTPS rebind with the engine idle-unloaded: the service is alive and retrying, and the
+    // panel's looksStalled excludes idleUnloaded too — so neither surface calls it off.
+    assertEquals(
+      NodeState.STARTING,
+      widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = false, ready = false, idleUnloaded = true),
+    )
+  }
+
+  @Test fun `every other state passes through`() {
+    for (s in NodeState.entries.filter { it != NodeState.STARTING }) {
+      assertEquals(s, widgetDisplayState(s, startupInProgress = false, listenersUp = false, ready = false, idleUnloaded = false))
+    }
   }
 }

@@ -116,6 +116,38 @@ fun shouldRunWidgetPrompt(nodeState: NodeState, thermalHot: Boolean, prompt: Str
  *  - IDLE otherwise → runnable (mirrors [shouldRunWidgetPrompt]'s `WARM_THEN_RUN`);
  *  - HOT / OFF / STARTING / ERROR → never runnable (mirrors [shouldRunWidgetPrompt]'s `IGNORE` rows).
  */
+/**
+ * What the widget DISPLAYS for [nodeState] (#358): STARTING with nothing actually starting — no
+ * startup in flight, no listener bound, no engine, and not idle-unloaded — reads OFF. The same
+ * condition as the control panel's `looksStalled` (#217), plus [listenersUp]; an idle-unloaded node
+ * whose listeners dropped (a failed HTTPS rebind) still has a live service that retries, and the
+ * panel keeps that at STARTING too.
+ *
+ * [cc.grepon.relais.core.computeNodeState] maps `shouldRun` with nothing running to STARTING on
+ * purpose: it keeps the watchdog's shield down so its revive dispatches. But a force-stop or an app
+ * update cancels that alarm and kills the service, so nothing is starting and nothing will. The
+ * control panel detects exactly this (#217's stalledStart) and says OFFLINE; the widget kept saying
+ * `starting…` with disabled buttons — a dead end that also disagreed with the panel. A healthy
+ * start publishes `startupInProgress` before any work (including a multi-GB download), so the only
+ * healthy moment this can misread is the sliver between the service's creation and that publish;
+ * the service's refresher corrects it within one tick (5 s). Widget-only: the watchdog and every
+ * other surface keep computeNodeState's STARTING. This only changes what a render SHOWS; after a
+ * force-stop nothing renders on its own, so the app process also re-renders once at start
+ * (`RelaisApplication`).
+ */
+fun widgetDisplayState(
+  nodeState: NodeState,
+  startupInProgress: Boolean,
+  listenersUp: Boolean,
+  ready: Boolean,
+  idleUnloaded: Boolean,
+): NodeState =
+  if (nodeState == NodeState.STARTING && !startupInProgress && !listenersUp && !ready && !idleUnloaded) {
+    NodeState.OFF
+  } else {
+    nodeState
+  }
+
 fun widgetCanRun(nodeState: NodeState, thermalHot: Boolean, phase: WidgetPhase): Boolean =
   phase != WidgetPhase.LOADING &&
     when (nodeState) {

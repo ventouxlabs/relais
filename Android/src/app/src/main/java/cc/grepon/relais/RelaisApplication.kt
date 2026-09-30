@@ -20,6 +20,7 @@ import android.app.Application
 import cc.grepon.relais.data.DataStoreRepository
 import cc.grepon.relais.notifications.NotificationScheduleManager
 import cc.grepon.relais.ui.theme.ThemeSettings
+import cc.grepon.relais.widget.refreshWidgetsOnceAsync
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 
@@ -37,5 +38,13 @@ class RelaisApplication : Application() {
 
     // Load saved theme.
     ThemeSettings.themeOverride.value = dataStoreRepository.readTheme()
+
+    // #358: re-render the home-screen widget once per process start. After a force-stop or an update
+    // the service (and its widget refresher) is gone, so otherwise nothing renders and the widget
+    // keeps its last frame. Background thread; no-op when no widget is placed. MAIN process only:
+    // every image request spawns the `:imagegen` process, which runs this onCreate too — it has no
+    // WorkManager (Glance's update path needs it) and must not write the widget's DataStore from a
+    // second process.
+    if (Application.getProcessName() == packageName) refreshWidgetsOnceAsync(this)
   }
 }
