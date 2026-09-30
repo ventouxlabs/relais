@@ -32,6 +32,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import cc.grepon.relais.widget.WidgetStateRefresher
 import java.net.BindException
 import java.net.InetAddress
 import java.util.concurrent.Executors
@@ -103,6 +104,7 @@ class RelaisNodeService : Service() {
   private var httpsIpv4CoveredByIpv6 = false
   private var wakeLock: PowerManager.WakeLock? = null
   private var idleTtlExecutor: ScheduledExecutorService? = null
+  private var widgetRefresher: WidgetStateRefresher? = null
   // Construction and teardown share this monitor. A rebind that won it before onDestroy completes
   // atomically; a rebind that loses it sees serviceDestroyed before it can touch a socket.
   private val listenerLifecycleLock = Any()
@@ -157,6 +159,9 @@ class RelaisNodeService : Service() {
     startIdleTtlTicker() // idle-TTL auto-unload (#178) — safe to start before the engine exists;
     // each tick just no-ops via RelaisEngine.releaseIfIdle's own isReady check until there's an
     // engine resident to release.
+
+    // #343: the home-screen widget follows the node instead of showing it as of its last tap.
+    widgetRefresher = WidgetStateRefresher(applicationContext).also { it.start() }
 
     startLanRebindObserver()
     dispatchStartupIfNeeded()
@@ -572,6 +577,10 @@ class RelaisNodeService : Service() {
     // service that left this true would have the next process read LIVE before any listener existed.
     stopListeners()
     RelaisEngine.shutdown()
+    // After shutdown(), so the widget's last render shows what teardown left (OFF after a STOP),
+    // not the final tick's LIVE. Nothing polls once this instance is gone.
+    widgetRefresher?.stopAndRenderFinal()
+    widgetRefresher = null
     runCatching { wakeLock?.release() }
     super.onDestroy()
     Log.i(TAG, "Node stopped")

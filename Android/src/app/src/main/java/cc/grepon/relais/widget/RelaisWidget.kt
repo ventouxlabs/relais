@@ -86,20 +86,26 @@ class RelaisWidget : GlanceAppWidget() {
 
   override suspend fun provideGlance(context: Context, id: GlanceId) {
     provideContent {
+      // Read HERE, in the lambda that recomposes when this widget's Glance state changes, and pass
+      // down (#343). An open Glance session does not re-run provideGlance on update(): it only
+      // recomposes readers of state that changed. Read inside WidgetContent instead, the node state
+      // was skipped along with an unchanged WidgetUiState, so a STARTING render never became LIVE.
+      // WidgetStateRefresher writes a node stamp into this state on every change for that reason.
+      val prefs = currentState<Preferences>()
+      val nodeState = RelaisNodeController.state(context)
+      // Read ONCE, beside nodeState, and pass down — never re-read the global further down the tree,
+      // or the buttons and the status line could observe different readings.
+      val hot = thermalHot()
       GlanceTheme(colors = RelaisWidgetTheme.colors) {
-        WidgetContent(readState(currentState<Preferences>()))
+        WidgetContent(readState(prefs), nodeState, hot)
       }
     }
   }
 }
 
 @Composable
-private fun WidgetContent(state: WidgetUiState) {
+private fun WidgetContent(state: WidgetUiState, nodeState: NodeState, hot: Boolean) {
   val context = LocalContext.current
-  val nodeState = RelaisNodeController.state(context)
-  // Read ONCE, same place as nodeState, and pass down — never re-read the global inside a composable
-  // further down the tree, or the buttons and the status line could observe different readings.
-  val hot = thermalHot()
   val compact = LocalSize.current.height < COMPACT_HEIGHT
   // The visual half of the cold-start guard; RunPromptAction's shouldRunWidgetPrompt is the
   // authoritative gate re-checked at tap time. See widgetCanRun's KDoc for the row-by-row policy.
