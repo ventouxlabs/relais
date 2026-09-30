@@ -69,8 +69,11 @@ internal fun modelNotResidentBody(endpoint: String, message: String): JSONObject
 /**
  * The `model` a STREAMING response echoes, resolved once, at its first event (#352). The client's own
  * id when it sent one (the OpenAI drop-in contract #192); otherwise [served], read at that moment —
- * which the handler points at `residentModelId` while an engine callback is running (under the engine
- * lock, after the served-model check, so it IS the model answering) or at the returned
+ * which the handler points at `residentModelId` while an engine callback is running. The callback
+ * thread does not hold the engine lock itself: `generate`'s thread holds it for the whole decode, and
+ * `residentModelId`'s only writer needs that lock, so the value cannot change mid-stream and was
+ * already checked against the request — it IS the model answering. (Change how `generate` hands
+ * tokens across threads and this reasoning must be redone.) Otherwise [served] points at the returned
  * [RelaisResult.servedModelId] when the first event is written after `generate` (a zero-token stream).
  * Reading it any earlier — before the lock, as the chunks used to — can name a model that was swapped
  * or idle-unloaded away before this request ran. [fallback] only when nothing is known. `lazy` is
