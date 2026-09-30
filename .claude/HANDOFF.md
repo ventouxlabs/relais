@@ -6,6 +6,54 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
+## 2026-09-30 — ⏩ START HERE. **Queue cleared: #337 (correctness half) #343 #347 #352 #354 #355 #358 all merged and closed. `main` = `3e29d5d1`. Next: #337's UI half — trace the MODELS-tab race FIRST (below).**
+
+### Merged this session (every PR: first review, re-review, fix-commit review; suites XML-verified)
+| PR | Fixes | Device (rango) |
+|---|---|---|
+| #348 | #346 review follow-ups (same-id manual pick now applies on restart) | not needed |
+| #350 | #347 — classify the requested model while idle-unloaded | 404 / 503-swap / configured-served all PASS |
+| #351 | #343 — widget follows node state (refresher + Glance-state stamp) | OFF/STARTING/LIVE/IDLE followed without a tap |
+| #357 | #354 — dashboard shows a same-id build pick as pending (file + commit dir) | not needed |
+| #356 | #355 — Pixel 10 respects an operator-written default id (`hasExplicitModelId`) | not run (would start a 3.4 GB download) |
+| #359 | #352 — served-model check under the engine lock, lazy SSE commit, 503 on a swap race | reproduced on the unfixed build (TPU backend answered a gemma3 request), fixed on #359 |
+| #360 | #358 — widget shows OFF, not a dead `starting…`, after force-stop/update | PASS after force-stop and after `install -r` |
+The combined tree was 1553 tests × 3 flavors, 0 failures, before the last merge.
+
+### Next: #337 UI half — DO THIS TRACE BEFORE DESIGNING
+The IDLE lock on the dashboard MODEL row is porous: that row just navigates to **ModelsScreen**, and the MODELS
+bottom-nav tab reaches the same screen **unlocked**. ModelsScreen's pick = persist + `ensureModel` from the UI's
+scope (downloads if needed). Suspected live race today, via the MODELS tab, on an IDLE node picking a model
+NOT on disk:
+1. The UI `ensureModel` downloads with no `beginStartup` → liveness doesn't know.
+2. A LAN request mid-download: #350 classifies against the new configured id → ServeResident → lazy
+   `ensureInitialized` → `pathFor(new)` = null → throws (500?). `RetryAfterLoad` can't catch it (no load "in flight").
+3. The failed attempt cleared `idleUnloaded` → ERROR → watchdog revive → service `ensureModel` →
+   `download()` with `enqueueUniqueWork(model.name, REPLACE)` → may CANCEL the UI's in-flight download.
+If it holds: fix at the class (make UI provisioning visible as a startup, or a rule that an IDLE pick must be on
+disk), THEN unlock the row (`computeControlPanelState`, `RelaisControlPanelStateTest` pins the IDLE lock).
+Configure is the only persist-only picker: reuse the dashboard's dispatch-then-persist sequence
+(`RelaisHttpPages.kt` `swapTargetFor` → `ensureModelSwapInBackground` → `applyManualId(id, target.path)`)
+as ONE shared function, or route Configure to ModelsScreen — do not add a third pick path.
+
+### Open
+- #353 (widget stuck LOADING): not reproducible via force-stop (the launcher shows the system "app stopped"
+  placeholder); suggested lowering/closing on the issue.
+- Older, need JD: #300 #288 #122 #102 #97 (distribution/Play), #69 (image-gen, needs G3).
+- LOW notes recorded in each merged PR body (e.g. `generateWithNodeTools` two-hop model mix; Anthropic
+  `event: error` without `message_start`; widget OFF render has no click action).
+
+### Device notes (rango)
+- The installed app is **debug-signed with `~/.android/debug.keystore`**; Gradle signs with
+  `~/.config/.android/…` → re-sign with `apksigner` before `install -r` ([[relais-apk-install-signature]]).
+- `cmd statusbar click-tile` did not start/stop the node; drive START/STOP via `uiautomator dump` bounds.
+- **Never blind `input text` on JD's phone**: a family-chat heads-up reply box took focus mid-script on
+  2026-09-30 (nothing sent) ([[adb-input-notification-hijack]]). Ask JD for manual steps like placing a widget.
+- The phone unfolds: inner display id `…152` (2076×2152), outer `…153`; the launcher keeps separate layouts.
+- The widget is placed on the outer screen's finance page. Idle TTL was restored to 15 min. The node was left stopped (shouldRun true).
+
+---
+
 ## 2026-09-27 — ⏩ START HERE. **#346 MERGED (`f12caa6c`). Its review follow-ups are PR #348, CI green, independently APPROVED, awaiting merge. #347 filed (idle-unload skips model classification). #337 stays OPEN (UI half).**
 
 `main` = `f12caa6c`. The 2026-09-24 section below is superseded on its steps 1–2: the PR was opened and merged as #346, and both open reviewer questions are answered.
