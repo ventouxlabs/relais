@@ -24,15 +24,18 @@ import org.junit.Test
  */
 class AnthropicStreamSequencerTest {
 
-  private val start = JSONObject().put("type", "message_start")
+  private var built = 0
+  private val start = { built++; JSONObject().put("type", "message_start") }
 
   private fun events(written: String): List<String> =
     Regex("^event: (\\S+)$", RegexOption.MULTILINE).findAll(written).map { it.groupValues[1] }.toList()
 
-  @Test fun `nothing is written before the first delta`() {
+  @Test fun `nothing is written, or built, before the first delta`() {
     val buf = ByteArrayOutputStream()
     AnthropicStreamSequencer(SseWriter(buf, {}), start)
     assertEquals(0, buf.size())
+    // Built lazily too, so its `model` is read when the served model is known (#352).
+    assertEquals(0, built)
   }
 
   @Test fun `message_start precedes the first text block`() {
@@ -50,6 +53,7 @@ class AnthropicStreamSequencerTest {
     val names = events(buf.toString())
     assertEquals("message_start", names.first())
     assertEquals(1, names.count { it == "message_start" })
+    assertEquals(1, built)
     assertEquals("message_stop", names.last())
   }
 

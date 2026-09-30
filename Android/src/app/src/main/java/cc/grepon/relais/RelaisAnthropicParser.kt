@@ -506,13 +506,14 @@ internal fun buildMessageStopEvent(): JSONObject = JSONObject().put("type", "mes
  *
  * Pure behavior-preserving extraction: same event order/shape as the inline version it replaced.
  *
- * Also owns the stream's opening `message_start` ([messageStart]), emitted lazily before the first
- * event of any kind (#352). The handler used to send it before calling the engine, which committed
- * the 200 header before the engine's served-model check could run; deferred to here, a request that
- * fails before its first token has written nothing. [finish] emits it too, so a zero-token stream
- * is still well-formed.
+ * Also owns the stream's opening `message_start` ([messageStart]), built and emitted lazily before the
+ * first event of any kind (#352). The handler used to send it before calling the engine, which
+ * committed the 200 header before the engine's served-model check could run; deferred to here, a
+ * request that fails before its first token has written nothing. Built lazily too, so its `model`
+ * can name the model actually serving (see [StreamEchoModel]). [finish] emits it as well, so a
+ * zero-token stream is still well-formed.
  */
-internal class AnthropicStreamSequencer(private val sse: SseWriter, private val messageStart: JSONObject) {
+internal class AnthropicStreamSequencer(private val sse: SseWriter, private val messageStart: () -> JSONObject) {
   private var started = false
   private var thinkingStarted = false
   private var thinkingStopped = false
@@ -521,7 +522,7 @@ internal class AnthropicStreamSequencer(private val sse: SseWriter, private val 
   private fun startIfNeeded() {
     if (!started) {
       started = true
-      sse.send("message_start", messageStart)
+      sse.send("message_start", messageStart())
     }
   }
 

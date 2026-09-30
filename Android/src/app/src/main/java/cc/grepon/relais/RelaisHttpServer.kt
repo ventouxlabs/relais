@@ -1628,12 +1628,15 @@ class RelaisHttpServer(
     // stream and double-count the request) — post-commit errors become an SSE error event (HIGH-1).
     // The header commits lazily on the first event, and the 200 is recorded then (#352).
     val sse = SseWriter(sock.getOutputStream()) { RelaisMetrics.recordRequest("/v1/chat/completions", 200) }
+    // Echo resolved at the first event, not here before the lock (#352) — see StreamEchoModel.
+    var streamResult: RelaisResult? = null
+    val echo = StreamEchoModel(requestedModel, model) { streamResult?.servedModelId ?: RelaisEngine.residentModelId }
     fun emitDelta(delta: JSONObject, finish: String?) {
       val choice = JSONObject().put("index", 0)
         .put("delta", delta)
         .put("finish_reason", finish ?: JSONObject.NULL)
       val chunk = JSONObject().put("id", id).put("object", "chat.completion.chunk")
-        .put("model", model).put("choices", JSONArray().put(choice))
+        .put("model", echo.id).put("choices", JSONArray().put(choice))
       sse.send(chunk)
     }
     fun sendChunk(delta: String?, finish: String?) =
@@ -1650,12 +1653,13 @@ class RelaisHttpServer(
         shouldCancel = { ThermalGovernor.shouldTruncate() },
         onReasoning = { r -> emitDelta(JSONObject().put("reasoning_content", r), null) },
       )
+      streamResult = result
       // finish_reason chunk (result.finishReason — "length" if thermally truncated, else "stop"; #22).
       val created = System.currentTimeMillis() / 1000
       val usageObj = buildUsageObject(request.text, result.completionTokens)
       val finalChunk = JSONObject().put("id", id).put("object", "chat.completion.chunk")
         .put("created", created)
-        .put("model", model)
+        .put("model", echo.id)
         .put("choices", JSONArray().put(
           JSONObject().put("index", 0)
             .put("delta", JSONObject())
@@ -1669,7 +1673,7 @@ class RelaisHttpServer(
       sse.send(finalChunk)
       if (includeUsage) {
         val usageChunk = JSONObject().put("id", id).put("object", "chat.completion.chunk")
-          .put("created", created).put("model", model)
+          .put("created", created).put("model", echo.id)
           .put("choices", JSONArray()) // empty choices per the OpenAI include_usage spec
           .put("usage", usageObj)
         attachRelaisExtras(usageChunk, result)
@@ -1719,30 +1723,7 @@ class RelaisHttpServer(
     }
 
     val stream = body.optBoolean("stream", false)
-    val messages = body.optJSONArray("messages") ?: JSONArray()
-    val parsed = buildAnthropicPromptParts(system = body.opt("system"), messages = messages, decode = { b64 -> decode(b64) })
-    val toolChoice = parseAnthropicToolChoice(body)
-    // tool_choice resolving to None (no tools present) -> don't advertise anything.
-    val tools = if (toolChoice == ToolChoice.None) emptyList() else parseAnthropicTools(body)
-    // Anthropic `thinking: {"type":"enabled"|"disabled","budget_tokens"?}`. Only the on/off switch is
-    // honored — budget_tokens has no numeric-budget equivalent on the engine today (same scope limit as
-    // max_tokens above; the reasoning-channel capture is not itself token-budgeted).
-    val enableThinking = body.optJSONObject("thinking")?.optString("type") == "enabled"
-
-    val baseRequest =
-      RelaisRequest(
-        text = parsed.lastUserText,
-        imagePng = parsed.lastUserImage,
-        systemPrompt = parsed.systemPrompt,
-        history = parsed.history,
-        tools = tools,
-        toolChoice = toolChoice,
-        toolResults = parsed.liveToolResults,
-        temperature = optDoubleOrNull(body, "temperature"),
-        topP = optDoubleOrNull(body, "top_p"),
-        enableThinking = enableThinking,
-        expectedModelId = requestedModel, // #352: checked again under the engine lock
-      )
+    val baseRequest = parseAnthropicRequest(body)
 
     // Session memory (Feature #5): identical reuse policy to handleOpenAi — a bare turn (client sent no
     // prior history) on the plain (non-tool) path may recall stored history.
@@ -1789,7 +1770,10 @@ class RelaisHttpServer(
     // The header commits lazily and message_start is sent after the engine call (tool branch) or on
     // the first event (AnthropicStreamSequencer), so a served-model mismatch writes nothing (#352).
     val sse = SseWriter(sock.getOutputStream()) { RelaisMetrics.recordRequest("/v1/messages", 200) }
-    val messageStart = buildMessageStartEvent(id, model, inputTokens)
+    // Echo resolved at the first event, not here before the lock (#352) — see StreamEchoModel.
+    var streamResult: RelaisResult? = null
+    val echo = StreamEchoModel(requestedModel, model) { streamResult?.servedModelId ?: RelaisEngine.residentModelId }
+    val messageStart = { buildMessageStartEvent(id, echo.id, inputTokens) }
     try {
       if (request.tools.isNotEmpty() || request.toolResults.isNotEmpty()) {
         // Tool-calling responses are single-shot even when stream:true: the blocking tool branch
@@ -1797,7 +1781,8 @@ class RelaisHttpServer(
         // delta to emit — the whole content is already in hand. One start/delta/stop triple per
         // content block is fine; Anthropic clients handle single-delta blocks correctly.
         val result = generateWithNodeTools(request)
-        sse.send("message_start", messageStart)
+        streamResult = result
+        sse.send("message_start", messageStart())
         var index = 0
         result.reasoning?.takeIf { it.isNotBlank() }?.let { reasoning ->
           sse.send("content_block_start", buildContentBlockStartEvent(index, "thinking"))
@@ -1836,6 +1821,7 @@ class RelaisHttpServer(
         shouldCancel = { ThermalGovernor.shouldTruncate() },
         onReasoning = { r -> sequencer.onReasoningDelta(r) },
       )
+      streamResult = result
       sequencer.finish(anthropicStopReason(result), result.completionTokens)
       recordSessionTurn(recordKey, request.text, result.text)
     } catch (e: Exception) {
@@ -1982,7 +1968,7 @@ class RelaisHttpServer(
       val (message, finishReason) = buildToolAssistantMessage(result, streaming = true)
       val chunk = JSONObject().put("id", id).put("object", "chat.completion.chunk")
         .put("created", System.currentTimeMillis() / 1000)
-        .put("model", model)
+        .put("model", result.servedModelId ?: model)
         .put("choices", JSONArray().put(
           JSONObject().put("index", 0)
             .put("delta", message)
@@ -2098,8 +2084,10 @@ class RelaisHttpServer(
    *
    * The [request.text] field is always the final user message text so that
    * [buildUsageObject](request.text, ...) in [handleOpenAi] keeps working correctly.
+   *
+   * Internal, not private, so RelaisRequestExpectedModelTest can pin the #352 `expectedModelId` wiring.
    */
-  private fun parseOpenAiRequest(body: JSONObject): RelaisRequest {
+  internal fun parseOpenAiRequest(body: JSONObject): RelaisRequest {
     val messages = body.optJSONArray("messages") ?: JSONArray()
     // Pass android.util.Base64-backed lambdas explicitly — the default lambdas in buildPromptParts
     // use java.util.Base64 (for JVM-testability); production always runs on Android so we override.
@@ -2134,6 +2122,35 @@ class RelaisHttpServer(
       nodeToolsEnabled = body.optBoolean("node_tools", false) || body.optBoolean("x_relais_node_tools", false),
       // #352: the id handleOpenAi classified, checked again under the engine lock.
       expectedModelId = requestedModelId(body),
+    )
+  }
+
+  /**
+   * The Anthropic Messages counterpart of [parseOpenAiRequest] (extracted from
+   * [handleAnthropicMessages] so the #352 wiring is JVM-testable; internal for RelaisRequestExpectedModelTest).
+   */
+  internal fun parseAnthropicRequest(body: JSONObject): RelaisRequest {
+    val messages = body.optJSONArray("messages") ?: JSONArray()
+    val parsed = buildAnthropicPromptParts(system = body.opt("system"), messages = messages, decode = { b64 -> decode(b64) })
+    val toolChoice = parseAnthropicToolChoice(body)
+    // tool_choice resolving to None (no tools present) -> don't advertise anything.
+    val tools = if (toolChoice == ToolChoice.None) emptyList() else parseAnthropicTools(body)
+    // Anthropic `thinking: {"type":"enabled"|"disabled","budget_tokens"?}`. Only the on/off switch is
+    // honored — budget_tokens has no numeric-budget equivalent on the engine today (same scope limit as
+    // max_tokens in handleAnthropicMessages; the reasoning-channel capture is not itself token-budgeted).
+    val enableThinking = body.optJSONObject("thinking")?.optString("type") == "enabled"
+    return RelaisRequest(
+      text = parsed.lastUserText,
+      imagePng = parsed.lastUserImage,
+      systemPrompt = parsed.systemPrompt,
+      history = parsed.history,
+      tools = tools,
+      toolChoice = toolChoice,
+      toolResults = parsed.liveToolResults,
+      temperature = optDoubleOrNull(body, "temperature"),
+      topP = optDoubleOrNull(body, "top_p"),
+      enableThinking = enableThinking,
+      expectedModelId = requestedModelId(body), // #352: checked again under the engine lock
     )
   }
 

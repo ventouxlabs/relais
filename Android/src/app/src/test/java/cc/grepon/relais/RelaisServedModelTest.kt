@@ -85,6 +85,35 @@ class RelaisServedModelTest {
     assertFalse(isUncommittedModelMismatch(IllegalStateException("engine"), committed = true))
   }
 
+  // --- StreamEchoModel: the streaming echo, resolved at the first event ---
+
+  @Test fun `a client-sent model is echoed and served is never consulted`() {
+    var reads = 0
+    val echo = StreamEchoModel("gemma-y", "fallback") { reads++; "gemma-x" }
+    assertEquals("gemma-y", echo.id)
+    assertEquals(0, reads)
+  }
+
+  @Test fun `an omitted model echoes what serves at the first event, not at construction`() {
+    // The handler builds this before the lock; `served` changes before the first event reads it.
+    var resident: String? = "gemma-x"
+    val echo = StreamEchoModel(null, "fallback") { resident }
+    resident = "gemma-y"
+    assertEquals("gemma-y", echo.id)
+  }
+
+  @Test fun `the echo is resolved once, so every chunk names the same model`() {
+    var resident: String? = "gemma-y"
+    val echo = StreamEchoModel(null, "fallback") { resident }
+    assertEquals("gemma-y", echo.id)
+    resident = "gemma-x"
+    assertEquals("gemma-y", echo.id)
+  }
+
+  @Test fun `with nothing known the fallback is echoed`() {
+    assertEquals("fallback", StreamEchoModel(null, "fallback") { null }.id)
+  }
+
   @Test fun `the exception message names both models`() {
     val e = ModelNotResidentException(expected = "gemma-y", resident = "gemma-x")
     assertTrue(e.message!!.contains("gemma-y"))

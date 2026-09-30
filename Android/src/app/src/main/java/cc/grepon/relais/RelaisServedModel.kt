@@ -66,6 +66,24 @@ internal fun modelNotResidentBody(endpoint: String, message: String): JSONObject
     RelaisError.json(message, RelaisError.SERVICE_UNAVAILABLE)
   }
 
+/**
+ * The `model` a STREAMING response echoes, resolved once, at its first event (#352). The client's own
+ * id when it sent one (the OpenAI drop-in contract #192); otherwise [served], read at that moment —
+ * which the handler points at `residentModelId` while an engine callback is running (under the engine
+ * lock, after the served-model check, so it IS the model answering) or at the returned
+ * [RelaisResult.servedModelId] when the first event is written after `generate` (a zero-token stream).
+ * Reading it any earlier — before the lock, as the chunks used to — can name a model that was swapped
+ * or idle-unloaded away before this request ran. [fallback] only when nothing is known. `lazy` is
+ * synchronized, so every chunk echoes one value even across the callback and handler threads.
+ */
+internal class StreamEchoModel(
+  private val requested: String?,
+  private val fallback: String,
+  private val served: () -> String?,
+) {
+  val id: String by lazy { requested ?: served() ?: fallback }
+}
+
 /** The client-facing 503 text: the model changed under the request; a retry is decided afresh. */
 internal const val MODEL_NOT_RESIDENT_MESSAGE =
   "the resident model changed before this request ran; retry shortly"
