@@ -49,6 +49,9 @@ class RelaisProvisionerTest {
     // modelId() reads DEFAULT when nothing was written; writing it back would make the id explicit
     // and permanently turn off a Pixel 10's G5 default (#355). Restore absence as absence.
     val savedExplicit = RelaisConfig.hasExplicitModelId(ctx)
+    // setModelId below drops a ref naming another id (e.g. a Pixel 10's automatic E2B default), so
+    // snapshot it too — the node would otherwise keep the id but lose the ref's specific build.
+    val savedRef = RelaisConfig.modelRef(ctx)
     val savedPath = RelaisConfig.modelPath(ctx)
 
     // Eligibility: fast path 2 is gated to the default model id.
@@ -73,6 +76,7 @@ class RelaisProvisionerTest {
       // Restore id first (a change clears KEY_MODEL_PATH), then the path, so both end as found.
       RelaisConfig.setModelId(ctx, savedModelId)
       if (!savedExplicit) RelaisConfig.clearModelIdForTest(ctx)
+      savedRef?.let { RelaisConfig.setModelRef(ctx, it) } // writes its own id, which is savedModelId
       savedPath?.let { RelaisConfig.setModelPath(ctx, it) }
     }
   }

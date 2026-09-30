@@ -217,5 +217,10 @@ class RelaisProvisionerTest {
       RelaisModelProvisioner.applyDeviceDefaultIfFresh(ctx, isPixel10 = true),
     )
     assertEquals(RelaisModelProvisioner.G5_DEFAULT_REF.modelId, RelaisConfig.modelId(ctx))
+
+    // Third input: a persisted ref alone also blocks the default, with the id key absent — so a
+    // constant in place of the ref check fails here, not only the explicitness one above.
+    RelaisConfig.clearModelIdForTest(ctx)
+    assertNull(RelaisModelProvisioner.applyDeviceDefaultIfFresh(ctx, isPixel10 = true))
   }
 }
