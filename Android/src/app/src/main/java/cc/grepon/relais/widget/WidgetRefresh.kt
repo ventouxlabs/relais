@@ -117,7 +117,8 @@ private fun renderWidgets(context: Context, key: WidgetRenderKey) = runBlocking 
       updateAppWidgetState(context, id) { it[NODE_STAMP_KEY] = stamp }
       widget.update(context, id)
     }.onFailure { Log.w(TAG, "widget $id refresh failed", it) }
-  }}
+  }
+}
 
 /**
  * True when the widget must re-render. Null [lastRendered] (the first observation of a service
