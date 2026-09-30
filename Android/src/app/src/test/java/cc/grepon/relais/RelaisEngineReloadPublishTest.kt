@@ -52,6 +52,9 @@ class RelaisEngineReloadPublishTest {
   @Before fun precondition() {
     assertFalse("precondition: no resident engine in a unit test", RelaisEngine.isReady)
     assertFalse("precondition: no startup in flight", RelaisLivenessState.snapshot.startupInProgress)
+    // A sibling test's `remember` under the default id would otherwise answer pathFor below through
+    // the cache (rung 1) with a file that exists, and the attempt would reach native init.
+    RelaisModelProvisioner.resetPathCacheForTest()
     // The background path resolves the default model path; it must NOT exist, or the attempt would
     // reach native engine-create instead of failing fast at `require`.
     // Non-null here because a Robolectric context reports the DEFAULT model id, which is the one

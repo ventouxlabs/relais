@@ -124,12 +124,15 @@ internal fun handleSelectModel(
   // source of truth for an operator model pick.
   //
   // [target]?.path is NOT optional decoration. A targeted swap deliberately skips `resolveModel` —
-  // "the registry already holds the on-disk path" — and `resolveModel` is the only thing that calls
-  // RelaisModelProvisioner.remember(). Persisting the id alone therefore left the cached and durable
-  // PATH pointing at the OUTGOING model, so the next reload after an idle unload loaded the old
-  // weights stamped with the new id and served them silently. Whoever bypasses resolution owns
-  // updating the cache; this is that owner. A null target means the id is the configured-but-
-  // unrecorded one, where the swap resolves normally and `remember` runs on its own.
+  // "the registry already holds the on-disk path" — and RelaisModelProvisioner.remember() otherwise
+  // runs only inside ensureModel's provisioning branches. Persisting the id alone therefore left the
+  // cached and durable PATH pointing at the OUTGOING model; before #337's resolver fix the next
+  // reload after an idle unload loaded the old weights stamped with the new id and served them
+  // silently. `pathFor` is id-bound now, but the durable fast path a restart boots from still needs
+  // this. Whoever bypasses resolution owns updating the cache; this is that owner. A null target
+  // means the id is the configured-but-unrecorded one: the swap resolves it through `resolveModel`
+  // (which may block on the network and never `remember`s), and the next START's ensureModel
+  // `remember`s it on its own.
   ModelSwitch.applyManualId(context, id, resolvedPath = target?.path)
   // 303, not 302, so the browser reloads with GET and a refresh does not re-POST the form.
   respond(303, "", selectModelHeaders() + "Location: /")

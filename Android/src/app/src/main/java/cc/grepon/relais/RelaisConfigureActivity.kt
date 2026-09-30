@@ -149,11 +149,15 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
   // resurrect a superseded path once the in-flight ensureModel() resolves. Still locked while
   // idle-unloaded, but the reason has narrowed: #337's first half closed the CORRECTNESS hole (the
   // reload used to pair the outgoing model's cached path with the incoming id and serve old weights
-  // under the new id; `RelaisModelProvisioner.pathFor` now resolves the path FOR an id, so a pick
-  // made while idle reloads the model that was actually picked). What remains is that `onPickRef`
-  // below only persists the selection — nothing dispatches a swap — so the pick takes effect lazily
-  // on the next reload rather than immediately. Unlocking the row means routing this pick through
-  // the dashboard's targeted swap and verifying it on hardware: the open half of #337.
+  // under the new id; `RelaisModelProvisioner.pathFor` now resolves the path FOR an id and never
+  // hands one model's file to another id). What it does NOT do is provision: an idle reload only
+  // RESOLVES — download and `remember` happen solely in `ensureModel`, on a service START. So after
+  // a pick the next idle reload loads the picked model only if it is already on the device; a
+  // not-yet-downloaded pick makes that reload fail closed (the node reads ERROR until the next
+  // START — the operator's, or the watchdog's revive — provisions it), and a same-id build pick
+  // reloads the previous build of that model. The picks
+  // below say "Restart to apply" for exactly this reason. Unlocking the row means routing this pick
+  // through the dashboard's targeted swap and verifying it on hardware: the open half of #337.
   val nodeBusy = running && !ready
 
   var modelId by remember { mutableStateOf(RelaisConfig.modelId(ctx)) }
@@ -380,7 +384,9 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
           // Entering a raw id is an explicit "resolve this via the allowlist" intent, so drop any
           // curated ref first — otherwise the pinned ref would keep overriding allowlist resolution.
           // resolvedPath = null is the honest answer here: this screen does NOT bypass
-          // RelaisModelProvisioner.resolveModel, so the reload resolves and remembers on its own.
+          // RelaisModelProvisioner.resolveModel — the restart this note asks for provisions the id
+          // through ensureModel, which resolves and remembers it. An idle reload before then only
+          // resolves (see the lock rationale above); it never downloads or remembers.
           ModelSwitch.applyManualId(ctx, id, resolvedPath = null)
           modelRef = null
           modelId = id

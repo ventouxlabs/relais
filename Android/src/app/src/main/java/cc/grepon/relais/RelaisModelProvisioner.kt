@@ -132,10 +132,29 @@ object RelaisModelProvisioner {
    * swapping. The durable half (`KEY_MODEL_PATH`) was already cleared on every id change; this
    * process-local half was not, which is why the symptom disappeared across a restart.
    *
-   * Tagging makes the stale read impossible to express rather than relying on each future writer of
-   * the model id to remember an invalidation call.
+   * Tagging makes a stale read for a DIFFERENT model id impossible to express, rather than relying
+   * on each future writer of the model id to remember an invalidation call.
+   *
+   * **The tag is a model id, not a build.** One id can name more than one file: the G5 TPU build of
+   * E2B ([RelaisModelCatalog.G5_TPU_REFS]) shares its id with the GPU build ([G5_DEFAULT_REF]), and
+   * Gemma3-1B-IT's allowlist and G5 AOT builds collide the same way. A same-id build pick made while
+   * the node is up therefore still resolves to the build already cached (and the registry, one entry
+   * per id, answers the same), so an idle reload serves the previous BUILD of the SAME model — the id
+   * every surface reports stays true. The new build applies on a service restart, which is what
+   * Configure's "Restart to apply" promises: STOP destroys the engine, and START provisions through
+   * [ensureModel], whose fast path was cleared by [RelaisConfig.setModelRef] (or, for a manual pick of
+   * the same id, by [RelaisConfig.clearModelRef]). Keying on the build
+   * here would turn that announced deferral into an idle-reload ERROR for a not-yet-downloaded build.
    */
   @Volatile private var cachedModelPath: CachedModelPath? = null
+
+  /**
+   * Test/reset seam. This object outlives a single test in a shared Robolectric sandbox, so without
+   * it one test's [remember] silently answers a later test's [pathFor] through rung 1.
+   */
+  internal fun resetPathCacheForTest() {
+    cachedModelPath = null
+  }
 
   /**
    * The upstream catalog revision this build reads (#227).
