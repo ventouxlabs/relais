@@ -18,7 +18,12 @@ import android.util.Log
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.glance.appwidget.state.updateAppWidgetState
+import cc.grepon.relais.RelaisConfig
+import cc.grepon.relais.RelaisEngine
+import cc.grepon.relais.RelaisLivenessState
+import cc.grepon.relais.ThermalGovernor
 import cc.grepon.relais.core.NodeState
+import cc.grepon.relais.core.computeNodeState
 import cc.grepon.relais.core.RelaisNodeController
 import cc.grepon.relais.core.thermalHot
 import java.util.concurrent.Executors
@@ -54,6 +59,28 @@ internal data class WidgetRenderKey(val nodeState: NodeState, val thermalHot: Bo
  * window re-renders nothing, and a STARTING render stays dead after the node goes LIVE.
  */
 private val NODE_STAMP_KEY = stringPreferencesKey("relais_widget_node_stamp")
+
+/**
+ * The node state the widget shows: [computeNodeState] and [widgetDisplayState] from ONE liveness
+ * snapshot (#358), read first, engine flags after (computeNodeState's read-order rule). Going
+ * through [RelaisNodeController.state] and then reading the snapshot again for the mapping would pair
+ * one snapshot's state with another's evidence. Shared by the render and the refresher's key so the
+ * change detector keys on exactly what is drawn.
+ */
+internal fun widgetNodeState(context: Context): NodeState {
+  val liveness = RelaisLivenessState.snapshot
+  val ready = RelaisEngine.isReady
+  val state = computeNodeState(
+    shouldRun = RelaisConfig.shouldRun(context),
+    ready = ready,
+    listenersUp = liveness.listenersUp,
+    startupInProgress = liveness.startupInProgress,
+    lastInitFailed = RelaisEngine.lastInitFailed,
+    thermalStatus = ThermalGovernor.statusValue,
+    idleUnloaded = liveness.idleUnloaded,
+  )
+  return widgetDisplayState(state, liveness.startupInProgress, liveness.listenersUp, ready)
+}
 
 /**
  * True when the widget must re-render. Null [lastRendered] (the first observation of a service
@@ -103,7 +130,7 @@ internal class WidgetStateRefresher(private val context: Context) {
     }
   }
 
-  private fun currentKey() = WidgetRenderKey(RelaisNodeController.state(context), thermalHot())
+  private fun currentKey() = WidgetRenderKey(widgetNodeState(context), thermalHot())
 
   private fun tick() {
     val now = currentKey()

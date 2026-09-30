@@ -48,7 +48,6 @@ import cc.grepon.relais.Charcoal
 import cc.grepon.relais.Muted
 import cc.grepon.relais.Panel
 import cc.grepon.relais.core.NodeState
-import cc.grepon.relais.core.RelaisNodeController
 import cc.grepon.relais.core.thermalHot
 import cc.grepon.relais.templates.PromptTemplate
 import cc.grepon.relais.templates.WorkflowRegistry
@@ -92,7 +91,7 @@ class RelaisWidget : GlanceAppWidget() {
       // was skipped along with an unchanged WidgetUiState, so a STARTING render never became LIVE.
       // WidgetStateRefresher writes a node stamp into this state on every change for that reason.
       val prefs = currentState<Preferences>()
-      val nodeState = RelaisNodeController.state(context)
+      val nodeState = widgetNodeState(context) // #358: STARTING with nothing starting reads OFF
       // Read ONCE, beside nodeState, and pass down — never re-read the global further down the tree,
       // or the buttons and the status line could observe different readings.
       val hot = thermalHot()

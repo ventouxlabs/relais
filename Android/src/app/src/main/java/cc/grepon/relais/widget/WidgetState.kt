@@ -116,6 +116,29 @@ fun shouldRunWidgetPrompt(nodeState: NodeState, thermalHot: Boolean, prompt: Str
  *  - IDLE otherwise → runnable (mirrors [shouldRunWidgetPrompt]'s `WARM_THEN_RUN`);
  *  - HOT / OFF / STARTING / ERROR → never runnable (mirrors [shouldRunWidgetPrompt]'s `IGNORE` rows).
  */
+/**
+ * What the widget DISPLAYS for [nodeState] (#358): STARTING with nothing actually starting — no
+ * startup in flight, no listener bound, no engine — reads OFF.
+ *
+ * [cc.grepon.relais.core.computeNodeState] maps `shouldRun` with nothing running to STARTING on
+ * purpose: it keeps the watchdog's shield down so its revive dispatches. But a force-stop or an app
+ * update cancels that alarm and kills the service, so nothing is starting and nothing will. The
+ * control panel detects exactly this (#217's stalledStart) and says OFFLINE; the widget kept saying
+ * `starting…` with disabled buttons — a dead end that also disagreed with the panel. A healthy
+ * start publishes `startupInProgress` before any work (including a multi-GB download), so the only
+ * healthy moment this can misread is the sliver between the service's creation and that publish,
+ * which the service's own refresher re-renders on its first tick. Widget-only: the watchdog and every
+ * other surface keep computeNodeState's STARTING.
+ */
+fun widgetDisplayState(
+  nodeState: NodeState,
+  startupInProgress: Boolean,
+  listenersUp: Boolean,
+  ready: Boolean,
+): NodeState =
+  if (nodeState == NodeState.STARTING && !startupInProgress && !listenersUp && !ready) NodeState.OFF
+  else nodeState
+
 fun widgetCanRun(nodeState: NodeState, thermalHot: Boolean, phase: WidgetPhase): Boolean =
   phase != WidgetPhase.LOADING &&
     when (nodeState) {

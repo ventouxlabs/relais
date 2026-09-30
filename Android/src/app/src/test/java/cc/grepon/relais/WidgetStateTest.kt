@@ -23,6 +23,7 @@ import cc.grepon.relais.widget.shouldAwaitWarm
 import cc.grepon.relais.widget.shouldGiveUpWarm
 import cc.grepon.relais.widget.shouldRunWidgetPrompt
 import cc.grepon.relais.widget.widgetCanRun
+import cc.grepon.relais.widget.widgetDisplayState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
@@ -318,5 +319,28 @@ class WidgetStateTest {
     assertEquals("r", done.response)
     val error = loading.error("e")
     assertEquals("e", error.response)
+  }
+
+  // ---- widgetDisplayState (#358) ----
+
+  @Test fun `STARTING with nothing actually starting displays OFF`() {
+    // shouldRun survived a force-stop / app update that killed the service and its watchdog alarm.
+    assertEquals(
+      NodeState.OFF,
+      widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = false, ready = false),
+    )
+  }
+
+  @Test fun `a real start keeps reading STARTING`() {
+    // Each input alone is evidence something IS starting or up; any one of them keeps STARTING.
+    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = true, listenersUp = false, ready = false))
+    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = true, ready = false))
+    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = false, ready = true))
+  }
+
+  @Test fun `every other state passes through`() {
+    for (s in NodeState.entries.filter { it != NodeState.STARTING }) {
+      assertEquals(s, widgetDisplayState(s, startupInProgress = false, listenersUp = false, ready = false))
+    }
   }
 }
