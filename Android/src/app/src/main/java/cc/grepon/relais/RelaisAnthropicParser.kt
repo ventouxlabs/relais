@@ -505,11 +505,26 @@ internal fun buildMessageStopEvent(): JSONObject = JSONObject().put("type", "mes
  * in the same file since it's a thin wrapper around them, not new parsing logic.
  *
  * Pure behavior-preserving extraction: same event order/shape as the inline version it replaced.
+ *
+ * Also owns the stream's opening `message_start` ([messageStart]), built and emitted lazily before the
+ * first event of any kind (#352). The handler used to send it before calling the engine, which
+ * committed the 200 header before the engine's served-model check could run; deferred to here, a
+ * request that fails before its first token has written nothing. Built lazily too, so its `model`
+ * can name the model actually serving (see [StreamEchoModel]). [finish] emits it as well, so a
+ * zero-token stream is still well-formed.
  */
-internal class AnthropicStreamSequencer(private val sse: SseWriter) {
+internal class AnthropicStreamSequencer(private val sse: SseWriter, private val messageStart: () -> JSONObject) {
+  private var started = false
   private var thinkingStarted = false
   private var thinkingStopped = false
   private var textStarted = false
+
+  private fun startIfNeeded() {
+    if (!started) {
+      started = true
+      sse.send("message_start", messageStart())
+    }
+  }
 
   private fun closeThinkingIfOpen() {
     if (thinkingStarted && !thinkingStopped) {
@@ -520,6 +535,7 @@ internal class AnthropicStreamSequencer(private val sse: SseWriter) {
 
   /** Call from the engine's `onReasoning` callback for each reasoning-channel delta. */
   fun onReasoningDelta(text: String) {
+    startIfNeeded()
     if (!thinkingStarted) {
       thinkingStarted = true
       sse.send("content_block_start", buildContentBlockStartEvent(0, "thinking"))
@@ -529,6 +545,7 @@ internal class AnthropicStreamSequencer(private val sse: SseWriter) {
 
   /** Call from the engine's `onToken` callback for each visible-text delta. */
   fun onTextDelta(text: String) {
+    startIfNeeded()
     closeThinkingIfOpen()
     val textIndex = if (thinkingStarted) 1 else 0
     if (!textStarted) {
@@ -540,6 +557,7 @@ internal class AnthropicStreamSequencer(private val sse: SseWriter) {
 
   /** Call once generation completes: closes any open block(s) and emits the terminal event pair. */
   fun finish(stopReason: String, outputTokens: Int) {
+    startIfNeeded()
     closeThinkingIfOpen()
     if (textStarted) {
       sse.send("content_block_stop", buildContentBlockStopEvent(if (thinkingStarted) 1 else 0))

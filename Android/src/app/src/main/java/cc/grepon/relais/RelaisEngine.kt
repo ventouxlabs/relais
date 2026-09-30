@@ -127,6 +127,14 @@ data class RelaisRequest(
    * only emitting the call for the client. Default false. See `cc.grepon.relais.nodetools` (#9).
    */
   val nodeToolsEnabled: Boolean = false,
+  /**
+   * The model id this request was classified for by [resolveModelRequest] (#352): the client's RAW
+   * `model` field via [requestedModelId], set where the chat lanes build the request, not by a later
+   * `.copy()` a lane could forget. Null = "whatever is resident" (client omitted `model`, and every
+   * non-chat caller). [RelaisEngine.generate] checks it under its lock and throws
+   * [ModelNotResidentException] if something else is resident by then.
+   */
+  val expectedModelId: String? = null,
 ) {
   val modalities: RequestModalities
     get() = RequestModalities(hasImage = imagePng != null, hasAudio = audioWav != null)
@@ -204,6 +212,12 @@ data class RelaisResult(
    * Null under exactly the same conditions, so the two series stay comparable.
    */
   val decodeStartLatencySec: Double? = null,
+  /**
+   * The model that actually produced this result, read under the engine lock (#352) — what a
+   * non-streaming response echoes when the client omitted `model`. Null on the AICore lane, which
+   * never takes the lock or loads a resident model.
+   */
+  val servedModelId: String? = null,
 )
 
 /**
@@ -736,6 +750,14 @@ object RelaisEngine {
   /**
    * Runs one request against the resident engine. Routes via [BackendSelector]. If [onToken] is
    * provided, each decoded delta is delivered as it streams (used for SSE / chunked HTTP).
+   *
+   * Served-model check (#352): under [lock], after the lazy re-init and before any decode (tool or
+   * streaming), a request whose [RelaisRequest.expectedModelId] is not [residentModelId] throws
+   * [ModelNotResidentException] — a swap won the lock after the request was classified. It throws
+   * before [onToken]/[onReasoning] ever run, so a streaming caller has written nothing. NOT covered:
+   * the AICore/NPU lane returns before the lock and never loads a resident model, so there is no
+   * resident id to compare; that lane is unverified and never selected today (`aicoreAvailable()`
+   * is false).
    */
   @OptIn(ExperimentalApi::class)
   fun generate(
@@ -779,6 +801,11 @@ object RelaisEngine {
         // cold-start — init when not). Either way no request ever observes/uses a closed `engine`.
         ensureInitialized(context)
         val e = engine ?: error("Engine not initialized")
+        // #352: what serves is only knowable here. Read once, so the check and the echo agree.
+        val served = residentModelId
+        request.expectedModelId?.let { expected ->
+          if (servedModelMismatch(expected, served)) throw ModelNotResidentException(expected, served)
+        }
         // The resident engine's TRUE lane: after init, a Google-Tensor AOT model on the bundled
         // dispatcher reports TPU_LITERTLM (T-4) — the selector can't know this before init.
         val backend = if (residentIsTpu) RelaisBackend.TPU_LITERTLM else requested
@@ -788,7 +815,7 @@ object RelaisEngine {
         // `lock` (caller, not this callee, per the #178 restructure above) + same thermal-cooldown +
         // RelaisMetrics scaffolding as the streaming path below.
         if (request.tools.isNotEmpty() || request.toolResults.isNotEmpty()) {
-          return generateWithToolsLocked(e, request, backend)
+          return generateWithToolsLocked(e, request, backend).copy(servedModelId = served)
         }
 
         // Thermal cool-down spaces *actual* decode runs: applied under the lock, not per-request on
@@ -987,6 +1014,7 @@ object RelaisEngine {
             finishReason = RelaisFinishReason.forCompletion(cancelState.get().truncated),
             timeToFirstTokenSec = ttftSec,
             decodeStartLatencySec = decodeStartSec,
+            servedModelId = served,
           )
         } finally {
           // Join the cancel thread (if any) before closing so cancelProcess() and close() never run
