@@ -990,6 +990,7 @@ class RelaisHttpServer(
     val liveness = RelaisLivenessState.snapshot
     val startingNow = liveness.startupInProgress
     val configuredId = RelaisConfig.modelId(context)
+    val configuredRef = RelaisConfig.modelRef(context)?.takeIf { it.modelId == configuredId }
     val dashStatus = assembleDashboardStatus(
       engineReady = RelaisEngine.isReady,
       listenersUp = liveness.listenersUp,
@@ -1012,7 +1013,15 @@ class RelaisHttpServer(
       availableModelIds =
         availableModelIdsFor(provisionedOnDisk(), configuredId, RelaisRuntimeCompat::incompatibleReason),
       switchLocked = startingNow,
-      pendingModelId = pendingModelIdFor(configuredId, RelaisEngine.residentModelId),
+      pendingModelId =
+        pendingModelIdFor(
+          configured = configuredId,
+          resident = RelaisEngine.residentModelId,
+          // #354: the configured BUILD, when a ref names one for the configured id. One read.
+          configuredFile = configuredRef?.modelFile,
+          configuredCommit = configuredRef?.commitHash,
+          residentPath = RelaisEngine.residentModelPath,
+        ),
       idleUnloaded = liveness.idleUnloaded,
     )
     respondText(

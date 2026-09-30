@@ -44,6 +44,12 @@ import org.junit.Test
  */
 class RelaisHttpDashboardTest {
 
+  private companion object {
+    const val G5_COMMIT = "361a4010ad6d88fc5c86e148e333c0342b99763d"
+    const val TPU_COMMIT = "9262660a1676eed6d0c477ab1a86344430854664"
+    const val ALLOWLIST_COMMIT = "6e5c4f1e395deb959c494953478fa5cec4b8008f" // model_allowlists/1_0_15.json
+  }
+
   // ---------------------------------------------------------------------------
   // 1. Dashboard security headers (the only assertions on these values anywhere)
   // ---------------------------------------------------------------------------
@@ -138,19 +144,107 @@ class RelaisHttpDashboardTest {
 
   @Test
   fun `pending is the configured id when the engine is serving something else`() {
-    assertEquals("b", pendingModelIdFor(configured = "b", resident = "a"))
+    assertEquals(
+      "b",
+      pendingModelIdFor(configured = "b", resident = "a", configuredFile = null, configuredCommit = null, residentPath = "/m/a.litertlm"),
+    )
   }
 
   @Test
   fun `nothing is pending when config and engine agree`() {
-    assertNull(pendingModelIdFor(configured = "b", resident = "b"))
+    assertNull(pendingModelIdFor(configured = "b", resident = "b", configuredFile = null, configuredCommit = null, residentPath = "/m/b.litertlm"))
+    // Same id AND same build: nothing pending either.
+    assertNull(
+      pendingModelIdFor(configured = "b", resident = "b", configuredFile = "b.litertlm", configuredCommit = null, residentPath = "/m/v1/b.litertlm"),
+    )
+  }
+
+  @Test
+  fun `a same-id pick of a different build is pending (#354)`() {
+    // One id can name two builds — the G5 TPU E2B ref and the allowlist GPU build share an id. After
+    // picking the other one, the ids agree while the resident FILE is still the previous build, and
+    // the pick applies only on restart. Comparing ids alone showed it as already applied.
+    val e2b = "litert-community/gemma-4-E2B-it-litert-lm"
+    assertEquals(
+      "$e2b · gemma-4-E2B-it_Google_Tensor_G5.litertlm @ 9262660",
+      pendingModelIdFor(
+        configured = e2b,
+        resident = e2b,
+        configuredFile = "gemma-4-E2B-it_Google_Tensor_G5.litertlm",
+        configuredCommit = TPU_COMMIT,
+        residentPath = "/sdcard/x/gemma-4-E2B-it/$G5_COMMIT/gemma-4-E2B-it.litertlm",
+      ),
+    )
+  }
+
+  @Test
+  fun `a same-file pick at another commit is pending, and the same commit is not (#354)`() {
+    // G5_DEFAULT_REF and the curated allowlist E2B share id AND file name, at different commits.
+    val e2b = "litert-community/gemma-4-E2B-it-litert-lm"
+    val path = "/sdcard/x/gemma-4-E2B-it/$G5_COMMIT/gemma-4-E2B-it.litertlm"
+    assertEquals(
+      "$e2b · gemma-4-E2B-it.litertlm @ 6e5c4f1",
+      pendingModelIdFor(e2b, e2b, "gemma-4-E2B-it.litertlm", configuredCommit = ALLOWLIST_COMMIT, residentPath = path),
+    )
+    assertNull(pendingModelIdFor(e2b, e2b, "gemma-4-E2B-it.litertlm", configuredCommit = G5_COMMIT, residentPath = path))
+  }
+
+  @Test
+  fun `a different file at the SAME commit is pending (#354 review)`() {
+    // An HF-search ref can pick the plain E2B file from the very commit that also holds the TPU file,
+    // so only the file name tells the builds apart. Without this case the file-name check could be
+    // deleted with the suite green (the TPU test differs in both file AND commit).
+    val e2b = "litert-community/gemma-4-E2B-it-litert-lm"
+    assertEquals(
+      "$e2b · gemma-4-E2B-it.litertlm @ 9262660",
+      pendingModelIdFor(
+        e2b, e2b, "gemma-4-E2B-it.litertlm",
+        configuredCommit = TPU_COMMIT,
+        residentPath = "/sdcard/x/gemma-4-E2B-it/$TPU_COMMIT/gemma-4-E2B-it_Google_Tensor_G5.litertlm",
+      ),
+    )
+  }
+
+  @Test
+  fun `a different file at the side-load location is pending, and names no commit it cannot see`() {
+    val e4b = RelaisConfig.DEFAULT_MODEL_ID
+    assertEquals(
+      "$e4b · other-E4B.litertlm",
+      pendingModelIdFor(
+        e4b, e4b, "other-E4B.litertlm",
+        configuredCommit = null,
+        residentPath = "/sdcard/Android/data/p/files/relais/gemma-4-E4B-it.litertlm",
+      ),
+    )
+  }
+
+  @Test
+  fun `the side-load location has no commit directory and is never pending on commit alone`() {
+    // relais/gemma-4-E4B-it.litertlm: no commit dir, so a ref's commit cannot be compared. Reading a
+    // mismatch there would leave the hint up forever on a node serving exactly what was picked.
+    val e4b = RelaisConfig.DEFAULT_MODEL_ID
+    assertNull(
+      pendingModelIdFor(
+        e4b, e4b, "gemma-4-E4B-it.litertlm",
+        configuredCommit = ALLOWLIST_COMMIT,
+        residentPath = "/sdcard/Android/data/p/files/relais/gemma-4-E4B-it.litertlm",
+      ),
+    )
+  }
+
+  @Test
+  fun `with no configured ref a same-id resident is not pending`() {
+    // A ref-less pick names no build, so there is nothing to compare the resident file against.
+    assertNull(
+      pendingModelIdFor(configured = "b", resident = "b", configuredFile = null, configuredCommit = null, residentPath = "/m/other.litertlm"),
+    )
   }
 
   @Test
   fun `nothing is pending before any successful init`() {
     // A cold node is not "behind" — there is no resident model for config to be ahead of, and a
     // hint on a node that has never loaded anything would be noise.
-    assertNull(pendingModelIdFor(configured = "b", resident = null))
+    assertNull(pendingModelIdFor(configured = "b", resident = null, configuredFile = "b.litertlm", configuredCommit = null, residentPath = null))
   }
 
   // ---------------------------------------------------------------------------
