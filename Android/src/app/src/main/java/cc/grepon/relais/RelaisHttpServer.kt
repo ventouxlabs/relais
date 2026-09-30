@@ -630,8 +630,8 @@ class RelaisHttpServer(
           method == "GET" && path.startsWith("/v1/clientconfig") -> handleClientConfig(ctx)
 
           method == "POST" && path.startsWith("/v1/chat/completions") ->
-            // handleOpenAi may commit the SSE 200 header before returning, so post-commit errors are
-            // handled inside handleOpenAi itself; the shared gate + latency are still released/recorded
+            // handleOpenAi may commit the SSE 200 header (lazily, on its first event — #352) before
+            // returning, so post-commit errors are handled inside handleOpenAi itself; the shared gate + latency are still released/recorded
             // in withInferenceAdmission's finally.
             withInferenceAdmission("/v1/chat/completions", ::reply) {
               // Resolve the session key only when session memory is enabled (null otherwise = inert).
@@ -682,7 +682,7 @@ class RelaisHttpServer(
 
           method == "POST" && path.startsWith("/v1/messages") ->
             // Anthropic Messages API (#179). Same admission discipline as /v1/chat/completions;
-            // handleAnthropicMessages may commit the SSE 200 header before returning, so post-commit
+            // handleAnthropicMessages may commit the SSE 200 header (lazily, #352) before returning, so post-commit
             // errors are handled inside it via sse.sendError, not the outer catch.
             withInferenceAdmission("/v1/messages", ::reply) {
               val sessionKey = if (sessionEnabled) resolveSessionKey(sock, sessionHeader) else null
@@ -696,7 +696,21 @@ class RelaisHttpServer(
           else -> reply(404, RelaisError.json("not found", RelaisError.NOT_FOUND))
         }
       } catch (e: Exception) {
-        if (isTlsHandshakeFailureBeforeRequest(requestLineRead, e)) {
+        if (e is ModelNotResidentException) {
+          // #352: a swap won the engine lock after this request was classified. Nothing has been
+          // written (non-streaming, or a stream that never committed — see
+          // isUncommittedModelMismatch), so answer like the classifier's own swap 503.
+          Log.w(TAG, "served-model check failed: ${e.message}")
+          RelaisMetrics.recordRequest(endpoint, 503)
+          runCatching {
+            respond(
+              sock,
+              503,
+              modelNotResidentBody(endpoint, MODEL_NOT_RESIDENT_MESSAGE),
+              listOf("Retry-After: $MODEL_SWAP_RETRY_AFTER_SECONDS"),
+            )
+          }
+        } else if (isTlsHandshakeFailureBeforeRequest(requestLineRead, e)) {
           // A browser that rejects our CA sends a TLS alert before HTTP begins. It is useful setup
           // information in logcat, but it is not a 500 or a request-log entry: there was no route,
           // response, or server-side request failure to measure (#324).
@@ -1509,7 +1523,7 @@ class RelaisHttpServer(
   private fun handleOpenAi(sock: java.net.Socket, body: JSONObject, sessionKey: String? = null) {
     // RAW field — null when the client omitted `model`. Feeding DEFAULT_MODEL to the decision would
     // 404 every omitted-model request, the single most common shape there is.
-    val requestedModel = body.optString("model", "").takeIf { it.isNotBlank() }
+    val requestedModel = requestedModelId(body)
     // Echo: the client's own id when it sent one (the OpenAI drop-in contract #192 settled),
     // otherwise the model ACTUALLY serving — never DEFAULT_MODEL. That alias is in no registry and
     // in no /v1/models listing, so echoing it hands back an id that now 404s the moment a proxy
@@ -1593,7 +1607,7 @@ class RelaisHttpServer(
           .put("id", id)
           .put("object", "chat.completion")
           .put("created", System.currentTimeMillis() / 1000)
-          .put("model", model)
+          .put("model", result.servedModelId ?: model)
           .put("choices", JSONArray().put(
             JSONObject()
               .put("index", 0)
@@ -1612,9 +1626,8 @@ class RelaisHttpServer(
     // Streaming: SSE delimited by connection close. Once the 200 header is committed, an inference
     // failure must NOT unwind to the outer catch (that would write a second HTTP status into the
     // stream and double-count the request) — post-commit errors become an SSE error event (HIGH-1).
-    RelaisMetrics.recordRequest("/v1/chat/completions", 200)
-    val sse = SseWriter(sock.getOutputStream())
-    sse.commitHeader()
+    // The header commits lazily on the first event, and the 200 is recorded then (#352).
+    val sse = SseWriter(sock.getOutputStream()) { RelaisMetrics.recordRequest("/v1/chat/completions", 200) }
     fun emitDelta(delta: JSONObject, finish: String?) {
       val choice = JSONObject().put("index", 0)
         .put("delta", delta)
@@ -1667,6 +1680,7 @@ class RelaisHttpServer(
       // returns the whole reply alongside the deltas). Best-effort; never affects the stream.
       recordSessionTurn(recordKey, request.text, result.text)
     } catch (e: Exception) {
+      if (isUncommittedModelMismatch(e, sse.committed)) throw e // #352: -> 503 in handle()
       Log.e(TAG, "stream error after headers committed", e)
       sse.abort()
     }
@@ -1682,7 +1696,7 @@ class RelaisHttpServer(
    */
   private fun handleAnthropicMessages(sock: java.net.Socket, body: JSONObject, sessionKey: String? = null) {
     // RAW field + resident-model echo — see the /v1/chat/completions call site for both rationales.
-    val requestedModel = body.optString("model", "").takeIf { it.isNotBlank() }
+    val requestedModel = requestedModelId(body)
     val model = requestedModel ?: RelaisEngine.residentModelId ?: DEFAULT_MODEL
     if (rejectIfModelUnavailable(
       sock,
@@ -1727,6 +1741,7 @@ class RelaisHttpServer(
         temperature = optDoubleOrNull(body, "temperature"),
         topP = optDoubleOrNull(body, "top_p"),
         enableThinking = enableThinking,
+        expectedModelId = requestedModel, // #352: checked again under the engine lock
       )
 
     // Session memory (Feature #5): identical reuse policy to handleOpenAi — a bare turn (client sent no
@@ -1759,7 +1774,7 @@ class RelaisHttpServer(
         } else {
           RelaisEngine.generate(context, request, shouldCancel = { ThermalGovernor.shouldTruncate() })
         }
-      val resp = buildAnthropicMessageResponse(id, model, result, inputTokens)
+      val resp = buildAnthropicMessageResponse(id, result.servedModelId ?: model, result, inputTokens)
       // Recorded only AFTER generation succeeds (mirrors handleOpenAi's non-stream branch) — recording
       // before generate() would spuriously log a 200 if generation throws.
       RelaisMetrics.recordRequest("/v1/messages", 200)
@@ -1771,18 +1786,18 @@ class RelaisHttpServer(
     // Streaming: Anthropic's named-event SSE sequence (message_start -> content_block* -> message_delta
     // -> message_stop), no [DONE] sentinel. Post-header failures become an `event: error` pair rather
     // than an HTTP status (mirrors handleOpenAi's sse.abort() pattern via sse.sendError instead).
-    RelaisMetrics.recordRequest("/v1/messages", 200)
-    val sse = SseWriter(sock.getOutputStream())
-    sse.commitHeader()
+    // The header commits lazily and message_start is sent after the engine call (tool branch) or on
+    // the first event (AnthropicStreamSequencer), so a served-model mismatch writes nothing (#352).
+    val sse = SseWriter(sock.getOutputStream()) { RelaisMetrics.recordRequest("/v1/messages", 200) }
+    val messageStart = buildMessageStartEvent(id, model, inputTokens)
     try {
-      sse.send("message_start", buildMessageStartEvent(id, model, inputTokens))
-
       if (request.tools.isNotEmpty() || request.toolResults.isNotEmpty()) {
         // Tool-calling responses are single-shot even when stream:true: the blocking tool branch
         // (RelaisEngine.generateWithToolsLocked) takes no onToken callback, so there is no incremental
         // delta to emit — the whole content is already in hand. One start/delta/stop triple per
         // content block is fine; Anthropic clients handle single-delta blocks correctly.
         val result = generateWithNodeTools(request)
+        sse.send("message_start", messageStart)
         var index = 0
         result.reasoning?.takeIf { it.isNotBlank() }?.let { reasoning ->
           sse.send("content_block_start", buildContentBlockStartEvent(index, "thinking"))
@@ -1813,7 +1828,7 @@ class RelaisHttpServer(
 
       // Non-tool streaming: incremental thinking/text deltas via onReasoning/onToken, sequenced by
       // AnthropicStreamSequencer (extracted from this handler; see RelaisAnthropicParser.kt).
-      val sequencer = AnthropicStreamSequencer(sse)
+      val sequencer = AnthropicStreamSequencer(sse, messageStart)
       val result = RelaisEngine.generate(
         context,
         request,
@@ -1824,6 +1839,7 @@ class RelaisHttpServer(
       sequencer.finish(anthropicStopReason(result), result.completionTokens)
       recordSessionTurn(recordKey, request.text, result.text)
     } catch (e: Exception) {
+      if (isUncommittedModelMismatch(e, sse.committed)) throw e // #352: -> 503 in handle()
       Log.e(TAG, "anthropic stream error after headers committed", e)
       sse.sendError("api_error", "stream aborted")
     }
@@ -1862,8 +1878,9 @@ class RelaisHttpServer(
    * (tools advertised -> model may emit `tool_calls`, finish_reason="tool_calls") and the round-trip
    * (tool results supplied -> model produces a final answer, finish_reason="stop"). No SSE deltas:
    * even in stream mode the body is a single chunk, because the blocking sendMessage returns the
-   * whole reply at once. Both stream and non-stream commit a 200 before producing the body, so
-   * post-header errors in the stream path become an SSE error event (mirrors [handleOpenAi]).
+   * whole reply at once. The stream path commits its 200 only on its first event, AFTER the engine
+   * call (#352), so a pre-first-event served-model mismatch still gets a 503; post-header errors
+   * become an SSE error event (mirrors [handleOpenAi]).
    */
   /**
    * Tool-path generation, executing curated built-in tools NODE-SIDE in a single hop when
@@ -1940,7 +1957,7 @@ class RelaisHttpServer(
           .put("id", id)
           .put("object", "chat.completion")
           .put("created", System.currentTimeMillis() / 1000)
-          .put("model", model)
+          .put("model", result.servedModelId ?: model)
           .put("choices", JSONArray().put(
             JSONObject()
               .put("index", 0)
@@ -1956,12 +1973,10 @@ class RelaisHttpServer(
       return
     }
 
-    // Streaming: one chunk only. Commit the 200 SSE header, then emit a single delta carrying the
-    // full assistant message (with tool_calls when present), then [DONE]. Post-header errors become
+    // Streaming: one chunk only. The first send commits the 200 SSE header (lazily, #352), then a
+    // single delta carries the full assistant message (with tool_calls when present), then [DONE]. Post-header errors become
     // an SSE error event (the outer catch would double-count + double-write a status otherwise).
-    RelaisMetrics.recordRequest("/v1/chat/completions", 200)
-    val sse = SseWriter(sock.getOutputStream())
-    sse.commitHeader()
+    val sse = SseWriter(sock.getOutputStream()) { RelaisMetrics.recordRequest("/v1/chat/completions", 200) }
     try {
       val result = generateWithNodeTools(request)
       val (message, finishReason) = buildToolAssistantMessage(result, streaming = true)
@@ -1975,6 +1990,7 @@ class RelaisHttpServer(
       sse.send(chunk)
       sse.done()
     } catch (e: Exception) {
+      if (isUncommittedModelMismatch(e, sse.committed)) throw e // #352: -> 503 in handle()
       Log.e(TAG, "tool stream error after headers committed", e)
       sse.abort()
     }
@@ -2050,7 +2066,7 @@ class RelaisHttpServer(
           .put("id", id)
           .put("object", "chat.completion")
           .put("created", System.currentTimeMillis() / 1000)
-          .put("model", model)
+          .put("model", result.servedModelId ?: model)
           .put("choices", JSONArray().put(choice))
           .put("usage", buildUsageObject(request.text, result.completionTokens))
         attachRelaisExtras(resp, result)
@@ -2116,6 +2132,8 @@ class RelaisHttpServer(
       seed = if (body.has("seed") && !body.isNull("seed")) body.optInt("seed") else null,
       enableThinking = RelaisReasoning.thinkingEnabled(optStringOrNull(body, "reasoning_effort")),
       nodeToolsEnabled = body.optBoolean("node_tools", false) || body.optBoolean("x_relais_node_tools", false),
+      // #352: the id handleOpenAi classified, checked again under the engine lock.
+      expectedModelId = requestedModelId(body),
     )
   }
 

@@ -26,11 +26,29 @@ import org.json.JSONObject
  * `message_stop` event, or emits an `event: error` pair on failure). [send] (bare, OpenAI-shaped) and
  * [done] are UNCHANGED — the Anthropic handler uses [send] (event, json) and [sendError] instead and
  * never calls [done].
+ *
+ * The 200 header is committed LAZILY (#352): every writer commits it first, once, so no byte can
+ * reach the socket on an uncommitted stream and a handler never has to remember to commit. Until the
+ * first write the socket is untouched, so a request that fails before its first event — a
+ * served-model mismatch under the engine lock ([ModelNotResidentException]) — can still be answered
+ * with a real HTTP status. [onCommit] runs once, at commit, and is where a streaming handler records
+ * its 200: a stream that never commits never counted as one.
  */
-class SseWriter(private val out: OutputStream) {
+class SseWriter(private val out: OutputStream, private val onCommit: () -> Unit) {
 
-  /** Writes the 200 SSE response header. Call exactly once, before any [send]/[done]/[abort]. */
+  /** True once the 200 header has been (or is being) written — from then on only SSE events may follow. */
+  var committed: Boolean = false
+    private set
+
+  /**
+   * Writes the 200 SSE response header. Idempotent, and called by every writer below, so an explicit
+   * call is never required. [committed] flips BEFORE the write: a write that fails part-way may
+   * still have put bytes on the wire, so the stream must never again be treated as uncommitted.
+   */
   fun commitHeader() {
+    if (committed) return
+    committed = true
+    onCommit()
     out.write(
       ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n" +
         "Connection: close\r\n\r\n").toByteArray()
@@ -40,18 +58,21 @@ class SseWriter(private val out: OutputStream) {
 
   /** Writes one bare `data: <json>` SSE event (OpenAI shape). */
   fun send(json: JSONObject) {
+    commitHeader()
     out.write("data: $json\n\n".toByteArray())
     out.flush()
   }
 
   /** Writes one named `event: <event>` / `data: <json>` SSE event pair (Anthropic shape). */
   fun send(event: String, json: JSONObject) {
+    commitHeader()
     out.write("event: $event\ndata: $json\n\n".toByteArray())
     out.flush()
   }
 
   /** Writes the terminal `data: [DONE]` SSE event (OpenAI shape only — Anthropic has no sentinel). */
   fun done() {
+    commitHeader()
     out.write("data: [DONE]\n\n".toByteArray())
     out.flush()
   }
@@ -59,19 +80,21 @@ class SseWriter(private val out: OutputStream) {
   /**
    * Best-effort SSE error event for a failure AFTER the 200 header is already committed (the outer
    * HTTP-status catch can't run at that point without double-writing a status/double-counting the
-   * request). Swallows any write failure — the connection may already be gone.
+   * request). Swallows any write failure — the connection may already be gone. On a stream that has
+   * not committed yet it commits first, so a pre-first-event failure still reads as 200 + error event.
    */
   fun abort(message: String = "stream aborted") {
-    runCatching { out.write("data: {\"error\":\"$message\"}\n\n".toByteArray()); out.flush() }
+    runCatching { commitHeader(); out.write("data: {\"error\":\"$message\"}\n\n".toByteArray()); out.flush() }
   }
 
   /**
    * Anthropic-shaped best-effort SSE error event for a failure AFTER the 200 header is already
    * committed — the [abort] equivalent for the named-event stream. Swallows any write failure (mirrors
-   * [abort]'s failure-swallowing; the connection may already be gone).
+   * [abort]'s failure-swallowing and its commit-first; the connection may already be gone).
    */
   fun sendError(errorType: String, message: String) {
     runCatching {
+      commitHeader()
       val payload = JSONObject()
         .put("type", "error")
         .put("error", JSONObject().put("type", errorType).put("message", message))
