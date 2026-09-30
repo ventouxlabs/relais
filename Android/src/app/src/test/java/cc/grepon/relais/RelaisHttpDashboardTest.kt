@@ -47,7 +47,7 @@ class RelaisHttpDashboardTest {
   private companion object {
     const val G5_COMMIT = "361a4010ad6d88fc5c86e148e333c0342b99763d"
     const val TPU_COMMIT = "9262660a1676eed6d0c477ab1a86344430854664"
-    const val ALLOWLIST_COMMIT = "6e5c4f0000000000000000000000000000000000"
+    const val ALLOWLIST_COMMIT = "6e5c4f1e395deb959c494953478fa5cec4b8008f" // model_allowlists/1_0_15.json
   }
 
   // ---------------------------------------------------------------------------
@@ -183,10 +183,39 @@ class RelaisHttpDashboardTest {
     val e2b = "litert-community/gemma-4-E2B-it-litert-lm"
     val path = "/sdcard/x/gemma-4-E2B-it/$G5_COMMIT/gemma-4-E2B-it.litertlm"
     assertEquals(
-      "$e2b · gemma-4-E2B-it.litertlm @ 6e5c4f0",
+      "$e2b · gemma-4-E2B-it.litertlm @ 6e5c4f1",
       pendingModelIdFor(e2b, e2b, "gemma-4-E2B-it.litertlm", configuredCommit = ALLOWLIST_COMMIT, residentPath = path),
     )
     assertNull(pendingModelIdFor(e2b, e2b, "gemma-4-E2B-it.litertlm", configuredCommit = G5_COMMIT, residentPath = path))
+  }
+
+  @Test
+  fun `a different file at the SAME commit is pending (#354 review)`() {
+    // An HF-search ref can pick the plain E2B file from the very commit that also holds the TPU file,
+    // so only the file name tells the builds apart. Without this case the file-name check could be
+    // deleted with the suite green (the TPU test differs in both file AND commit).
+    val e2b = "litert-community/gemma-4-E2B-it-litert-lm"
+    assertEquals(
+      "$e2b · gemma-4-E2B-it.litertlm @ 9262660",
+      pendingModelIdFor(
+        e2b, e2b, "gemma-4-E2B-it.litertlm",
+        configuredCommit = TPU_COMMIT,
+        residentPath = "/sdcard/x/gemma-4-E2B-it/$TPU_COMMIT/gemma-4-E2B-it_Google_Tensor_G5.litertlm",
+      ),
+    )
+  }
+
+  @Test
+  fun `a different file at the side-load location is pending, and names no commit it cannot see`() {
+    val e4b = RelaisConfig.DEFAULT_MODEL_ID
+    assertEquals(
+      "$e4b · other-E4B.litertlm",
+      pendingModelIdFor(
+        e4b, e4b, "other-E4B.litertlm",
+        configuredCommit = null,
+        residentPath = "/sdcard/Android/data/p/files/relais/gemma-4-E4B-it.litertlm",
+      ),
+    )
   }
 
   @Test

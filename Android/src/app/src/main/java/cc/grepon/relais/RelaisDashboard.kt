@@ -74,8 +74,8 @@ data class DashboardStatus(
    */
   val switchLocked: Boolean = false,
   /**
-   * The configured model ("id · file" when only the build differs) when the engine is not serving
-   * it, else null — see [pendingModelIdFor].
+   * The configured model ("id · file @ commit" when only the build differs) when the engine is
+   * not serving it, else null — see [pendingModelIdFor].
    * Non-null means config is ahead of the engine: a swap is running, or one ran and did not take
    * effect. The page cannot tell those apart, which is why the hint it renders states the fact and
    * predicts nothing.

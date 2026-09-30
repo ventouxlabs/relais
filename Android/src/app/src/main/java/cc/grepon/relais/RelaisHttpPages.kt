@@ -324,7 +324,7 @@ internal fun validateSelection(
  * when the resident path has one, by its COMMIT directory ([configuredCommit]): pinned models live
  * at `…/{name}/{commit}/{file}`, and two builds can share a file name at different commits. A path
  * with no 40-hex commit directory (the side-load location `relais/<file>`) is compared by file name
- * only, so it can never read as permanently pending. The result carries the build ("id · file @
+ * only, so it is never pending on commit alone. The result carries the build ("id · file @
  * commit") so the hint names it rather than repeating the id the page already shows as resident.
  * With no ref there is no build to compare, so a same-id resident is never pending.
  *
