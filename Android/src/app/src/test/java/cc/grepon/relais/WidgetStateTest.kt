@@ -327,20 +327,29 @@ class WidgetStateTest {
     // shouldRun survived a force-stop / app update that killed the service and its watchdog alarm.
     assertEquals(
       NodeState.OFF,
-      widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = false, ready = false),
+      widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = false, ready = false, idleUnloaded = false),
     )
   }
 
   @Test fun `a real start keeps reading STARTING`() {
     // Each input alone is evidence something IS starting or up; any one of them keeps STARTING.
-    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = true, listenersUp = false, ready = false))
-    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = true, ready = false))
-    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = false, ready = true))
+    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = true, listenersUp = false, ready = false, idleUnloaded = false))
+    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = true, ready = false, idleUnloaded = false))
+    assertEquals(NodeState.STARTING, widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = false, ready = true, idleUnloaded = false))
+  }
+
+  @Test fun `an idle-unloaded node whose listeners dropped keeps STARTING (#358 review)`() {
+    // A failed HTTPS rebind with the engine idle-unloaded: the service is alive and retrying, and the
+    // panel's looksStalled excludes idleUnloaded too — so neither surface calls it off.
+    assertEquals(
+      NodeState.STARTING,
+      widgetDisplayState(NodeState.STARTING, startupInProgress = false, listenersUp = false, ready = false, idleUnloaded = true),
+    )
   }
 
   @Test fun `every other state passes through`() {
     for (s in NodeState.entries.filter { it != NodeState.STARTING }) {
-      assertEquals(s, widgetDisplayState(s, startupInProgress = false, listenersUp = false, ready = false))
+      assertEquals(s, widgetDisplayState(s, startupInProgress = false, listenersUp = false, ready = false, idleUnloaded = false))
     }
   }
 }
