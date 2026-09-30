@@ -14,7 +14,9 @@ package cc.grepon.relais
 
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -62,5 +64,16 @@ class ModelSwitchTest {
     ModelSwitch.applyManualId(ctx, id, resolvedPath = null)
 
     assertEquals("/data/models/plain.litertlm", RelaisConfig.modelPath(ctx))
+  }
+
+  @Test
+  fun `a manual pick of the default id counts as an explicit choice (#355)`() {
+    // Fresh prefs: nothing written, so a Pixel 10 may substitute its G5 default.
+    assertFalse(RelaisConfig.hasExplicitModelId(ctx))
+    // The operator types the default E4B id. modelId() reads the same value before and after —
+    // only explicitness distinguishes them, and deviceDefaultRef keys on it.
+    ModelSwitch.applyManualId(ctx, RelaisConfig.DEFAULT_MODEL_ID, resolvedPath = null)
+    assertEquals(RelaisConfig.DEFAULT_MODEL_ID, RelaisConfig.modelId(ctx))
+    assertTrue(RelaisConfig.hasExplicitModelId(ctx))
   }
 }

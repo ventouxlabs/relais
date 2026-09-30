@@ -27,8 +27,9 @@ import org.junit.Test
 /**
  * Pure-JVM unit tests for [RelaisModelProvisioner.deviceDefaultRef] and [G5_DEFAULT_REF].
  *
- * Verifies that a fresh Pixel 10 with no persisted ref and the untouched DEFAULT_MODEL_ID
- * receives the G5-compatible E2B default, while all other combinations are left unchanged.
+ * Verifies that a fresh Pixel 10 — no persisted ref, and a model id nobody ever wrote — receives the
+ * G5-compatible E2B default, while every other combination is left unchanged (#355: an id the
+ * operator wrote is respected even when it equals DEFAULT_MODEL_ID).
  *
  * No Context / Robolectric needed: deviceDefaultRef is a pure function.
  */
@@ -40,7 +41,7 @@ class Pixel10DefaultModelTest {
       RelaisModelProvisioner.deviceDefaultRef(
         isPixel10 = true,
         hasPersistedRef = false,
-        currentModelId = RelaisConfig.DEFAULT_MODEL_ID,
+        hasExplicitModelId = false,
       )
     assertNotNull("fresh Pixel 10 + default id must return a non-null G5 ref", ref)
     assertEquals(
@@ -82,7 +83,7 @@ class Pixel10DefaultModelTest {
       RelaisModelProvisioner.deviceDefaultRef(
         isPixel10 = false,
         hasPersistedRef = false,
-        currentModelId = RelaisConfig.DEFAULT_MODEL_ID,
+        hasExplicitModelId = false,
       ),
     )
   }
@@ -94,19 +95,31 @@ class Pixel10DefaultModelTest {
       RelaisModelProvisioner.deviceDefaultRef(
         isPixel10 = true,
         hasPersistedRef = true,
-        currentModelId = RelaisConfig.DEFAULT_MODEL_ID,
+        hasExplicitModelId = false,
       ),
     )
   }
 
   @Test
-  fun `Pixel 10 with non-default model id returns null (explicit id respected)`() {
+  fun `Pixel 10 with an operator-written model id returns null, even the default one (#355)`() {
+    // The operator typed an id — any id, including DEFAULT_MODEL_ID (E4B). A manual pick clears the
+    // ref, so hasPersistedRef is false here; the id comparison the old signature used could not tell
+    // "typed E4B on purpose" from "never configured" and swapped E4B for E2B on every START.
     assertNull(
-      "an explicit non-default model id must not be overridden",
+      "an operator-written model id must not be overridden",
       RelaisModelProvisioner.deviceDefaultRef(
         isPixel10 = true,
         hasPersistedRef = false,
-        currentModelId = "litert-community/some-other-model",
+        hasExplicitModelId = true,
+      ),
+    )
+    // The twin in the same test: with the id never written, the same device DOES get the default,
+    // so explicitness is what decides.
+    assertNotNull(
+      RelaisModelProvisioner.deviceDefaultRef(
+        isPixel10 = true,
+        hasPersistedRef = false,
+        hasExplicitModelId = false,
       ),
     )
   }

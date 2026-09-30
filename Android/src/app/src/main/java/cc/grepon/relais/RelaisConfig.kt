@@ -191,6 +191,24 @@ object RelaisConfig {
   fun modelId(context: Context): String =
     prefs(context).getString(KEY_MODEL_ID, null) ?: DEFAULT_MODEL_ID
 
+  /**
+   * True iff a model id was ever WRITTEN — by an operator pick, a ref, or `adb --es modelId` —
+   * rather than [modelId] falling back to [DEFAULT_MODEL_ID]. The two read identically through
+   * [modelId]; only this tells a node nobody configured from an operator who chose the default
+   * (#355). Nothing in the current code writes the default id automatically, so absence means
+   * "never chosen". (Builds before `084e86a6` could write it from Configure's combined SAVE; such an
+   * install reads as explicit, which only means it keeps the id it already runs.)
+   */
+  fun hasExplicitModelId(context: Context): Boolean = prefs(context).contains(KEY_MODEL_ID)
+
+  /**
+   * Test/reset seam: forgets that a model id was ever chosen, for on-device probes that must leave
+   * a device's Pixel-10 default eligibility as they found it ([hasExplicitModelId]).
+   */
+  internal fun clearModelIdForTest(context: Context) {
+    prefs(context).edit().remove(KEY_MODEL_ID).apply()
+  }
+
   fun setModelId(context: Context, value: String) {
     val p = prefs(context)
     val changed = p.getString(KEY_MODEL_ID, null) != value

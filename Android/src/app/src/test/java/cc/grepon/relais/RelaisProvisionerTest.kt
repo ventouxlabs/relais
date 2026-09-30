@@ -21,6 +21,7 @@ package cc.grepon.relais
 import androidx.test.core.app.ApplicationProvider
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -198,5 +199,28 @@ class RelaisProvisionerTest {
       RelaisConfig.setModelId(ctx, savedModelId)
       RelaisConfig.setProvisionedModels(ctx, savedRegistry)
     }
+  }
+
+  @Test
+  fun `a Pixel 10 keeps an operator-picked default id instead of the G5 default (#355)`() {
+    val ctx = ApplicationProvider.getApplicationContext<android.app.Application>()
+    // The operator typed the default E4B id: the ref is cleared and the id is written.
+    ModelSwitch.applyManualId(ctx, RelaisConfig.DEFAULT_MODEL_ID, resolvedPath = null)
+    assertNull(RelaisModelProvisioner.applyDeviceDefaultIfFresh(ctx, isPixel10 = true))
+    assertNull("no ref may be written over the operator's pick", RelaisConfig.modelRef(ctx))
+    assertEquals(RelaisConfig.DEFAULT_MODEL_ID, RelaisConfig.modelId(ctx))
+
+    // Twin: the same device with the id never written DOES get the G5 default.
+    RelaisConfig.clearModelIdForTest(ctx)
+    assertEquals(
+      RelaisModelProvisioner.G5_DEFAULT_REF,
+      RelaisModelProvisioner.applyDeviceDefaultIfFresh(ctx, isPixel10 = true),
+    )
+    assertEquals(RelaisModelProvisioner.G5_DEFAULT_REF.modelId, RelaisConfig.modelId(ctx))
+
+    // Third input: a persisted ref alone also blocks the default, with the id key absent — so a
+    // constant in place of the ref check fails here, not only the explicitness one above.
+    RelaisConfig.clearModelIdForTest(ctx)
+    assertNull(RelaisModelProvisioner.applyDeviceDefaultIfFresh(ctx, isPixel10 = true))
   }
 }
