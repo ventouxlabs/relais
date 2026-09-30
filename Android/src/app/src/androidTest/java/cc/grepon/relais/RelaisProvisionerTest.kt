@@ -46,6 +46,9 @@ class RelaisProvisionerTest {
     // targetContext is the real app's prefs, so snapshot everything we touch and restore it in
     // finally — an operator's configured model id / path must survive this test unchanged.
     val savedModelId = RelaisConfig.modelId(ctx)
+    // modelId() reads DEFAULT when nothing was written; writing it back would make the id explicit
+    // and permanently turn off a Pixel 10's G5 default (#355). Restore absence as absence.
+    val savedExplicit = RelaisConfig.hasExplicitModelId(ctx)
     val savedPath = RelaisConfig.modelPath(ctx)
 
     // Eligibility: fast path 2 is gated to the default model id.
@@ -69,6 +72,7 @@ class RelaisProvisionerTest {
       if (!preexisting) staged.delete()
       // Restore id first (a change clears KEY_MODEL_PATH), then the path, so both end as found.
       RelaisConfig.setModelId(ctx, savedModelId)
+      if (!savedExplicit) RelaisConfig.clearModelIdForTest(ctx)
       savedPath?.let { RelaisConfig.setModelPath(ctx, it) }
     }
   }

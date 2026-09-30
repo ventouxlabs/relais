@@ -93,19 +93,39 @@ object RelaisModelProvisioner {
 
   /**
    * Pure decision function: returns [G5_DEFAULT_REF] iff this is a fresh Pixel 10 whose operator
-   * has not yet chosen a model and whose configured id is still the untouched [RelaisConfig.DEFAULT_MODEL_ID].
-   * Returns null in all other cases — non-Pixel-10 behavior is byte-identical to before.
+   * has not yet chosen a model — no persisted ref, and no model id ever written
+   * ([RelaisConfig.hasExplicitModelId]). Returns null in all other cases — non-Pixel-10 behavior is
+   * byte-identical to before.
+   *
+   * [hasExplicitModelId], not "the id equals [RelaisConfig.DEFAULT_MODEL_ID]" (#355): a manual pick
+   * clears the ref, so an operator who typed the default E4B id looked exactly like a node nobody
+   * configured, and every START swapped their E4B for E2B. An unwritten id reads as the default, so
+   * the old comparison added nothing the explicitness check does not already cover.
    *
    * Unit-testable with no Context or Android SDK.
    */
   internal fun deviceDefaultRef(
     isPixel10: Boolean,
     hasPersistedRef: Boolean,
-    currentModelId: String,
+    hasExplicitModelId: Boolean,
   ): RelaisModelRef? =
-    if (isPixel10 && !hasPersistedRef && currentModelId == RelaisConfig.DEFAULT_MODEL_ID)
-      G5_DEFAULT_REF
-    else null
+    if (isPixel10 && !hasPersistedRef && !hasExplicitModelId) G5_DEFAULT_REF else null
+
+  /**
+   * Applies [deviceDefaultRef] from live config and returns the ref it applied, or null. Extracted
+   * from [ensureModel] so the ARGUMENTS are testable (#355 review): the pure-function tests cannot
+   * see which config value feeds `hasExplicitModelId`, and passing a constant there would survive
+   * them. [isPixel10] is a parameter only so a test can stand in for the device.
+   */
+  internal fun applyDeviceDefaultIfFresh(context: Context, isPixel10: Boolean): RelaisModelRef? =
+    deviceDefaultRef(
+      isPixel10 = isPixel10,
+      hasPersistedRef = RelaisConfig.modelRef(context) != null,
+      hasExplicitModelId = RelaisConfig.hasExplicitModelId(context),
+    )?.also { ref ->
+      Log.i(TAG, "Fresh Pixel 10: defaulting to G5-compatible ${ref.modelId}")
+      RelaisConfig.setModelRef(context, ref)
+    }
 
   /**
    * A provisioned file together with the model id it holds the weights for.
@@ -296,10 +316,7 @@ object RelaisModelProvisioner {
     // before ANY provisioning. setModelRef clears the stale modelPath and sets modelId=E2B, so the
     // fast-paths below skip and the ref fast-path in resolveModel provisions E2B. Self-healing if
     // apply() races. (E4B is no longer blocked on G5 — this is a perf-preference default, not a gate.)
-    deviceDefaultRef(isPixel10(), RelaisConfig.modelRef(context) != null, RelaisConfig.modelId(context))?.let { ref ->
-      Log.i(TAG, "Fresh Pixel 10: defaulting to G5-compatible ${ref.modelId}")
-      RelaisConfig.setModelRef(context, ref)
-    }
+    applyDeviceDefaultIfFresh(context, isPixel10 = isPixel10())
     // Capture the id AFTER substitution so the issue-#11 drift guard doesn't see false drift
     // (the id is now E2B, and idAtStart must match for the persist gate to pass).
     val idAtStart = RelaisConfig.modelId(context)
