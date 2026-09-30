@@ -32,6 +32,7 @@ import androidx.work.WorkerParameters
 import cc.grepon.relais.data.KEY_MODEL_COMMIT_HASH
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_ACCESS_TOKEN
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_ERROR_MESSAGE
+import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_EXPECTED_BYTES
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_FILE_NAME
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_MODEL_DIR
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_RATE
@@ -61,6 +62,24 @@ import kotlinx.coroutines.withContext
 private const val TAG = "AGDownloadWorker"
 
 data class UrlAndFileName(val url: String, val fileName: String)
+
+/**
+ * The complete size of the file the server is sending, or -1 when it did not say (#363).
+ *
+ * A 206 carries it as the total in `Content-Range: bytes a-b/TOTAL` (`*` = unknown); its
+ * Content-Length is only the remaining slice. A 200 carries it as Content-Length, which is -1 when
+ * absent — including when the platform transparently gunzipped the body. Anything else is unknown,
+ * and an unknown size makes the caller skip its length check rather than guess.
+ */
+internal fun serverDeclaredSize(responseCode: Int, contentRange: String?, contentLength: Long): Long {
+  val declared =
+    when (responseCode) {
+      HttpURLConnection.HTTP_PARTIAL -> contentRange?.substringAfter('/', "")?.trim()?.toLongOrNull()
+      HttpURLConnection.HTTP_OK -> contentLength
+      else -> null
+    }
+  return declared?.takeIf { it > 0L } ?: -1L
+}
 
 private const val FOREGROUND_NOTIFICATION_CHANNEL_ID = "model_download_channel_foreground"
 private var channelCreated = false
@@ -126,6 +145,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
           // Download them in sequence.
           // TODO: maybe consider downloading them in parallel.
           var downloadedBytes = 0L
+          var expectedMainFileBytes = -1L
           val bytesReadSizeBuffer: MutableList<Long> = mutableListOf()
           val bytesReadLatencyBuffer: MutableList<Long> = mutableListOf()
           for (file in allFiles) {
@@ -193,6 +213,16 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
               }
             } else {
               throw IOException("HTTP error code: ${connection.responseCode}")
+            }
+            // #363: record what the server says the MAIN file's complete size is, for the caller's
+            // length guard. Extra files are not recorded: only the provisioner checks, and it has none.
+            if (file === allFiles.first()) {
+              expectedMainFileBytes =
+                serverDeclaredSize(
+                  responseCode = connection.responseCode,
+                  contentRange = connection.getHeaderField("Content-Range"),
+                  contentLength = connection.contentLengthLong,
+                )
             }
 
             val inputStream = connection.inputStream
@@ -317,7 +347,9 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
               zipFile.delete()
             }
           }
-          Result.success()
+          Result.success(
+            Data.Builder().putLong(KEY_MODEL_DOWNLOAD_EXPECTED_BYTES, expectedMainFileBytes).build()
+          )
         } catch (e: IOException) {
           Log.e(TAG, e.message, e)
           Result.failure(

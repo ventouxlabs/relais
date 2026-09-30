@@ -30,6 +30,7 @@ import cc.grepon.relais.common.isPixel10
 import cc.grepon.relais.data.KEY_MODEL_COMMIT_HASH
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_ACCESS_TOKEN
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_ERROR_MESSAGE
+import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_EXPECTED_BYTES
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_FILE_NAME
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_MODEL_DIR
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_RECEIVED_BYTES
@@ -288,7 +289,7 @@ object RelaisModelProvisioner {
    * byte-identical to the allowlist entry's `toModel()` and the "fetched one way, reused the other"
    * reuse holds.
    */
-  private fun modelFromRef(ref: RelaisModelRef): Model =
+  internal fun modelFromRef(ref: RelaisModelRef): Model =
     AllowedModel(
         name = if (ref.source == RelaisModelRef.SOURCE_HUGGINGFACE) ref.modelId else ref.displayName,
         modelId = ref.modelId,
@@ -418,8 +419,19 @@ object RelaisModelProvisioner {
       }
     model.accessToken = RelaisConfig.hfToken(context)
     Log.i(TAG, "Model absent; downloading ${model.name} from ${model.url} -> $path")
-    download(context, model, onProgress)
+    val expectedBytes = download(context, model, onProgress)
     require(File(path).exists()) { "Download reported success but file is missing: $path" }
+    // #363 guard, before remember(): refuse a file whose length disagrees with the server's declared
+    // size (see [downloadLengthMismatch] — the overlap it targets is reasoned, not observed). The bad
+    // file is DELETED, not just left unremembered: otherwise the next call's "already present" check
+    // above adopts it with no check at all, and the guard would only delay the corruption by a boot.
+    // Skipped for a zip, whose downloaded blob is gone after unzipping and whose path is a directory.
+    if (!model.isZip) {
+      downloadLengthMismatch(expectedBytes, File(path).length())?.let { why ->
+        if (!File(path).delete()) Log.w(TAG, "Could not delete the mis-sized download at $path")
+        error("Downloaded model failed its size check and was discarded ($why): $path")
+      }
+    }
     Log.i(TAG, "Model provisioned: $path")
     return remember(context, path, persistForId = idAtStart)
   }
@@ -597,12 +609,11 @@ object RelaisModelProvisioner {
   }
 
   /**
-   * Enqueues [DownloadWorker] with the same [Data] contract as
-   * [cc.grepon.relais.data.DefaultDownloadRepository.downloadModel] (same unique-work key
-   * so the two never double-enqueue) and blocks until the work reaches a terminal state.
+   * The [DownloadWorker] input for [model], with the same [Data] contract as
+   * [cc.grepon.relais.data.DefaultDownloadRepository.downloadModel]. Split out of [download] so a
+   * test can fingerprint the REAL input for two builds of one id ([downloadSpecTag]).
    */
-  private fun download(context: Context, model: Model, onProgress: (Int) -> Unit) {
-    val workManager = WorkManager.getInstance(context)
+  internal fun downloadInput(model: Model): Data {
     val inputBuilder =
       Data.Builder()
         .putString(KEY_MODEL_NAME, model.name)
@@ -614,26 +625,67 @@ object RelaisModelProvisioner {
         .putString(KEY_MODEL_UNZIPPED_DIR, model.unzipDir)
         .putLong(KEY_MODEL_TOTAL_BYTES, model.totalBytes)
     model.accessToken?.let { inputBuilder.putString(KEY_MODEL_DOWNLOAD_ACCESS_TOKEN, it) }
+    return inputBuilder.build()
+  }
 
+  /**
+   * Serialises query → decide → enqueue across this process's callers (#363): ModelsScreen and the
+   * service's `relais-init` are the same process, so without it both could see "nothing queued" and
+   * both enqueue. Held only for that step, never across the poll loop.
+   */
+  private val downloadLock = Any()
+
+  /**
+   * Downloads [model] via [DownloadWorker] under the unique-work key `model.name` (shared with
+   * [cc.grepon.relais.data.DefaultDownloadRepository]) and blocks until the work is terminal.
+   * Returns the size the server declared for the file, or -1 if unknown.
+   *
+   * Single-flight (#363): an unfinished worker already fetching the IDENTICAL input
+   * ([joinOrReplace]) is attached to, not replaced — REPLACE made ModelsScreen and the service
+   * cancel each other. A different input (another build of the same id) still REPLACEs.
+   */
+  private fun download(context: Context, model: Model, onProgress: (Int) -> Unit): Long {
+    val workManager = WorkManager.getInstance(context)
+    val input = downloadInput(model)
+    val specTag = downloadSpecTag(input)
     val request =
       OneTimeWorkRequestBuilder<DownloadWorker>()
         .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-        .setInputData(inputBuilder.build())
+        .setInputData(input)
         .addTag("modelName:${model.name}")
+        .addTag(specTag)
         .build()
 
-    // REPLACE + unique key on model.name matches Gallery's policy: a single in-flight download.
-    workManager.enqueueUniqueWork(model.name, ExistingWorkPolicy.REPLACE, request)
+    val workId =
+      synchronized(downloadLock) {
+        val existing =
+          workManager.getWorkInfosForUniqueWork(model.name).get().map {
+            ExistingDownload(it.id, it.state, it.tags)
+          }
+        when (val join = joinOrReplace(specTag, existing)) {
+          is DownloadJoin.Attach -> {
+            Log.i(TAG, "Attaching to the in-flight download of ${model.name} (${join.id})")
+            join.id
+          }
+          DownloadJoin.Replace -> {
+            // Waited on (`result.get()`) INSIDE the lock: enqueue is asynchronous, and a second
+            // caller's query must see this work, or it would REPLACE the download it should join.
+            workManager.enqueueUniqueWork(model.name, ExistingWorkPolicy.REPLACE, request).result.get()
+            request.id
+          }
+        }
+      }
 
     val totalBytes = model.totalBytes
     var lastReceived = 0L
     var lastProgressAt = System.currentTimeMillis()
+    var notRunningSince: Long? = null
     while (true) {
-      val info: WorkInfo? = workManager.getWorkInfoById(request.id).get()
+      val info: WorkInfo? = workManager.getWorkInfoById(workId).get()
       when (info?.state) {
         WorkInfo.State.SUCCEEDED -> {
           onProgress(100)
-          return
+          return info.outputData.getLong(KEY_MODEL_DOWNLOAD_EXPECTED_BYTES, -1L)
         }
         WorkInfo.State.FAILED -> {
           val msg = info.outputData.getString(KEY_MODEL_DOWNLOAD_ERROR_MESSAGE) ?: "unknown error"
@@ -641,6 +693,7 @@ object RelaisModelProvisioner {
         }
         WorkInfo.State.CANCELLED -> error("Model download cancelled")
         WorkInfo.State.RUNNING -> {
+          notRunningSince = null
           val received = info.progress.getLong(KEY_MODEL_DOWNLOAD_RECEIVED_BYTES, 0L)
           if (received > lastReceived) {
             lastReceived = received
@@ -652,16 +705,37 @@ object RelaisModelProvisioner {
         else -> {
           // ENQUEUED / BLOCKED / null: the worker hasn't started yet (e.g. expedited quota spent →
           // deferred to regular scheduling). Keep the stall clock pinned to "now" so waiting-to-run
-          // never counts as a stall — the timeout must only measure a RUNNING job making no progress.
+          // never counts as a stall — the stall timeout only measures a RUNNING job making no
+          // progress. The wait itself is bounded separately (#363), from when it began.
           lastProgressAt = System.currentTimeMillis()
+          if (notRunningSince == null) notRunningSince = lastProgressAt
         }
       }
-      // Guard against a hung worker silently blocking the init thread forever: bail if a RUNNING
-      // download makes no byte progress within the stall window. Legitimate slow downloads still
-      // advance, so this only trips on a genuine stall (dead socket), not on size or queue wait.
-      if (System.currentTimeMillis() - lastProgressAt > STALL_TIMEOUT_MS) {
-        workManager.cancelWorkById(request.id)
-        error("Model download stalled (no progress for ${STALL_TIMEOUT_MS / 1000}s)")
+      val now = System.currentTimeMillis()
+      when (
+        downloadWaitTimeout(
+          runningIdleMs = now - lastProgressAt,
+          notRunningMs = notRunningSince?.let { now - it } ?: 0L,
+          stallTimeoutMs = STALL_TIMEOUT_MS,
+          notStartedTimeoutMs = NOT_STARTED_TIMEOUT_MS,
+        )
+      ) {
+        // Guard against a hung worker silently blocking the init thread forever: bail if a RUNNING
+        // download makes no byte progress within the stall window. Legitimate slow downloads still
+        // advance, so this only trips on a genuine stall (dead socket), not on size or queue wait.
+        // An attached caller gets the same handling as the one that enqueued: both poll one id.
+        DownloadWaitTimeout.STALLED -> {
+          workManager.cancelWorkById(workId)
+          error("Model download stalled (no progress for ${STALL_TIMEOUT_MS / 1000}s)")
+        }
+        // Not cancelled: the worker is not broken, only unscheduled, and may still run. A retry
+        // attaches to it (same input) or finds the file, instead of restarting it from the queue.
+        DownloadWaitTimeout.NOT_STARTED ->
+          error(
+            "Model download not started after ${NOT_STARTED_TIMEOUT_MS / 1000}s " +
+              "(WorkManager state: ${info?.state ?: "none"}); left queued for a retry to pick up"
+          )
+        null -> Unit
       }
       Thread.sleep(POLL_INTERVAL_MS)
     }
@@ -669,4 +743,8 @@ object RelaisModelProvisioner {
 
   private const val POLL_INTERVAL_MS = 1000L
   private const val STALL_TIMEOUT_MS = 120_000L
+  // Far past a normal expedited-quota deferral (seconds to a few minutes), short enough that a caller
+  // (the service's init thread, a ModelsScreen spinner) is not held indefinitely by a job the system
+  // never schedules.
+  private const val NOT_STARTED_TIMEOUT_MS = 600_000L
 }
