@@ -74,6 +74,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 private const val TAG = "RelaisHttpServer"
+// Retry-After for a model swap, or a load already in flight (#180/#347): roughly one model load.
+private const val MODEL_SWAP_RETRY_AFTER_SECONDS = 25
 private const val SOCKET_TIMEOUT_MS = 15_000 // read timeout: bounds slow/idle clients (slowloris)
 private const val MAX_CONNECTIONS = 16 // cap worker threads (single-engine node serializes anyway)
 
@@ -1404,8 +1406,9 @@ class RelaisHttpServer(
   /**
    * Issue #180 (full feature): decide what the request's `model` field means and answer for it when
    * the answer is not "serve the resident model". Delegates to [resolveModelRequest] and acts on the
-   * three-way outcome — swap-and-retry (503 + `Retry-After`) for a model provisioned on this device,
-   * 404 `model_not_found` for one that isn't, nothing for the serve case.
+   * outcome — swap-and-retry (503 + `Retry-After`) for a model provisioned on this device, a bare
+   * retry (503, no swap) while another load is in flight with no engine up (#347), 404 for one
+   * that is not on the device or is known not to load, nothing for the serve case.
    *
    * Eligibility is membership in [RelaisModelRegistry], NOT (as in the first cut) equality with the
    * operator's configured id — see that file's KDoc for why the registry carries the safety boundary
@@ -1424,7 +1427,12 @@ class RelaisHttpServer(
     errorBody: (message: String) -> JSONObject,
     notFoundBody: (message: String) -> JSONObject = errorBody,
   ): Boolean {
-    if (!RelaisEngine.isReady) return false // let the normal not-ready path (503 elsewhere) handle this
+    // #347: no early return on !isReady — the chat lanes have no not-ready 503, so resolveModelRequest
+    // decides that case (see its KDoc). Snapshot FIRST, then isReady: a load sets startupInProgress
+    // before its engine exists and clears it after, so this order never reads "not ready" from
+    // before a swap finished beside "nothing loading" from after it.
+    val loadInFlight = RelaisLivenessState.snapshot.startupInProgress
+    val ready = RelaisEngine.isReady
     val outcome =
       resolveModelRequest(
         residentModelId = RelaisEngine.residentModelId,
@@ -1440,7 +1448,8 @@ class RelaisHttpServer(
         // Serving a swap for a model that is no longer on disk would 503 the client, then fail the
         // swap deep in init — so eligibility must reflect the filesystem, not the last write.
         provisionedModelIds = provisionedIds(provisionedOnDisk()),
-        isReady = RelaisEngine.isReady,
+        isReady = ready,
+        loadInFlight = loadInFlight,
       )
     return when (outcome) {
       is ModelRequestOutcome.ServeResident -> false
@@ -1456,7 +1465,19 @@ class RelaisHttpServer(
           sock,
           503,
           errorBody("resident model differs from the requested model; swapping — retry shortly"),
-          listOf("Retry-After: 25"),
+          listOf("Retry-After: $MODEL_SWAP_RETRY_AFTER_SECONDS"),
+        )
+        true
+      }
+      is ModelRequestOutcome.RetryAfterLoad -> {
+        // #347: a load is already in flight with no engine up. No swap dispatch — see the outcome's
+        // KDoc — and the retry is decided against whatever that load makes resident.
+        RelaisMetrics.recordRequest(endpoint, 503)
+        respond(
+          sock,
+          503,
+          errorBody("a model is loading; retry shortly"),
+          listOf("Retry-After: $MODEL_SWAP_RETRY_AFTER_SECONDS"),
         )
         true
       }

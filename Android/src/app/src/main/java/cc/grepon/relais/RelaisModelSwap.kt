@@ -48,7 +48,10 @@ package cc.grepon.relais
  * drop-in-fidelity gap this issue exists to close.
  */
 sealed interface ModelRequestOutcome {
-  /** Serve the resident model: no `model` field, not ready yet, or it already matches. */
+  /**
+   * Serve: no `model` field, or it names the model that will answer — the resident one, or with no
+   * engine up the configured one the lazy reload loads (#347).
+   */
   data object ServeResident : ModelRequestOutcome
 
   /** [targetModelId] is provisioned locally — kick a single-slot swap and have the client retry. */
@@ -63,6 +66,16 @@ sealed interface ModelRequestOutcome {
    * present and re-downloading it will not help. Answer 404 with [reason].
    */
   data class Incompatible(val requestedModelId: String, val reason: String) : ModelRequestOutcome
+
+  /**
+   * [requestedModelId] is on this device, but a model load is already in flight with no engine up
+   * (#347) — a START provisioning the configured model, a swap, or a lazy reload. Answer 503 +
+   * `Retry-After` WITHOUT dispatching a swap: the retry lands once that load settles and is decided
+   * against what actually became resident. Dispatching now would race the in-flight load, and a
+   * START's own `ensureInitialized` would then see `isReady` and return, so the operator's
+   * configured model would never load.
+   */
+  data class RetryAfterLoad(val requestedModelId: String) : ModelRequestOutcome
 }
 
 /**
@@ -85,6 +98,20 @@ sealed interface ModelRequestOutcome {
  * whatever the shipped one happens to say today. Defaults to "nothing is known-bad", which keeps
  * every caller that predates #220 behaving exactly as before.
  *
+ * [isReady] and [loadInFlight] describe the engine, not the request (#347). With no engine up the
+ * model that will serve is [configuredModelId] (`RelaisEngine.generate`'s lazy reload), so that is
+ * what [requestedModelId] is compared against.
+ *
+ * [loadInFlight] is `startupInProgress` — a START, swap or reload already running. It only matters
+ * while not ready, where it turns a swap into [ModelRequestOutcome.RetryAfterLoad]. It has no
+ * default: omitting it would dispatch swaps during a START, the failure it exists to prevent.
+ *
+ * Callers read `startupInProgress` BEFORE `isReady`: the reverse order can pair "not ready" from
+ * before a swap finished with "nothing loading" from after it, deciding against the configured
+ * model while the swap target is resident. A load that begins after both reads is a race no order
+ * closes (a START that loses it finds an engine up and skips the configured model; the next request
+ * naming it swaps back).
+ *
  * Pure JVM (no Context, no Engine) so the whole matrix is unit-tested in isolation — mirrors
  * [shouldUnloadIdleEngine] in RelaisIdleTtl.kt.
  */
@@ -94,16 +121,21 @@ fun resolveModelRequest(
   configuredModelId: String,
   provisionedModelIds: Set<String>,
   isReady: Boolean,
+  loadInFlight: Boolean,
   incompatibleReason: (String) -> String? = { null },
 ): ModelRequestOutcome {
-  // Not ready: the normal not-ready path (503) owns this. Refusing here would answer 404 for a
-  // model the node may well have, purely because it hasn't finished coming up.
-  if (!isReady) return ModelRequestOutcome.ServeResident
   val requested = requestedModelId?.takeIf { it.isNotBlank() } ?: return ModelRequestOutcome.ServeResident
+  // #347: not ready is NOT "someone else's 503". The chat lanes have no not-ready branch —
+  // RelaisEngine.generate lazily re-inits the CONFIGURED model under its lock and serves — so with
+  // no engine up, the model that will answer is the configured one. Decide against it, not against
+  // residentModelId, which an idle unload leaves naming the model it just closed. An earlier
+  // revision returned ServeResident for every request here, so the first request after an idle
+  // unload was answered by the configured model whatever it named, echoing the name it asked for.
+  val willServe = if (isReady) residentModelId else configuredModelId
   // Deliberately BEFORE the compat check: if a model is somehow resident and answering, observed
   // reality outranks the static table. The table's job is to stop us loading something, not to
   // refuse something already demonstrably working.
-  if (requested == residentModelId) return ModelRequestOutcome.ServeResident
+  if (requested == willServe) return ModelRequestOutcome.ServeResident
   if (requested == configuredModelId || requested in provisionedModelIds) {
     // On disk (or the operator's own selection) — but on-disk proves the file downloaded, NOT that
     // the engine can create against it. Refuse before attempting a swap, otherwise the client gets
@@ -111,6 +143,9 @@ fun resolveModelRequest(
     incompatibleReason(requested)?.let {
       return ModelRequestOutcome.Incompatible(requested, it)
     }
+    // Only when no engine is up: a ready engine is ground truth, and a startup that bounces the
+    // listeners around a resident engine is not a load.
+    if (!isReady && loadInFlight) return ModelRequestOutcome.RetryAfterLoad(requested)
     return ModelRequestOutcome.SwapThenRetry(requested)
   }
   // Deliberately AFTER the on-disk check: for a model that is not here at all, "not provisioned" is
@@ -119,6 +154,24 @@ fun resolveModelRequest(
   // telling the operator the file was unloadable when the real problem was that it was missing.
   return ModelRequestOutcome.NotProvisioned(requested)
 }
+
+/**
+ * The (path, id) a failed swap should reload, or null to leave the engine unloaded (#347 review).
+ *
+ * Only a swap that started from a READY engine has something to restore. A swap from an
+ * idle-unloaded node — reachable by one LAN request since #347 — still has [previousPath] and
+ * [previousId] set, because an idle unload closes the engine without clearing them; they name the
+ * model that was unloaded, not one that is serving. Cold-loading it there would spend a model load on
+ * a model nobody asked for, and if that load also failed the node would be left not ready, not
+ * starting and not idle — the combination the watchdog restarts. Left unloaded instead, the next
+ * request lazily loads the configured model as it would have anyway.
+ */
+internal fun swapRollbackTarget(
+  wasReady: Boolean,
+  previousPath: String?,
+  previousId: String?,
+): Pair<String, String>? =
+  if (wasReady && previousPath != null && previousId != null) previousPath to previousId else null
 
 /*
  * The two 404 body texts, kept here rather than inline in [RelaisHttpServer.rejectIfModelUnavailable].

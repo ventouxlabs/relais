@@ -38,8 +38,18 @@ class RelaisModelSwapTest {
     configuredId: String = configured,
     provisioned: Set<String> = onDisk,
     isReady: Boolean = true,
+    loadInFlight: Boolean = false,
     incompatibleReason: (String) -> String? = { null },
-  ) = resolveModelRequest(residentId, requested, configuredId, provisioned, isReady, incompatibleReason)
+  ) =
+    resolveModelRequest(
+      residentModelId = residentId,
+      requestedModelId = requested,
+      configuredModelId = configuredId,
+      provisionedModelIds = provisioned,
+      isReady = isReady,
+      loadInFlight = loadInFlight,
+      incompatibleReason = incompatibleReason,
+    )
 
   // ---- serve the resident model ----
 
@@ -55,13 +65,117 @@ class RelaisModelSwapTest {
     assertEquals(ModelRequestOutcome.ServeResident, outcome(resident))
   }
 
-  @Test fun `nothing is decided while the engine is not ready`() {
-    // Refusing here would 404 a model the node may well have, purely because it is still coming up —
-    // the existing 503 not-ready path owns this window.
-    assertEquals(ModelRequestOutcome.ServeResident, outcome("anything-at-all", isReady = false))
+  // ---- not ready (#347) ----
+  //
+  // There is no "503 not-ready path" on the chat lanes: RelaisEngine.generate lazily re-inits the
+  // CONFIGURED model under its lock and serves. So while nothing is loading (idle-unloaded, or a
+  // failed load with nothing retrying), the model that will answer is the configured one — decide
+  // against THAT, not against a stale residentModelId the idle unload left behind.
+
+  @Test fun `while idle-unloaded the configured model is what will serve`() {
     assertEquals(
       ModelRequestOutcome.ServeResident,
       outcome(configured, residentId = null, isReady = false),
+    )
+    assertEquals(ModelRequestOutcome.ServeResident, outcome(null, isReady = false))
+  }
+
+  @Test fun `while idle-unloaded a stale resident id does not answer for itself`() {
+    // residentModelId survives the unload; the lazy reload loads `configured`, not `resident`. A
+    // request naming the stale id must swap, or it is served by the configured model under its name.
+    assertEquals(
+      ModelRequestOutcome.SwapThenRetry(resident),
+      outcome(resident, residentId = resident, configuredId = configured, isReady = false),
+    )
+  }
+
+  @Test fun `while idle-unloaded another on-disk model swaps rather than being served by the configured one`() {
+    assertEquals(ModelRequestOutcome.SwapThenRetry(alsoOnDisk), outcome(alsoOnDisk, isReady = false))
+  }
+
+  @Test fun `while idle-unloaded an unknown model is still a 404`() {
+    // The registry is on disk; it does not depend on the engine being loaded, so "not ready" is no
+    // reason to answer a model this node does not have.
+    assertEquals(
+      ModelRequestOutcome.NotProvisioned("anything-at-all"),
+      outcome("anything-at-all", isReady = false),
+    )
+  }
+
+  @Test fun `while idle-unloaded the configured model is served even if the table calls it incompatible`() {
+    // Unchanged ordering: the configured model is what the lazy reload loads either way; refusing it
+    // here would 404 a model that was serving before the unload.
+    assertEquals(
+      ModelRequestOutcome.ServeResident,
+      outcome(configured, isReady = false, incompatibleReason = { "known bad" }),
+    )
+  }
+
+  @Test fun `while a load is in flight an on-disk model waits instead of dispatching a swap`() {
+    // A START may be minutes into downloading the configured model. A swap now would make that
+    // model's own ensureInitialized see isReady and return, so it would never load.
+    assertEquals(
+      ModelRequestOutcome.RetryAfterLoad(alsoOnDisk),
+      outcome(alsoOnDisk, isReady = false, loadInFlight = true),
+    )
+    // The twin: the same request with nothing loading DOES swap — so the gate is what decides.
+    assertEquals(
+      ModelRequestOutcome.SwapThenRetry(alsoOnDisk),
+      outcome(alsoOnDisk, isReady = false, loadInFlight = false),
+    )
+  }
+
+  @Test fun `while a load is in flight unknown and configured ids are answered as when idle`() {
+    assertEquals(
+      ModelRequestOutcome.NotProvisioned("anything-at-all"),
+      outcome("anything-at-all", isReady = false, loadInFlight = true),
+    )
+    assertEquals(
+      ModelRequestOutcome.ServeResident,
+      outcome(configured, isReady = false, loadInFlight = true),
+    )
+  }
+
+  @Test fun `during a load an incompatible model is refused outright, not told to retry`() {
+    // Precedence: Incompatible is permanent. Answering RetryAfterLoad instead would send the client
+    // into a 503 + Retry-After loop for the whole of a START's download, then 404 it anyway.
+    assertEquals(
+      ModelRequestOutcome.Incompatible(alsoOnDisk, "bad"),
+      outcome(alsoOnDisk, isReady = false, loadInFlight = true, incompatibleReason = { "bad" }),
+    )
+  }
+
+  @Test fun `during a load a stale resident id waits like any other on-disk model`() {
+    assertEquals(
+      ModelRequestOutcome.RetryAfterLoad(resident),
+      outcome(resident, residentId = resident, isReady = false, loadInFlight = true),
+    )
+  }
+
+  // ---- rollback of a failed swap (#347 review) ----
+
+  @Test fun `a failed swap from a ready engine restores the model that was serving`() {
+    assertEquals("/m/old.litertlm" to resident, swapRollbackTarget(wasReady = true, "/m/old.litertlm", resident))
+  }
+
+  @Test fun `a failed swap from an idle node restores nothing`() {
+    // The idle unload left previousPath/previousId naming the model it CLOSED. Reloading it would
+    // cold-load a model nobody asked for; the next request loads the configured one lazily.
+    assertEquals(null, swapRollbackTarget(wasReady = false, "/m/old.litertlm", resident))
+    // Twin in the same test: with a ready engine the same inputs DO restore, so readiness decides.
+    assertEquals("/m/old.litertlm" to resident, swapRollbackTarget(wasReady = true, "/m/old.litertlm", resident))
+  }
+
+  @Test fun `a failed swap with nothing recorded restores nothing`() {
+    assertEquals(null, swapRollbackTarget(wasReady = true, null, resident))
+    assertEquals(null, swapRollbackTarget(wasReady = true, "/m/old.litertlm", null))
+  }
+
+  @Test fun `a ready engine ignores the in-flight flag`() {
+    // Ready is ground truth: a startup that bounces listeners with the engine resident is not a load.
+    assertEquals(
+      ModelRequestOutcome.SwapThenRetry(alsoOnDisk),
+      outcome(alsoOnDisk, isReady = true, loadInFlight = true),
     )
   }
 
