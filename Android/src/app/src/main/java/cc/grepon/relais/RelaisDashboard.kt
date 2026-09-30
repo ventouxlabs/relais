@@ -74,7 +74,8 @@ data class DashboardStatus(
    */
   val switchLocked: Boolean = false,
   /**
-   * The configured model id when it differs from the resident one, else null — see [pendingModelIdFor].
+   * The configured model ("id · file" when only the build differs) when the engine is not serving
+   * it, else null — see [pendingModelIdFor].
    * Non-null means config is ahead of the engine: a swap is running, or one ran and did not take
    * effect. The page cannot tell those apart, which is why the hint it renders states the fact and
    * predicts nothing.
@@ -110,11 +111,10 @@ fun maskApiKey(key: String): String {
  *
  * The model selector on an idle node: `POST /select-model` has no readiness gate, and the swap
  * thread cold-loads the target under `beginStartup()`, so the page reads STARTING → LIVE and
- * [pendingModelId] stays correct because `shutdown()` never clears `residentModelId`. Two edges
- * the page cannot show: a swap that FAILS from IDLE rolls back by cold-loading the previous model,
- * so the operator's failed action silently undoes the idle unload (the node ends LIVE on the old
- * model); and a swap whose target is not on disk bails before touching the engine and leaves the
- * node IDLE, with the pending hint stating the fact.
+ * [pendingModelId] stays correct because `shutdown()` never clears `residentModelId`. A swap that
+ * FAILS from IDLE restores nothing and puts the node back to IDLE (#347 / `swapRollbackTarget`),
+ * and a swap whose target is not on disk bails before touching the engine and leaves the node IDLE;
+ * in both the pending hint states the fact.
  *
  * No I/O, no Context, no Android — fully unit-testable on the JVM.
  */
@@ -139,7 +139,7 @@ fun assembleDashboardStatus(
   availableModelIds: List<String> = emptyList(),
   /** Disables both form controls. Pass the SAME [startupInProgress] value this call received. */
   switchLocked: Boolean = false,
-  /** Configured id when it differs from the resident one. See [pendingModelIdFor]. */
+  /** Configured model when the engine is not serving it (id or build). See [pendingModelIdFor]. */
   pendingModelId: String? = null,
   idleUnloaded: Boolean = false,
 ): DashboardStatus {

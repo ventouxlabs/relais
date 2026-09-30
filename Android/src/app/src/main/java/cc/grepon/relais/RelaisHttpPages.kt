@@ -317,6 +317,17 @@ internal fun validateSelection(
 /**
  * The configured model id when the engine is not serving it, else null.
  *
+ * "Not serving it" covers the BUILD as well as the id (#354). One id can name several builds — the
+ * G5 TPU E2B ref, the Relais-pinned `G5_DEFAULT_REF`, and the curated allowlist E2B share an id —
+ * so after picking another build the ids agree while the resident file is still the previous one,
+ * and that pick applies only on restart. A build is compared by FILE NAME ([configuredFile]) and,
+ * when the resident path has one, by its COMMIT directory ([configuredCommit]): pinned models live
+ * at `…/{name}/{commit}/{file}`, and two builds can share a file name at different commits. A path
+ * with no 40-hex commit directory (the side-load location `relais/<file>`) is compared by file name
+ * only, so it can never read as permanently pending. The result carries the build ("id · file @
+ * commit") so the hint names it rather than repeating the id the page already shows as resident.
+ * With no ref there is no build to compare, so a same-id resident is never pending.
+ *
  * Null when [resident] is null — before any successful init there is nothing to be behind, and a
  * hint claiming otherwise on a cold node would be noise. Non-null means config is ahead of the
  * engine: a swap is in flight, OR one ran and did not take effect (its target file was missing, or
@@ -325,5 +336,23 @@ internal fun validateSelection(
  *
  * Pure; no Context, no Android.
  */
-internal fun pendingModelIdFor(configured: String, resident: String?): String? =
-  configured.takeIf { resident != null && it != resident }
+internal fun pendingModelIdFor(
+  configured: String,
+  resident: String?,
+  configuredFile: String?,
+  configuredCommit: String?,
+  residentPath: String?,
+): String? {
+  if (resident == null) return null
+  if (configured != resident) return configured
+  if (configuredFile == null || residentPath == null) return null
+  val residentFile = java.io.File(residentPath)
+  val residentCommit = residentFile.parentFile?.name?.takeIf { COMMIT_DIR.matches(it) }
+  val otherFile = residentFile.name != configuredFile
+  val otherCommit = configuredCommit != null && residentCommit != null && residentCommit != configuredCommit
+  if (!otherFile && !otherCommit) return null
+  return "$configured · $configuredFile" + (configuredCommit?.let { " @ ${it.take(7)}" } ?: "")
+}
+
+/** A pinned model's commit directory (`…/{name}/{commit}/{file}`): a full 40-hex git hash. */
+private val COMMIT_DIR = Regex("[0-9a-f]{40}")
