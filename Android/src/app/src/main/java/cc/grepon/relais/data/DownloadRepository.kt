@@ -172,8 +172,10 @@ class DefaultDownloadRepository(
         .setInputData(inputData)
         .addTag("$MODEL_NAME_TAG:${model.name}")
         .addTag("$TASK_ID_TAG:${task?.id ?: ""}")
-        // #363: the same input fingerprint the node provisioner tags with, so a provisioner call for
-        // the identical file attaches to this worker instead of REPLACEing it.
+        // #363: the same input fingerprint the node provisioner tags with, so a provisioner call
+        // attaches to this worker only when the INPUT is identical — e.g. an ungated model with no
+        // extra files. The fingerprint covers extras and token presence, and this lane's token comes
+        // from its own source, so for most models the two lanes do not match and REPLACE as before.
         .addTag(downloadSpecTag(inputData))
         .build()
 

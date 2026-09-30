@@ -151,24 +151,4 @@ class RelaisDownloadSingleFlightTest {
     // Queued longer than the STALL window but inside the not-started window: still waiting.
     assertNull(timeout(runningIdleMs = 0L, notRunningMs = 500L))
   }
-
-  // ---- the length guard ----
-
-  @Test
-  fun `a file whose length differs from the server's declared size is refused`() {
-    assertNull(downloadLengthMismatch(expectedBytes = 2_588_147_712L, actualBytes = 2_588_147_712L))
-    assertEquals(
-      "file is 2588147713 bytes, the server declared 2588147712",
-      downloadLengthMismatch(expectedBytes = 2_588_147_712L, actualBytes = 2_588_147_713L),
-    )
-    assertTrue(downloadLengthMismatch(expectedBytes = 10L, actualBytes = 9L) != null)
-  }
-
-  @Test
-  fun `an unknown declared size skips the check`() {
-    assertNull(downloadLengthMismatch(expectedBytes = -1L, actualBytes = 5L))
-    assertNull(downloadLengthMismatch(expectedBytes = 0L, actualBytes = 5L))
-    // Twin: a known size with the same file does check.
-    assertTrue(downloadLengthMismatch(expectedBytes = 1L, actualBytes = 5L) != null)
-  }
 }

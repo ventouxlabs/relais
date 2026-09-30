@@ -30,7 +30,6 @@ import cc.grepon.relais.common.isPixel10
 import cc.grepon.relais.data.KEY_MODEL_COMMIT_HASH
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_ACCESS_TOKEN
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_ERROR_MESSAGE
-import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_EXPECTED_BYTES
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_FILE_NAME
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_MODEL_DIR
 import cc.grepon.relais.data.KEY_MODEL_DOWNLOAD_RECEIVED_BYTES
@@ -419,19 +418,12 @@ object RelaisModelProvisioner {
       }
     model.accessToken = RelaisConfig.hfToken(context)
     Log.i(TAG, "Model absent; downloading ${model.name} from ${model.url} -> $path")
-    val expectedBytes = download(context, model, onProgress)
+    download(context, model, onProgress)
+    // No length check here (#363): DownloadWorker checks the .tmp against the server's declared size
+    // before renaming it, which covers every lane — including a Gallery-lane worker whose file this
+    // call would otherwise adopt unchecked via the "already present" branch above. A second check
+    // here would only re-read the same number.
     require(File(path).exists()) { "Download reported success but file is missing: $path" }
-    // #363 guard, before remember(): refuse a file whose length disagrees with the server's declared
-    // size (see [downloadLengthMismatch] — the overlap it targets is reasoned, not observed). The bad
-    // file is DELETED, not just left unremembered: otherwise the next call's "already present" check
-    // above adopts it with no check at all, and the guard would only delay the corruption by a boot.
-    // Skipped for a zip, whose downloaded blob is gone after unzipping and whose path is a directory.
-    if (!model.isZip) {
-      downloadLengthMismatch(expectedBytes, File(path).length())?.let { why ->
-        if (!File(path).delete()) Log.w(TAG, "Could not delete the mis-sized download at $path")
-        error("Downloaded model failed its size check and was discarded ($why): $path")
-      }
-    }
     Log.i(TAG, "Model provisioned: $path")
     return remember(context, path, persistForId = idAtStart)
   }
@@ -638,13 +630,12 @@ object RelaisModelProvisioner {
   /**
    * Downloads [model] via [DownloadWorker] under the unique-work key `model.name` (shared with
    * [cc.grepon.relais.data.DefaultDownloadRepository]) and blocks until the work is terminal.
-   * Returns the size the server declared for the file, or -1 if unknown.
    *
    * Single-flight (#363): an unfinished worker already fetching the IDENTICAL input
    * ([joinOrReplace]) is attached to, not replaced — REPLACE made ModelsScreen and the service
    * cancel each other. A different input (another build of the same id) still REPLACEs.
    */
-  private fun download(context: Context, model: Model, onProgress: (Int) -> Unit): Long {
+  private fun download(context: Context, model: Model, onProgress: (Int) -> Unit) {
     val workManager = WorkManager.getInstance(context)
     val input = downloadInput(model)
     val specTag = downloadSpecTag(input)
@@ -685,7 +676,7 @@ object RelaisModelProvisioner {
       when (info?.state) {
         WorkInfo.State.SUCCEEDED -> {
           onProgress(100)
-          return info.outputData.getLong(KEY_MODEL_DOWNLOAD_EXPECTED_BYTES, -1L)
+          return
         }
         WorkInfo.State.FAILED -> {
           val msg = info.outputData.getString(KEY_MODEL_DOWNLOAD_ERROR_MESSAGE) ?: "unknown error"

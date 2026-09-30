@@ -137,18 +137,3 @@ internal fun downloadWaitTimeout(
     notRunningMs > notStartedTimeoutMs -> DownloadWaitTimeout.NOT_STARTED
     else -> null
   }
-
-/**
- * Why a finished download's length disagrees with the size the SERVER declared for it, or null when
- * it agrees or the declared size is unknown (≤ 0, see `serverDeclaredSize` in the worker). A GUARD:
- * #363's overlapping-append corruption (a cancelled worker still appending to the `.tmp` the
- * replacing worker resumes from) is reasoned from the code, not observed — rango's existing TPU file
- * measured exactly its ref size. It also catches a server that answers a Range request with a full
- * 200, which the worker appends to the partial file.
- *
- * Deliberately NOT the catalog `sizeInBytes`: a stale catalog would reject a good file and re-download
- * it forever. The server's own figure is the only one that describes the bytes that were sent.
- */
-internal fun downloadLengthMismatch(expectedBytes: Long, actualBytes: Long): String? =
-  if (expectedBytes <= 0L || expectedBytes == actualBytes) null
-  else "file is $actualBytes bytes, the server declared $expectedBytes"
