@@ -62,6 +62,42 @@ private const val TAG = "AGDownloadWorker"
 
 data class UrlAndFileName(val url: String, val fileName: String)
 
+/**
+ * The complete size of the file the server is sending, or -1 when it did not say (#363).
+ *
+ * A 206 carries it as the total in `Content-Range: bytes a-b/TOTAL` (`*` = unknown); its
+ * Content-Length is only the remaining slice. A 200 carries it as Content-Length, which is -1 when
+ * absent — including when the platform transparently gunzipped the body. Anything else is unknown,
+ * and an unknown size makes the caller skip its length check rather than guess.
+ */
+internal fun serverDeclaredSize(responseCode: Int, contentRange: String?, contentLength: Long): Long {
+  val declared =
+    when (responseCode) {
+      HttpURLConnection.HTTP_PARTIAL -> contentRange?.substringAfter('/', "")?.trim()?.toLongOrNull()
+      HttpURLConnection.HTTP_OK -> contentLength
+      else -> null
+    }
+  return declared?.takeIf { it > 0L } ?: -1L
+}
+
+/**
+ * Deletes [tmpFile] and returns why, when its length disagrees with [declaredBytes] (#363); null (file
+ * kept) when it agrees or the size is unknown (≤ 0) — an unknown size is skipped, never guessed.
+ *
+ * A GUARD: the overlap it targets — a cancelled worker still appending to the `.tmp` that its
+ * replacement resumes from — is reasoned from the code, not observed (rango's existing TPU file
+ * measured exactly its ref size). It also catches a server answering a Range request with a full 200,
+ * which is appended to the partial file. Deleted rather than kept: a resume would append to the bad
+ * bytes. The catalog `sizeInBytes` is deliberately NOT the reference — a stale catalog would reject
+ * a good file and re-download it forever; only the server's figure describes the bytes it sent.
+ */
+internal fun discardIfMisSized(tmpFile: File, declaredBytes: Long): String? {
+  val actual = tmpFile.length()
+  if (declaredBytes <= 0L || actual == declaredBytes) return null
+  if (!tmpFile.delete()) Log.w(TAG, "Could not delete mis-sized ${tmpFile.path}")
+  return "Downloaded ${tmpFile.name} is $actual bytes, the server declared $declaredBytes; discarded"
+}
+
 private const val FOREGROUND_NOTIFICATION_CHANNEL_ID = "model_download_channel_foreground"
 private var channelCreated = false
 
@@ -194,6 +230,13 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
             } else {
               throw IOException("HTTP error code: ${connection.responseCode}")
             }
+            // #363: what the server says this file's complete size is, checked before the rename.
+            val declaredBytes =
+              serverDeclaredSize(
+                responseCode = connection.responseCode,
+                contentRange = connection.getHeaderField("Content-Range"),
+                contentLength = connection.contentLengthLong,
+              )
 
             val inputStream = connection.inputStream
             val outputStream = FileOutputStream(outputTmpFile, true /* append */)
@@ -256,6 +299,12 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
 
             outputStream.close()
             inputStream.close()
+
+            // #363: refuse a mis-sized .tmp BEFORE it becomes the model file. Here, not in a caller,
+            // so every lane that runs this worker (the provisioner AND the Gallery repository) gets it.
+            // Once renamed, the provisioner's "already present" branch adopts the file unchecked.
+            // Applies to every file, zip blobs included: the .tmp IS the blob the server described.
+            discardIfMisSized(outputTmpFile, declaredBytes)?.let { why -> throw IOException(why) }
 
             // Rename the tmp file to the original file name by removing the tmp file ext.
             val originalFilePath = outputTmpFile.absolutePath.replace(".$TMP_FILE_EXT", "")

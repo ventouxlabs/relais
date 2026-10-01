@@ -40,6 +40,7 @@ import cc.grepon.relais.AppLifecycleProvider
 import cc.grepon.relais.GalleryEvent
 import cc.grepon.relais.R
 import cc.grepon.relais.RelaisRuntimeCompat
+import cc.grepon.relais.downloadSpecTag
 import cc.grepon.relais.firebaseAnalytics
 import cc.grepon.relais.worker.DownloadWorker
 import java.util.UUID
@@ -171,11 +172,20 @@ class DefaultDownloadRepository(
         .setInputData(inputData)
         .addTag("$MODEL_NAME_TAG:${model.name}")
         .addTag("$TASK_ID_TAG:${task?.id ?: ""}")
+        // #363: the same input fingerprint the node provisioner tags with, so a provisioner call
+        // attaches to this worker only when the INPUT is identical — e.g. an ungated model with no
+        // extra files. The fingerprint covers extras and token presence, and this lane's token comes
+        // from its own source, so for most models the two lanes do not match and REPLACE as before.
+        .addTag(downloadSpecTag(inputData))
         .build()
 
     val workerId = downloadWorkRequest.id
 
-    // Start!
+    // Start! Still REPLACE (#363 left this lane's own policy alone): attaching here would need a
+    // blocking WorkManager query on the caller's main thread, and this lane observes by worker id via
+    // `observeForever`, so switching ids would mean restructuring the observer. The provisioner's
+    // attach covers the Relais-owned callers (ModelsScreen, the service); a Gallery tap or a
+    // launch-time resume can still REPLACE a provisioner download of the same model name.
     workManager.enqueueUniqueWork(model.name, ExistingWorkPolicy.REPLACE, downloadWorkRequest)
 
     // Observe progress.
