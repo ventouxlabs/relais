@@ -306,6 +306,9 @@ object RelaisEngine {
   /** Guards [ensureInitializedInBackground] so a burst of requests during an idle-reload dispatches at most one thread. */
   private val backgroundReloadDispatching = java.util.concurrent.atomic.AtomicBoolean(false)
 
+  /** Guards [ensureProvisionedInBackground] so a burst of requests for a missing model dispatches at most one thread. */
+  private val backgroundProvisionDispatching = java.util.concurrent.atomic.AtomicBoolean(false)
+
   /**
    * Consecutive [shutdown] failures ([Engine.close] threw). Read by [shouldUnloadIdleEngine] as a
    * circuit breaker: after repeated close failures, idle-TTL stops attempting further auto-unloads
@@ -319,7 +322,9 @@ object RelaisEngine {
    * True when the most recent init attempt threw: set by [RelaisNodeService]'s init thread (which
    * also covers provisioning and listener-bind failures) **or** by [ensureInitialized] when a real
    * init attempt throws (feature-22 — a request-driven reload after an idle unload that fails must
-   * read ERROR, not IDLE forever behind the watchdog's shield). Lets
+   * read ERROR, not IDLE forever behind the watchdog's shield), **or** by
+   * [ensureProvisionedInBackground]'s catch when its provisioning throws (#362; that kick is only
+   * dispatched while this is false, so it needs no attempt-start clear of its own). Lets
    * [cc.grepon.relais.core.computeNodeState] surface ERROR rather than an indefinite STARTING when
    * provisioning/init fails. Cleared at the START of every attempt (both writers), so a retry never
    * reads as failed while it loads — `computeControlPanelState`'s STARTING-over-failure arm needs
@@ -518,6 +523,65 @@ object RelaisEngine {
       // finally never will. Undo the caller-side begin and release the single-flight guard.
       RelaisLivenessState.endStartup()
       backgroundReloadDispatching.set(false)
+      throw t
+    }
+  }
+
+  /**
+   * Kicks a background PROVISION + init of the configured model — [RelaisModelProvisioner.ensureModel]
+   * (download if absent) then [ensureInitialized] — if the engine isn't ready and nothing is already
+   * coming up; an idempotent no-op otherwise. Called by [generate], under [lock], when the configured
+   * model is not on disk (#362), so it only ever spawns: it never blocks the caller and never takes
+   * [lock] on the caller's thread (the spawned thread's [ensureInitialized] waits for it like any
+   * other request would).
+   *
+   * Why it exists (#362): before it, a request for a configured model with no file went through
+   * [ensureInitialized], failed, set [lastInitFailed] and put the node in ERROR, and the watchdog's
+   * revive was the ONLY thing that ever provisioned the model. Answering a bare 503 instead without
+   * this kick would leave nothing fetching the file — the node would answer 503 forever.
+   *
+   * A SIBLING of [ensureInitializedInBackground], not a change to it: that one's callers (the audio
+   * lane, [cc.grepon.relais.core.RelaisInference]) carry a "never blind-cold-start a download"
+   * contract this one deliberately breaks. Same shape otherwise — guard on `isReady ||
+   * startupInProgress`, its own single-flight CAS, `startupInProgress` published synchronously on the
+   * CALLER before the thread exists, CAS released before `endStartup()` so that stays the LAST write.
+   *
+   * Clears `idleUnloaded` in that caller-side begin (`clearIdleUnloaded = true`): an idle-unloaded
+   * node whose kick FAILS must read ERROR, not IDLE. Left set, `idleUnloaded && listenersUp` is the
+   * watchdog's healthy-idle branch, which returns before its revive — so a failed provision on an
+   * idle node would read as healthy idle and never be retried. Safe here, unlike the other non-init
+   * owners [RelaisLivenessPublisher.beginStartup] warns about, because every exit of this thread is a
+   * real outcome: a resident engine, or [lastInitFailed] set (by [ensureInitialized] itself, or by the
+   * catch below for a provisioning failure) BEFORE `endStartup()`.
+   *
+   * If a ModelsScreen pick is already downloading the same model, [RelaisModelProvisioner.ensureModel]
+   * attaches to that work through #365's single-flight owner rather than starting a second download.
+   */
+  fun ensureProvisionedInBackground(context: Context) {
+    if (isReady || RelaisLivenessState.snapshot.startupInProgress) return
+    if (!backgroundProvisionDispatching.compareAndSet(false, true)) return // a provision is already dispatching
+    // On the CALLER, before the thread exists (see ensureInitializedInBackground's KDoc); clears idle — see above.
+    RelaisLivenessState.beginStartup(clearIdleUnloaded = true)
+    try {
+      thread(name = "relais-provision") {
+        try {
+          RelaisModelProvisioner.ensureModel(context)
+          ensureInitialized(context) // publishes its own nested pair and sets lastInitFailed on a throw
+        } catch (t: Throwable) {
+          // Throwable: an uncaught Error on a bare thread kills the WHOLE node process. Set here too
+          // so a PROVISIONING failure (401, offline — ensureInitialized never ran) reads ERROR and the
+          // watchdog revives with backoff; idempotent when ensureInitialized already set it.
+          lastInitFailed = true
+          Log.w(TAG, "background provision failed: ${t.message}")
+        } finally {
+          backgroundProvisionDispatching.set(false) // release single-flight FIRST …
+          RelaisLivenessState.endStartup() // … so endStartup() stays the LAST write (see the sibling)
+        }
+      }
+    } catch (t: Throwable) {
+      // Thread.start() failed — the body never ran, so its finally never will. Undo both.
+      RelaisLivenessState.endStartup()
+      backgroundProvisionDispatching.set(false)
       throw t
     }
   }
@@ -799,7 +863,23 @@ object RelaisEngine {
         // blocks on `lock` until any in-progress unload finishes, then re-inits lazily right here
         // (ensureInitialized() below is idempotent/cheap when already ready, and does a real —
         // cold-start — init when not). Either way no request ever observes/uses a closed `engine`.
-        ensureInitialized(context)
+        //
+        // #362: the configured model's file is checked BEFORE that cold start. Missing, a cold start
+        // can only fail — recording lastInitFailed (ERROR) and answering 500 — so instead kick its
+        // provisioning and throw ModelNotOnDiskException (503 + Retry-After). The request itself
+        // writes no liveness and no lastInitFailed — only the kick publishes, and owns, its startup
+        // pair. No kick when the last attempt already failed: the
+        // watchdog owns retries then (with backoff), not every request. The id is read ONCE, so the
+        // check and the init are about the same model; `!isReady` first keeps prefs reads and a stat
+        // off the ready path.
+        val configuredId = RelaisConfig.modelId(context)
+        if (!isReady &&
+          configuredModelMissing(isReady, RelaisModelProvisioner.pathFor(context, configuredId)) { File(it).exists() }
+        ) {
+          if (!lastInitFailed) ensureProvisionedInBackground(context)
+          throw ModelNotOnDiskException(configuredId)
+        }
+        ensureInitialized(context, modelId = configuredId)
         val e = engine ?: error("Engine not initialized")
         // #352: what serves is only knowable here. Read once, so the check and the echo agree.
         val served = residentModelId

@@ -696,17 +696,19 @@ class RelaisHttpServer(
           else -> reply(404, RelaisError.json("not found", RelaisError.NOT_FOUND))
         }
       } catch (e: Exception) {
-        if (e is ModelNotResidentException) {
-          // #352: a swap won the engine lock after this request was classified. Nothing has been
-          // written (non-streaming, or a stream that never committed — see
-          // isUncommittedModelMismatch), so answer like the classifier's own swap 503.
+        if (e is ModelNotResidentException || e is ModelNotOnDiskException) {
+          // #352: a swap won the engine lock after this request was classified. #362: the configured
+          // model is not on disk yet; generate kicked (or found running) its provisioning. Nothing
+          // has been written (non-streaming, or a stream that never committed — see
+          // isUncommittedRetryable), so answer like the classifier's own swap 503.
           Log.w(TAG, "served-model check failed: ${e.message}")
           RelaisMetrics.recordRequest(endpoint, 503)
+          val message = if (e is ModelNotOnDiskException) MODEL_NOT_ON_DISK_MESSAGE else MODEL_NOT_RESIDENT_MESSAGE
           runCatching {
             respond(
               sock,
               503,
-              modelNotResidentBody(endpoint, MODEL_NOT_RESIDENT_MESSAGE),
+              modelNotResidentBody(endpoint, message),
               listOf("Retry-After: $MODEL_SWAP_RETRY_AFTER_SECONDS"),
             )
           }
@@ -1693,7 +1695,7 @@ class RelaisHttpServer(
       // returns the whole reply alongside the deltas). Best-effort; never affects the stream.
       recordSessionTurn(recordKey, request.text, result.text)
     } catch (e: Exception) {
-      if (isUncommittedModelMismatch(e, sse.committed)) throw e // #352: -> 503 in handle()
+      if (isUncommittedRetryable(e, sse.committed)) throw e // #352/#362: -> 503 in handle()
       Log.e(TAG, "stream error after headers committed", e)
       sse.abort()
     }
@@ -1834,7 +1836,7 @@ class RelaisHttpServer(
       sequencer.finish(anthropicStopReason(result), result.completionTokens)
       recordSessionTurn(recordKey, request.text, result.text)
     } catch (e: Exception) {
-      if (isUncommittedModelMismatch(e, sse.committed)) throw e // #352: -> 503 in handle()
+      if (isUncommittedRetryable(e, sse.committed)) throw e // #352/#362: -> 503 in handle()
       Log.e(TAG, "anthropic stream error after headers committed", e)
       sse.sendError("api_error", "stream aborted")
     }
@@ -1985,7 +1987,7 @@ class RelaisHttpServer(
       sse.send(chunk)
       sse.done()
     } catch (e: Exception) {
-      if (isUncommittedModelMismatch(e, sse.committed)) throw e // #352: -> 503 in handle()
+      if (isUncommittedRetryable(e, sse.committed)) throw e // #352/#362: -> 503 in handle()
       Log.e(TAG, "tool stream error after headers committed", e)
       sse.abort()
     }

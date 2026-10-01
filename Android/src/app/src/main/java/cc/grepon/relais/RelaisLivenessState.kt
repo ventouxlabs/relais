@@ -22,7 +22,7 @@ package cc.grepon.relais
  * own two-read tear remains — see the comment in `releaseIfIdle`), every other close —
  * `shutdown()`, i.e. STOP and the swap thread — publishes false after its close, and the start of every real init
  * attempt clears it too (`beginStartup(clearIdleUnloaded = true)`, which flips both facts in ONE
- * snapshot). It lives here rather than as a separately-read volatile for the reason #322/#327
+ * snapshot), as does a request-driven provision kick (#362, `ensureProvisionedInBackground`). It lives here rather than as a separately-read volatile for the reason #322/#327
  * exist: lifecycle facts combined across separate reads tear.
  */
 data class RelaisLiveness(
@@ -47,12 +47,14 @@ internal class RelaisLivenessPublisher(initial: RelaisLiveness = RelaisLiveness(
   }
 
   /**
-   * [clearIdleUnloaded] is passed ONLY by `RelaisEngine.ensureInitialized`'s real-init branch — the
-   * one place that is, by construction, a real init attempt. Every other owner (the service's init
-   * thread, the model-swap thread, `ensureInitializedInBackground`'s caller-side publish) begins
-   * startup before it knows whether an init will happen at all: the swap thread bails on a missing
-   * file and ends startup with nothing attempted, and clearing idle there would make a healthy idle
-   * node read STARTING, trip the stall detector, and get restarted for a failed operator action.
+   * [clearIdleUnloaded] is passed by `RelaisEngine.ensureInitialized`'s real-init branch — the one
+   * place that is, by construction, a real init attempt — and by `ensureProvisionedInBackground`
+   * (#362), every exit of whose thread is a real outcome: a resident engine, or `lastInitFailed` set
+   * before its `endStartup()`. Every other owner (the service's init thread, the model-swap thread,
+   * `ensureInitializedInBackground`'s caller-side publish) begins startup before it knows whether an
+   * init will happen at all: the swap thread bails on a missing file and ends startup with nothing
+   * attempted, and clearing idle there would make a healthy idle node read STARTING, trip the stall
+   * detector, and get restarted for a failed operator action.
    */
   @Synchronized
   fun beginStartup(clearIdleUnloaded: Boolean = false) {
