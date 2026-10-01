@@ -276,6 +276,9 @@ class RelaisNodeService : Service() {
       // failure doesn't flash NodeState.ERROR in the window before startupInProgress flips.
       RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead" (slow downloads)
       RelaisNodeProgress.reset() // drop any stale phase/bytes from a prior attempt (control-panel phase line)
+      // Captured BEFORE the download (minutes): a STOP landing during it runs RelaisEngine.shutdown()
+      // in onDestroy, and the init below must not re-create the engine after that (#362 review).
+      val shutdownEpoch = RelaisEngine.currentShutdownEpoch()
       try {
         updateNotification("Provisioning model…")
         val modelPath =
@@ -283,7 +286,23 @@ class RelaisNodeService : Service() {
             updateNotification("Downloading model $pct%…")
           }
         RelaisNodeProgress.phase = ProvisionPhase.LOADING_ENGINE
-        RelaisEngine.ensureInitialized(applicationContext, modelPath)
+        if (!RelaisEngine.ensureInitializedUnlessShutdownSince(shutdownEpoch, applicationContext, modelPath = modelPath)) {
+          // Nothing was loaded: a shutdown() ran since this attempt began. Two owners can have run it.
+          //  - STOP: onDestroy sets serviceDestroyed (under listenerLifecycleLock) BEFORE it calls
+          //    shutdown(), so it is already true here. Throw NOW, with the same message as the check
+          //    below, rather than falling through to it: the embedder warm, image-gen and TTS
+          //    registrations in between would otherwise also run after teardown. The catch then does
+          //    exactly what it does for a STOP that lands later in this body.
+          //  - A swap (dashboard pick) won the engine during the download. Proceed: the swap owns the
+          //    engine, and throwing would tear down listeners and record a failure over a node whose
+          //    swap may have succeeded. If the swap FAILED with nothing resident, either its own
+          //    ensureInitialized recorded lastInitFailed (ERROR → the watchdog revives), or it restored
+          //    the idle state it found (IDLE → the next request reloads or kicks a provision); with
+          //    neither, `!ready && listenersUp && !idleUnloaded` reads STARTING with no startup in
+          //    progress and the watchdog still revives. Never a silent hang.
+          check(!serviceDestroyed) { "service was destroyed during startup" }
+          Log.i(TAG, "init skipped: a model swap took the engine during provisioning")
+        }
         // Register the EmbeddingGemma embedder so /v1/embeddings can report availability + provision
         // on demand. register() is cheap (no download/load). warmIfProvisioned() background-loads an
         // ALREADY-downloaded model (no token, no fetch) so a restart serves embeddings without a first

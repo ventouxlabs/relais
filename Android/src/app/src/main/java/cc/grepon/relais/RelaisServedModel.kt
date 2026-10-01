@@ -44,13 +44,14 @@ fun servedModelMismatch(expected: String?, resident: String?): Boolean =
 
 /** Thrown under the engine lock when the resident model is not the one the request was classified for. */
 class ModelNotResidentException(val expected: String, val resident: String?) :
-  IllegalStateException("requested model '$expected' is not resident (resident: ${resident ?: "none"})")
+  RetryableModelUnavailableException("requested model '$expected' is not resident (resident: ${resident ?: "none"})")
 
-// Which stream failures unwind to the dispatcher's 503 is decided by `isUncommittedRetryable` in
-// RelaisModelPresence.kt — shared with #362's ModelNotOnDiskException, so the lanes route both alike.
+// Which failures unwind to the dispatcher's 503, and with which text, is decided by
+// `isUncommittedRetryable` and `modelStateMessage` in RelaisModelPresence.kt, both keyed on the sealed
+// RetryableModelUnavailableException — shared with #362's ModelNotOnDiskException.
 
 /**
- * The 503 body for a [ModelNotResidentException] or a [ModelNotOnDiskException], in the envelope of the lane that raised it. Keyed on
+ * The 503 body for a [RetryableModelUnavailableException], in the envelope of the lane that raised it. Keyed on
  * the endpoint label because the answer is written by the dispatcher's catch, which knows only that.
  */
 internal fun modelNotResidentBody(endpoint: String, message: String): JSONObject =

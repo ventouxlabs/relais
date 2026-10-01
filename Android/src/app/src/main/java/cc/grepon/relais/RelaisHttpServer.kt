@@ -696,19 +696,19 @@ class RelaisHttpServer(
           else -> reply(404, RelaisError.json("not found", RelaisError.NOT_FOUND))
         }
       } catch (e: Exception) {
-        if (e is ModelNotResidentException || e is ModelNotOnDiskException) {
-          // #352: a swap won the engine lock after this request was classified. #362: the configured
-          // model is not on disk yet; generate kicked (or found running) its provisioning. Nothing
-          // has been written (non-streaming, or a stream that never committed — see
-          // isUncommittedRetryable), so answer like the classifier's own swap 503.
+        // Non-null iff `e` is a retryable model state (the sealed RetryableModelUnavailableException):
+        // #352, a swap won the engine lock after this request was classified; #362, the configured
+        // model is not on disk yet. Nothing has been written (non-streaming, or a stream that never
+        // committed — see isUncommittedRetryable), so answer like the classifier's own swap 503.
+        val retryMessage = modelStateMessage(e)
+        if (retryMessage != null) {
           Log.w(TAG, "served-model check failed: ${e.message}")
           RelaisMetrics.recordRequest(endpoint, 503)
-          val message = if (e is ModelNotOnDiskException) MODEL_NOT_ON_DISK_MESSAGE else MODEL_NOT_RESIDENT_MESSAGE
           runCatching {
             respond(
               sock,
               503,
-              modelNotResidentBody(endpoint, message),
+              modelNotResidentBody(endpoint, retryMessage),
               listOf("Retry-After: $MODEL_SWAP_RETRY_AFTER_SECONDS"),
             )
           }
