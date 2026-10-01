@@ -342,12 +342,14 @@ object RelaisEngine {
 
   /**
    * Bumped by every [shutdown] — STOP (`RelaisNodeService.onDestroy`) and the swap thread's
-   * close-before-reload — inside its `synchronized(lock)`, and by NOTHING else: an idle-TTL unload
+   * close-before-reload — as the LAST act inside its `synchronized(lock)`, and by NOTHING else: an idle-TTL unload
    * ([releaseIfIdle], via [closeEngine]) is not a teardown and does not bump it, so a startup that
    * outlives an idle unload still loads.
    *
    * Closes "init after teardown" (#362 review) for every startup that captures it BEFORE its slow
-   * part and loads only through [ensureInitializedUnlessShutdownSince]: without it, a STOP landing
+   * part and loads only through [ensureInitializedUnlessShutdownSince] — i.e. every such startup that
+   * began before a shutdown COMPLETED (a capture during the close still reads the old value, because
+   * the bump is last). A startup that begins after a shutdown completed is not gated by it. Without it, a STOP landing
    * mid-provision closed the engine and the startup then re-created a multi-GB engine with no service,
    * no listeners, no idle-TTL ticker and `shouldRun=false`. Gated sites:
    *  - [ensureProvisionedInBackground]'s thread (`ensureModel` — minutes — then init);
@@ -607,9 +609,12 @@ object RelaisEngine {
    * node whose kick FAILS must read ERROR, not IDLE. Left set, `idleUnloaded && listenersUp` is the
    * watchdog's healthy-idle branch, which returns before its revive — so a failed provision on an
    * idle node would read as healthy idle and never be retried. Safe here, unlike the other non-init
-   * owners [RelaisLivenessPublisher.beginStartup] warns about, because every exit of this thread is a
-   * real outcome: a resident engine, or [lastInitFailed] set (by [ensureInitialized] itself, or by the
-   * catch below for a provisioning failure) BEFORE `endStartup()`.
+   * owners [RelaisLivenessPublisher.beginStartup] warns about, because every exit of this thread leaves
+   * an owner of the node's state BEFORE `endStartup()`: a resident engine; [lastInitFailed] set (by
+   * [ensureInitialized] itself, or by the catch below for a provisioning failure); or — the exits that
+   * set neither — a STOP or swap that ran [shutdown] since the kick (skipped init, or a failure not
+   * recorded), an engine something else brought up, or a healthy-idle node (see
+   * [shouldRecordProvisionFailure]).
    *
    * If a ModelsScreen pick is already downloading the same model, [RelaisModelProvisioner.ensureModel]
    * attaches to that work through #365's single-flight owner rather than starting a second download.
@@ -702,8 +707,9 @@ object RelaisEngine {
    * reload happen once the new model is confirmed present on disk.
    *
    * @return true iff THIS call won [swapDispatching] and started a swap thread — **not** that the
-   * swap succeeded. The thread can still bail (target not on disk) or roll back (engine-create
-   * failed), both of which leave the previous model resident. Callers that persist an operator's
+   * swap succeeded. The thread can still bail (target not on disk), roll back (engine-create
+   * failed), both of which leave the previous model resident, or bail because a STOP ran
+   * [shutdown] since dispatch (#362 review, [shutdownEpoch]) — nothing is resident then, by STOP's design. Callers that persist an operator's
    * choice must dispatch FIRST and persist only on true: the CAS is the only atomic arbiter, so a
    * check-then-act on any other flag races it, and persisting after a false would leave config
    * naming a model no swap is bringing up. A false is the caller's cue to answer "busy, retry"
@@ -1347,9 +1353,16 @@ object RelaisEngine {
    */
   fun shutdown() {
     synchronized(lock) {
-      shutdownEpoch++ // see shutdownEpoch: every teardown, never an idle unload
-      closeEngine()
-      RelaisLivenessState.publishIdleUnloaded(false)
+      try {
+        closeEngine()
+        RelaisLivenessState.publishIdleUnloaded(false)
+      } finally {
+        // LAST, after the close: a lock-free capture that reads the epoch while this is mid-close must
+        // read the OLD value, so its startup — blocked on [lock] until now — sees it move and skips.
+        // Bumped first, that capture would read the new value and load after this teardown. In a
+        // finally because closeEngine() catches only Exception. See shutdownEpoch.
+        shutdownEpoch++
+      }
     }
   }
 

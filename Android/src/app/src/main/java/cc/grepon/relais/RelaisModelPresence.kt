@@ -96,8 +96,10 @@ internal fun modelStateMessage(e: Throwable): String? =
  *  - [lastInitFailed] false → kick: nothing has failed, nothing else is fetching.
  *  - [lastInitFailed] true and NOT [idleUnloaded] → no: that is ERROR with listeners up, and the
  *    watchdog's revive (with backoff) owns retries, not every request.
- *  - [lastInitFailed] true and [idleUnloaded] → kick: the watchdog treats `idleUnloaded && listenersUp`
- *    as healthy idle and returns BEFORE its revive, so nothing else would ever fetch the model.
+ *  - [lastInitFailed] true and [idleUnloaded] → kick. DEFENSIVE: with [listenersUp] this is the
+ *    combination `computeNodeState`'s KDoc calls unreachable (and [shouldRecordProvisionFailure] keeps
+ *    the kick from producing it). If it ever occurs, the watchdog treats `idleUnloaded && listenersUp`
+ *    as healthy idle and returns BEFORE its revive, so a no-kick here would 503 forever.
  */
 internal fun shouldKickProvision(lastInitFailed: Boolean, listenersUp: Boolean, idleUnloaded: Boolean): Boolean =
   listenersUp && (!lastInitFailed || idleUnloaded)
