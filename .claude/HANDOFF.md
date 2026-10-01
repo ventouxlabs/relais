@@ -6,6 +6,66 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
+## 2026-10-01 — ⏩ START HERE. **`main` = `3e29d5d1` (unchanged since 09-30). One PR open: #365 (#363), reviewed APPROVE, attach verified on rango, completion check pending. Then #362 → #364 → #337 UI half.**
+
+### #365 — fix #363 (shared model download) — OPEN, not merged
+Branch `fix/363-shared-model-download` (worktree `../relais-363`), commits `14b3e1f0` + `a04dc448`.
+- **Single-flight owner** in `RelaisModelProvisioner.download()`: under one lock, attach to unfinished
+  work carrying a matching `downloadSpec:<sha256>` tag (fingerprint of the enqueued input), else REPLACE.
+  NOT `KEEP` — HF refs are named by id, so the GPU/TPU E2B builds share a work name.
+- 600 s bound on never-RUNNING work (fails callers, does not cancel).
+- **Length check in `DownloadWorker`** before the `.tmp` → final rename, against the SERVER-declared size
+  (206 `Content-Range` total / 200 `Content-Length`; unknown → skip; never catalog `sizeInBytes`).
+- Tests 1570 × 3; 32 mutations killed; review COMMENT (no data-loss path) → fixes → re-review **APPROVE**.
+- **Device (rango, 09-30):** ModelsScreen pick Gemma3-1B-IT (584 MB), then START → the service logged
+  `Attaching to the in-flight download of Gemma3-1B-IT (0147b2c1…)`, one worker thread only. PASS, posted on #365.
+- **Pending:** the phone disconnected at ~336/584 MB. On reconnect: the file
+  (`files/Gemma3-1B-IT/42d538a9…/gemma3-1b-it-int4.litertlm` or similar — `find … -name 'gemma3-1b-it-int4.litertlm*'`)
+  must be exactly **584,417,280** bytes; the node LIVE on Gemma3-1B-IT; ModelsScreen Ready (not Failed). Then merge.
+- Known, documented in the PR: a narrow (≤200 ms) cancelled-writer window reachable only via the Gallery
+  lane's REPLACE (fix = `FileChannel` lock + `readTimeout`); the pre-existing 416 on a complete-but-unrenamed `.tmp`.
+
+### rango state right now — RESTORE after the #365 check
+- Installed: **a debug build of `a04dc448`** (#363 branch), re-signed with `~/.android/debug.keystore`.
+- **Configured model changed to `litert-community/Gemma3-1B-IT`** for the test. Restore: ModelsScreen →
+  CHANGE MODEL → `device/gemma3-1b-it-int4` (or Configure). Then **delete the 584 MB test download** (agreed with JD).
+- **HF token now saved in the app**, set with no UI typing:
+  `am start -n com.ventouxlabs.relais.izzy/cc.grepon.relais.RelaisControlActivity --es cmd stop --es token <apiKey> --es hfToken "$(tr -d '\n' < ~/.cache/huggingface/token)"`.
+  The host token lives at `~/.cache/huggingface/token`; verified 09-30 (206 on a gated file, 401 without).
+- The node API key is in `scratchpad/.key` for this session only (read off the control panel's SHOW); `adb forward tcp:18080 tcp:8080`.
+- The widget is placed on the outer screen's finance page. Idle TTL is 15 min.
+
+### Next, in order (designs settled — see the 09-30 section's trace and these issues)
+1. **#362** — a request while the configured model isn't on disk gets 500 and flips the node to ERROR.
+   Fix inside `RelaisEngine.generate`, under the lock, before `ensureInitialized`: if the configured model's
+   resolved file doesn't EXIST (`pathFor` rung 4 returns the default path unchecked), throw a typed
+   exception with NO liveness writes → per-lane 503 + `Retry-After` (reuse #359's path). **Trap:** today's
+   ERROR → watchdog revive is what provisions a missing model; a bare 503 would answer 503 forever. So
+   kick provisioning through #365's single-flight owner, publishing startup (watchdog shielded, surfaces
+   read STARTING). State in the PR: an omitted-model LAN request can now start a download of the
+   CONFIGURED model. Device check: move `gemma3-1b-it-int4.litertlm` aside → 503 not 500, no ERROR; put it back.
+2. **#364** — "reloading…" never clears after an idle pick; chat SEND stays disabled. Partly closed by #362
+   (picks provisioning under a published startup); an on-disk idle pick still needs the pure predicate
+   "not ready AND nothing loading ⇒ applies on next load, not reloading".
+3. **#337 UI half** — unlock the IDLE lock in `computeControlPanelState` (flip `RelaisControlPanelStateTest`;
+   keep STARTING locked) + Configure's twin. Configure is the only persist-only picker: reuse the dashboard's
+   dispatch-then-persist sequence as ONE shared function, or route it to ModelsScreen — no third pick path.
+   Note: Configure still shows "model locked while starting" when `shouldRun` is true with nothing running
+   (the #358 disagreement, Configure's copy of it).
+
+### Open, not blocking
+#353 (not reproducible via force-stop; suggested lowering), #300 #288 #122 #102 #97 (JD decisions), #69.
+Local-only branches `smoke/combined-0929` and `smoke/combined-0930` (all their content is on `main`). Worktree `../relais-363`.
+
+### Lessons this session (also in memory)
+- **Never blind `input text` on rango**: a family-chat heads-up reply box took focus (nothing sent). Guard
+  each tap with an `mCurrentFocus` check, abort on a `none` lookup, and prefer adb intents (like the hfToken extra) or ask JD.
+- **Check which display is live**: folded = outer `…153` (1080×2364), unfolded = inner `…152`; the launcher keeps separate layouts.
+- **Every fix commit got its own review**, and three of them found real defects inside the fix (#358's
+  no-render HIGH, the `:imagegen` process, #357's untested file-name half). Keep doing it.
+
+---
+
 ## 2026-09-30 — ⏩ START HERE. **Queue cleared: #337 (correctness half) #343 #347 #352 #354 #355 #358 all merged and closed. `main` = `3e29d5d1`. Next: #337's UI half — trace the MODELS-tab race FIRST (below).**
 
 ### Merged this session (every PR: first review, re-review, fix-commit review; suites XML-verified)
