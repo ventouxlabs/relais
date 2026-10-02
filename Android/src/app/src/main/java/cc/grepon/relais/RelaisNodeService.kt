@@ -270,7 +270,9 @@ class RelaisNodeService : Service() {
     if (!startupDispatchInFlight.compareAndSet(false, true)) return // lost the race; another dispatch is already running
     // Captured HERE, before the thread exists, not as the thread's first statement: every caller of
     // this function runs strictly before onDestroy's shutdown() (onCreate/onStartCommand on main, like
-    // onDestroy; the LAN-rebind observer under listenerLifecycleLock with serviceDestroyed checked).
+    // onDestroy; the LAN-rebind observer under listenerLifecycleLock with serviceDestroyed checked —
+    // which holds only because onDestroy sets that flag under the same lock BEFORE it calls
+    // RelaisEngine.shutdown(); reordering those two breaks this guarantee).
     // A capture inside the thread could run AFTER a STOP that completed first, read the post-STOP
     // value, and pass the gate below — the init-after-teardown this epoch exists to stop (#362 review).
     val shutdownEpoch = RelaisEngine.currentShutdownEpoch()
@@ -289,12 +291,13 @@ class RelaisNodeService : Service() {
         }
         RelaisNodeProgress.phase = ProvisionPhase.LOADING_ENGINE
         // No `modelPath`: ensureModel's return is the path for ITS idAtStart, while init's `modelId`
-        // is a fresh read — a selection change mid-download paired them, loading one model's weights
-        // under another's id (#337's class; RelaisModelProvisioner.resolveModel's KDoc: the drift
-        // guard "only declines to PERSIST the path, which is still returned and still handed to
-        // engine init"). Resolved by id instead, as the provision kick does: ensureModel's
-        // remember() tags the in-memory cache with idAtStart, so with no drift pathFor finds this
-        // exact file; with drift it finds the new id's file or fails honestly (ERROR → revive).
+        // is a fresh read, so handing one to the other lets a selection change mid-download load one
+        // model's weights under another's id (#337's class; the #11 drift guard only declines to
+        // PERSIST that path, it is still returned). Resolved by id instead, as the provision kick
+        // does: ensureModel's remember() tags the in-memory cache with idAtStart, so pathFor finds a
+        // file holding idAtStart's weights — not necessarily the very file ensureModel returned (a
+        // same-id build pick can replace it; that applies on restart, #354). On a changed id it finds
+        // the new id's file or fails honestly (ERROR → watchdog revive).
         if (!RelaisEngine.ensureInitializedUnlessShutdownSince(shutdownEpoch, applicationContext)) {
           // Nothing was loaded: a shutdown() ran since this attempt began. Two owners can have run it.
           //  - STOP: onDestroy sets serviceDestroyed (under listenerLifecycleLock) BEFORE it calls
