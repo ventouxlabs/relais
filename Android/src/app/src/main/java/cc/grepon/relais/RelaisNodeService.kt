@@ -268,6 +268,12 @@ class RelaisNodeService : Service() {
     val listenersUp = refreshListenerState()
     if (!shouldDispatchStartup(RelaisEngine.isReady, startupDispatchInFlight.get(), listenersUp)) return
     if (!startupDispatchInFlight.compareAndSet(false, true)) return // lost the race; another dispatch is already running
+    // Captured HERE, before the thread exists, not as the thread's first statement: every caller of
+    // this function runs strictly before onDestroy's shutdown() (onCreate/onStartCommand on main, like
+    // onDestroy; the LAN-rebind observer under listenerLifecycleLock with serviceDestroyed checked).
+    // A capture inside the thread could run AFTER a STOP that completed first, read the post-STOP
+    // value, and pass the gate below — the init-after-teardown this epoch exists to stop (#362 review).
+    val shutdownEpoch = RelaisEngine.currentShutdownEpoch()
 
     // Provision the model (download if missing) then initialize the resident engine off the main
     // thread; start the endpoint when ready.
@@ -276,17 +282,20 @@ class RelaisNodeService : Service() {
       // failure doesn't flash NodeState.ERROR in the window before startupInProgress flips.
       RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead" (slow downloads)
       RelaisNodeProgress.reset() // drop any stale phase/bytes from a prior attempt (control-panel phase line)
-      // Captured BEFORE the download (minutes): a STOP landing during it runs RelaisEngine.shutdown()
-      // in onDestroy, and the init below must not re-create the engine after that (#362 review).
-      val shutdownEpoch = RelaisEngine.currentShutdownEpoch()
       try {
         updateNotification("Provisioning model…")
-        val modelPath =
-          RelaisModelProvisioner.ensureModel(applicationContext) { pct ->
-            updateNotification("Downloading model $pct%…")
-          }
+        RelaisModelProvisioner.ensureModel(applicationContext) { pct ->
+          updateNotification("Downloading model $pct%…")
+        }
         RelaisNodeProgress.phase = ProvisionPhase.LOADING_ENGINE
-        if (!RelaisEngine.ensureInitializedUnlessShutdownSince(shutdownEpoch, applicationContext, modelPath = modelPath)) {
+        // No `modelPath`: ensureModel's return is the path for ITS idAtStart, while init's `modelId`
+        // is a fresh read — a selection change mid-download paired them, loading one model's weights
+        // under another's id (#337's class; RelaisModelProvisioner.resolveModel's KDoc: the drift
+        // guard "only declines to PERSIST the path, which is still returned and still handed to
+        // engine init"). Resolved by id instead, as the provision kick does: ensureModel's
+        // remember() tags the in-memory cache with idAtStart, so with no drift pathFor finds this
+        // exact file; with drift it finds the new id's file or fails honestly (ERROR → revive).
+        if (!RelaisEngine.ensureInitializedUnlessShutdownSince(shutdownEpoch, applicationContext)) {
           // Nothing was loaded: a shutdown() ran since this attempt began. Two owners can have run it.
           //  - STOP: onDestroy sets serviceDestroyed (under listenerLifecycleLock) BEFORE it calls
           //    shutdown(), so it is already true here. Throw NOW, with the same message as the check
