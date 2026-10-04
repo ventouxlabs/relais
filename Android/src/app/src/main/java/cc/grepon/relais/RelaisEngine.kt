@@ -402,7 +402,7 @@ object RelaisEngine {
    * that buys: a synchronous reload reads STARTING on every surface instead of IDLE or "stalled";
    * the watchdog stays out of every reload for the same reason it stays out of the service's;
    * `ensureInitializedInBackground` stops dispatching a redundant thread behind [lock];
-   * `ModelSwitch.observeReload` shows the reload in progress. The publisher nests, so an outer owner
+   * `ModelSwitch.observeReload` sees a reload already underway. The publisher nests, so an outer owner
    * (service, swap) wrapping this pair is fine — the outer `endStartup()` is what finally clears the
    * flag.
    *

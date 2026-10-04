@@ -37,7 +37,7 @@ import kotlinx.coroutines.launch
  */
 object ModelSwitch {
   const val RELOAD_POLL_INTERVAL_MS = 500L
-  const val MAX_RELOAD_POLL_ITERATIONS = 120 // 60s cap
+  const val MAX_RELOAD_POLL_ITERATIONS = 120 // 60 s cap for WidgetPromptWorker's warm wait; observeReload has none
 
   /** Persist a curated ref pick. Keeps the legacy id coherent and clears the staged path (see [RelaisConfig.setModelRef]). */
   fun applyRef(context: Context, ref: RelaisModelRef) {
@@ -82,14 +82,16 @@ object ModelSwitch {
   }
 
   /**
-   * Mirrors "a model load is underway" into [setReloading] after a pick — the one observer both pick
-   * surfaces ([ChatViewModel], [ModelsScreen]) use (#364). A pick starts no engine load: it persists,
-   * and the next load picks it up (a request's swap or lazy reload, the next START). ModelsScreen's
-   * pick does start a DOWNLOAD, which publishes no startup and has its own progress line. So the
-   * flag is [RelaisLiveness.startupInProgress], re-read every [RELOAD_POLL_INTERVAL_MS] until no
-   * startup is in progress, then false — whether or not the engine came up. A node that is not
-   * ready with nothing loading (IDLE, OFF, ERROR) is not reloading; deriving the flag from
-   * `!isReady` latched it on every one of those, and the chat screen's SEND with it.
+   * Mirrors a load already underway at pick time into [setReloading] — the one observer both in-app
+   * pick surfaces ([ChatViewModel], [ModelsScreen]) use (#364). Neither surface's pick starts an
+   * engine load: it persists, and a LATER load applies it (a request's swap or lazy reload, the next
+   * START), which this does not observe. (The dashboard's pick is different: it dispatches a swap,
+   * and does not come through here.) ModelsScreen's pick does start a DOWNLOAD, which publishes no
+   * startup and has its own progress line. So the flag is [RelaisLiveness.startupInProgress],
+   * re-read every [RELOAD_POLL_INTERVAL_MS] until no startup is in progress, then false — whether or
+   * not the engine came up. A node that is not ready with nothing loading (IDLE, OFF, ERROR) is not
+   * reloading; deriving the flag from `!isReady` latched it on every one of those, and the chat
+   * screen's SEND with it.
    *
    * No cap: a startup can be a multi-GB download, and the old 60 s cap stopped observing while the
    * load ran on, freezing the flag at its last reading. Cancelling the returned job (a re-pick, the

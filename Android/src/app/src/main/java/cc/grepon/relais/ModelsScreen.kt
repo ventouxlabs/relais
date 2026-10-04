@@ -92,8 +92,8 @@ fun ModelsScreen() {
   }
 
   // Mirror the in-chat selector's reload feedback (both routes persist through [ModelSwitch]): after
-  // a pick, show "reloading model…" while a load is in progress, through the same observer as the
-  // chat sheet, so the two cannot drift. Cancel any in-flight poll first so a rapid re-pick doesn't
+  // a pick, show "reloading model…" while a load already underway at pick time runs, through the
+  // same observer as the chat sheet, so the two cannot drift. Cancel any in-flight poll first so a rapid re-pick doesn't
   // leave overlapping pollers flickering the flag.
   fun observeReload() {
     reloadJob?.cancel()
