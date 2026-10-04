@@ -14,7 +14,10 @@ package cc.grepon.relais
 
 import android.content.Context
 import cc.grepon.relais.data.RelaisModelRef
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * The single source of truth for "the operator picked a model". Every surface that lets the user
@@ -24,8 +27,8 @@ import kotlinx.coroutines.delay
  *
  * The divergence this consolidates: the chat sheet used to route a curated ref through
  * `switchModel(ref.modelId)`, which persisted only the id and silently dropped the ref, while
- * ModelsScreen persisted the ref. Now both call [applyRef]/[applyManualId], and both observe the
- * lazy engine reload via [awaitReload].
+ * ModelsScreen persisted the ref. Now both call [applyRef]/[applyManualId], and both reflect a
+ * load in progress via [observeReload].
  *
  * The dashboard is the third surface and the one with the tightest ordering constraint: it
  * DISPATCHES the swap before calling [applyManualId], and persists only if the dispatch won
@@ -79,17 +82,27 @@ object ModelSwitch {
   }
 
   /**
-   * Best-effort observation of the engine picking up the newly-selected model: polls
-   * [RelaisLivenessState.snapshot] until startup settles (or a ~60s cap), then reports whether the node
-   * is serving. The reload is lazy (the resident engine reloads on next use), so this reflects a
-   * reload already underway rather than initiating one. Returns `true` iff [RelaisEngine.isReady].
+   * Mirrors "a model load is underway" into [setReloading] after a pick — the one observer both pick
+   * surfaces ([ChatViewModel], [ModelsScreen]) use (#364). A pick starts no engine load: it persists,
+   * and the next load picks it up (a request's swap or lazy reload, the next START). ModelsScreen's
+   * pick does start a DOWNLOAD, which publishes no startup and has its own progress line. So the
+   * flag is [RelaisLiveness.startupInProgress], re-read every [RELOAD_POLL_INTERVAL_MS] until no
+   * startup is in progress, then false — whether or not the engine came up. A node that is not
+   * ready with nothing loading (IDLE, OFF, ERROR) is not reloading; deriving the flag from
+   * `!isReady` latched it on every one of those, and the chat screen's SEND with it.
+   *
+   * No cap: a startup can be a multi-GB download, and the old 60 s cap stopped observing while the
+   * load ran on, freezing the flag at its last reading. Cancelling the returned job (a re-pick, the
+   * screen or ViewModel going away) is what ends an abandoned observation. [setReloading] runs on
+   * [scope]'s dispatcher.
    */
-  suspend fun awaitReload(): Boolean {
-    var iterations = 0
-    while (RelaisLivenessState.snapshot.startupInProgress && iterations < MAX_RELOAD_POLL_ITERATIONS) {
-      delay(RELOAD_POLL_INTERVAL_MS)
-      iterations++
+  fun observeReload(scope: CoroutineScope, setReloading: (Boolean) -> Unit): Job =
+    scope.launch {
+      while (true) {
+        val loading = RelaisLivenessState.snapshot.startupInProgress // ONE read: set and exit agree
+        setReloading(loading)
+        if (!loading) return@launch
+        delay(RELOAD_POLL_INTERVAL_MS)
+      }
     }
-    return RelaisEngine.isReady
-  }
 }

@@ -599,16 +599,12 @@ class ChatViewModel @JvmOverloads constructor(
     observeReload()
   }
 
-  /** Reflects [RelaisEngine]'s lazy model reload into [reloadingModel] (see [ModelSwitch.awaitReload]). */
+  /** Reflects a model load in progress into [reloadingModel] (see [ModelSwitch.observeReload]). */
   private fun observeReload() {
     // Cancel any in-flight poll first so a rapid re-pick doesn't leave overlapping pollers racing to
     // write _reloadingModel (harmless final value, but avoids flicker and wasted coroutines).
     reloadJob?.cancel()
-    reloadJob =
-      viewModelScope.launch {
-        _reloadingModel.value = true
-        _reloadingModel.value = !ModelSwitch.awaitReload()
-      }
+    reloadJob = ModelSwitch.observeReload(viewModelScope) { _reloadingModel.value = it }
   }
 
   fun rename(id: String, title: String) {
