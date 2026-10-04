@@ -6,6 +6,90 @@ uncommitted section was once destroyed by `git reset --hard` and had to be rebui
 
 ---
 
+## 2026-10-03 — ⏩ START HERE. **`main` = `71352be9`: #365 (#363) MERGED 10-01. PR #366 (#362) is open, CI green at `27eab2f2`, and its whole-branch review is done (COMMENT, nothing HIGH); the merge is JD's call. The #364 fix is BUILT, reviewed and test-hardened on `fix/364-idle-pick-reloading`; it is UNPUSHED and waiting on the rango smoke. Filed #367 #368 #369.**
+
+The 10-01 section below is superseded on its "pending" and "RESTORE rango" items: #365 merged, and rango was restored per JD's 10-01 call ("keep E2B, delete the test download, start #362").
+
+### PR #366 — fix #362 — OPEN, not merged
+Branch `fix/362-missing-model-503` (worktree `../relais-362`), 5 commits `b6b0d340`..`27eab2f2`. The PR body is the full record: design, behaviour changes, device results, known items. In short:
+- A request whose configured model isn't on disk now gets 503 + `Retry-After` with no ERROR flip, and kicks a single-flight background provision.
+- `shutdownEpoch` keeps every background init path from loading an engine after STOP.
+- The pure rules are in `RelaisModelPresence.kt`.
+
+Verification:
+- JVM tests: 1595 × 3 flavors at `d70aee20`.
+- Mutations: 14, all killed.
+- Codex: ×3, the third clean.
+- Device: three scenarios on rango, all PASS.
+- `27eab2f2` is comment-only, and its ordering claim was checked: `RelaisNodeService.kt:568` before `:610`.
+
+**Final whole-branch review (opus `code-reviewer`, `main...27eab2f2`, 10-03): COMMENT. 0 CRITICAL, 0 HIGH, 1 MEDIUM, 10 LOW.**
+- The concurrency answers all came back clean:
+  - every begin/end pair balances
+  - no init after STOP through the kick
+  - failure recording is airtight
+  - every `generate` caller handles the new exception
+- **MEDIUM → #368:** the other lazy-reload lanes (audio, tile WARM, widget WARM_THEN_RUN, `RelaisInference` self-heal → `ensureInitializedInBackground`) still flip ERROR on a missing model. That then disables #366's kick until the watchdog revives the node. The same happens on `main`, so #366 does not regress it. The review's LOW comment and hygiene items are listed in #368 too.
+- **→ #369:** the swap path's version of #362. When X is resident and the configured Y isn't on disk, the untargeted swap bails and the client gets "swapping" 503s forever. Also on `main`.
+- **Recommendation to JD:** merge #366 as-is, then take #368 as the next PR. This round found nothing new at P1 (review economics). Fixing #368 inside #366 would void its device evidence, and rango is unplugged.
+
+### #364 — `fix/364-idle-pick-reloading` (worktree `../relais-364`), from `main` — BUILT, UNPUSHED
+**The cause is wider than the issue says.**
+- Both pick surfaces set the flag from `!awaitReload()`, i.e. `!isReady` once no startup was in progress. A pick starts no load, so IDLE, OFF and ERROR all latched "reloading…", and with it the chat's SEND.
+- A startup longer than the 60 s poll cap also froze the flag true after the load finished.
+
+**Fix:** `ModelSwitch.observeReload(scope, setReloading)` is the one shared observer.
+- It mirrors `startupInProgress` with one read per poll and no cap, and settles false whether or not the engine came up.
+- `awaitReload` is removed.
+- The comments are narrowed to "a load already underway at pick time". A later load that applies the pick is not shown; at most that is a ~20 s empty bubble after an IDLE pick.
+
+**Commits:**
+- `c7eef1d0`: the fix, reviewed COMMENT (nothing HIGH).
+- A second commit, being finalized at handoff time, adds the review follow-ups:
+  - pins loop termination (`job.isCompleted`)
+  - `ChatViewModelReloadTest`, the caller mapping where the defect lived; it clears the VM inside `runTest` so a non-terminating poll fails instead of hanging
+  - the test-2 precondition and `@OptIn`
+  - the comment fixes
+
+**Mutations:**
+- 4 initial loop mutations, all killed.
+- Caller mutations C0 (the original #364 logic, which proves the new test RED), C1 (inverted mapping) and C2 (pick never observes): killed. They are being re-run against the final test shape.
+- M5 (loop exit deleted): killed by `ModelSwitchTest` in 8 s. Before the `runVmTest` wrapper it HUNG `ChatViewModelReloadTest`, which is what the wrapper is for.
+
+**Review items deliberately not fixed here:**
+- Already fixed by #366, no new issue:
+  - M2: chat SEND after an IDLE pick of a not-on-disk model flips ERROR.
+  - The "pick during START labels old weights with the new id" HIGH open question at `RelaisNodeService.kt:286` (#366's `d70aee20`).
+- Not fixed in this PR, PR-body notes only:
+  - the keyboard send action bypasses `canSend`
+  - the reloading line names the new model while an old startup runs
+  - the widget's 60 s warm cap settles on a false "node off"
+  - `docs/superpowers/specs/2026-07-11-chat-depth-design.md:147-151` ("SEND disabled until isReady") is historical
+  - `InProcessChatTransport` labels answers with the configured id, not the served one
+
+**Next:**
+1. rango smoke on `smoke/combined-1003` (main + #366 + #364; merges clean; worktree `../relais-smoke`).
+   - RED first, on the installed `27eab2f2` build: an IDLE node, a chat-sheet pick, then the "reloading model — …" line stays and SEND stays dead.
+   - Then install the combined debug build, re-signed with `~/.android/debug.keystore`, and check that the line is gone and SEND works.
+   - Back up `shared_prefs/relais.xml` via `run-as` first, and restore it after the test with the app force-stopped.
+2. Push and open the PR, which needs JD's go: CLAUDE.md says never push without explicit instruction.
+
+### #367 — filed this session, from reviewing #366 (code reading only)
+STOP while a startup download runs leaves the widget on "○ starting…" after the node is OFF, and it stays there past the download's end until the next START or process start:
+- `onDestroy`'s final render reads `startupInProgress=true`.
+- `computeNodeState` puts STARTING before every `shouldRun` arm (`core/NodeState.kt:83`).
+- Nothing re-renders the widget at `endStartup()`.
+
+It is pre-existing on `main` via `relais-init`; #366's kick makes it reachable from IDLE. #366's PR body said "until it ends" and has been corrected to link #367. Preferred fix: gate STARTING on `shouldRun`. Audit every `computeNodeState` caller first, including in-app chat with the node OFF.
+
+### rango state (Pixel 10 Pro Fold, `57211FDCG0023C`) — UNPLUGGED from USB since ~10-04 02:00 UTC; state below as last read
+- Installed: **a debug build of `27eab2f2`** (installed 10-03 08:33 local), debuggable, so `run-as` works.
+- Config: `model_id` = `litert-community/gemma-4-E2B-it-litert-lm` (TPU G5 build, `model_ref` set, file on disk). `should_run` true, `idle_ttl_minutes` 15.
+- The Gemma3-1B-IT test download is gone. `files/relais/gemma3-1b-it-int4.litertlm` (584,417,280 bytes) is intact.
+- The node API key is not in this session's scratchpad. Read it off the control panel's SHOW if a curl is needed.
+
+---
+
 ## 2026-10-01 — ⏩ START HERE. **`main` = `3e29d5d1` (unchanged since 09-30). One PR open: #365 (#363), reviewed APPROVE, attach verified on rango, completion check pending. Then #362 → #364 → #337 UI half.**
 
 ### #365 — fix #363 (shared model download) — OPEN, not merged
