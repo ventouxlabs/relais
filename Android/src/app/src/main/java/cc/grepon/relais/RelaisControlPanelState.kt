@@ -140,7 +140,7 @@ fun computeControlPanelState(
     // alone. Requires [listenersUp] for the same reason LIVE does — IDLE promises "reachable, warms on
     // the next request", and an unloaded engine behind torn-down listeners is not that; it falls
     // through to STARTING, which is what lets the watchdog's shield drop. And `!startupInProgress`
-    // (slot 3 > 5): the swap thread and ensureInitializedInBackground publish a plain beginStartup()
+    // (slot 3 > 5): the swap thread and a lazy reload publish a plain beginStartup()
     // before the real-init branch clears idle, and every other surface reads STARTING through that
     // window — this panel must not be the one that says IDLE.
     running && listenersUp && idleUnloaded && !startupInProgress -> NodeStatus.IDLE
@@ -153,10 +153,8 @@ fun computeControlPanelState(
   // (a different model/token) is reachable without a detour.
   // Also locked on IDLE. The reason has narrowed since #337's first half: the resolver is now
   // id-bound (`RelaisModelProvisioner.pathFor` resolves a path FOR a model id and never hands one
-  // model id's file to another; it is keyed by id, not build). It resolves but never provisions, so
-  // an idle reload after a pick loads the picked model only when it is already on the device — a
-  // not-yet-downloaded pick fails closed to ERROR until the next START (the operator's, or the
-  // watchdog's revive) provisions it, and a same-id build pick reloads the previous build.
+  // model id's file to another; it is keyed by id, not build). Background reloads provision missing
+  // weights, but a same-id build pick still reloads the previous build.
   // Nothing dispatches a swap, so a pick waits for a restart or the
   // next reload. Unlocking means routing the pick through the dashboard's targeted swap and
   // verifying on hardware: the open half of #337. Keep in step with the twin in

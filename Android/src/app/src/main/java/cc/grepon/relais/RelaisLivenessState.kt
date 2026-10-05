@@ -48,11 +48,11 @@ internal class RelaisLivenessPublisher(initial: RelaisLiveness = RelaisLiveness(
 
   /**
    * [clearIdleUnloaded] is passed by `RelaisEngine.ensureInitialized`'s real-init branch — the one
-   * place that is, by construction, a real init attempt — and by `ensureProvisionedInBackground`
-   * (#362), every exit of whose thread leaves an owner of the node's state before its
+   * place that is, by construction, a real init attempt — and by background provisioning
+   * (#362/#368), every exit of whose thread leaves an owner of the node's state before its
    * `endStartup()`: a resident engine, `lastInitFailed` set, or a STOP / swap / healthy idle that took
    * over since the kick (its KDoc lists them). Every other owner (the service's init thread, the model-swap thread,
-   * `ensureInitializedInBackground`'s caller-side publish) begins startup before it knows whether an
+   * a lazy reload's caller-side publish) begins startup before it knows whether an
    * init will happen at all: the swap thread bails on a missing file and ends startup with nothing
    * attempted, and clearing idle there would make a healthy idle node read STARTING, trip the stall
    * detector, and get restarted for a failed operator action.

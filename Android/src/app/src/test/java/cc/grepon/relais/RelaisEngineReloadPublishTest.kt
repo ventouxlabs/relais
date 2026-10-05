@@ -18,6 +18,8 @@ import android.content.SharedPreferences
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -30,9 +32,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 
 /**
- * feature-22 task 4(b): the state model a request-driven reload publishes. With no resident engine
- * (a JVM test never has one) every init attempt fails at `require(File(modelPath).exists())` —
- * BEFORE any native code — which is exactly the failure path whose flag writes this pins:
+ * Request-driven reload publication and #368's missing-model routing. JVM tests never build a
+ * native engine: absent-file synchronous init fails at require, provisioning is stopped by a
+ * Context probe, and present-file init is stopped at getExternalFilesDir before the native SDK.
  *
  *  - `ensureInitialized`'s real-init branch clears `idleUnloaded` and sets `startupInProgress` at
  *    ATTEMPT START, records `lastInitFailed = true` on a throw, and `endStartup()`s in its
@@ -71,8 +73,11 @@ class RelaisEngineReloadPublishTest {
 
   @After fun tearDown() {
     awaitStartupEnded()
+    RelaisEngine.startBackgroundStartup = { name, work -> kotlin.concurrent.thread(name = name, block = work) }
     RelaisEngine.lastInitFailed = false
     RelaisLivenessState.publishIdleUnloaded(false)
+    RelaisLivenessState.publishListenersUp(false)
+    RelaisNodeProgress.reset()
   }
 
   @Test fun `a failing synchronous reload clears idle at attempt start, records the failure, and balances its startup pair`() {
@@ -159,16 +164,10 @@ class RelaisEngineReloadPublishTest {
 
   /**
    * `ensureInitializedInBackground` publishes `startupInProgress` on the CALLER before the spawned
-   * thread exists — but with no staged model the thread's own `ensureInitialized` fails fast at
-   * `require(File(modelPath).exists())`, and a fast-enough worker can run its own begin/end pair
-   * PLUS the outer thread's `finally` (which ends the caller-side begin too) before this test's next
-   * line reads the snapshot back — a genuine scheduling race, not a hypothetical one. Pin it
-   * deterministically by holding the worker at the first `Context` call `ensureInitialized`'s
-   * sole Context-touching default argument makes (`modelId = RelaisConfig.modelId(context)`, which
-   * resolves through `RelaisConfig`'s private `prefs(context)`, i.e. `getSharedPreferences`). Since
-   * #337 that is the ONLY default that touches Context — `modelPath` defaults to null and is
-   * resolved inside the body — so the latch fires strictly before the body, well before the worker
-   * can enter `ensureInitialized`'s begin/end pair.
+   * thread exists — but a failing provision can settle before the caller reads the snapshot back.
+   * Hold the worker at its first Context access (RelaisConfig.modelId's getSharedPreferences),
+   * then stop provisioning with a deliberate sentinel. This pins publication independently of
+   * scheduler timing without downloading weights or entering native code.
    */
   @Test fun `the background reload publishes STARTING on the caller before returning`() {
     RelaisLivenessState.publishIdleUnloaded(true)
@@ -177,6 +176,7 @@ class RelaisEngineReloadPublishTest {
     val probing = object : ContextWrapper(ctx) {
       override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
         releaseLatch.await(5, TimeUnit.SECONDS) // bounded: a stuck release must not hang the suite
+        if (RelaisNodeProgress.phase == ProvisionPhase.RESOLVING) throw ProbeStop()
         return super.getSharedPreferences(name, mode)
       }
     }
@@ -204,6 +204,7 @@ class RelaisEngineReloadPublishTest {
     val probingSecond = object : ContextWrapper(ctx) {
       override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
         releaseSecond.await(5, TimeUnit.SECONDS)
+        if (RelaisNodeProgress.phase == ProvisionPhase.RESOLVING) throw ProbeStop()
         return super.getSharedPreferences(name, mode)
       }
     }
@@ -223,6 +224,195 @@ class RelaisEngineReloadPublishTest {
       RelaisLivenessState.endStartup()
     }
     assertFalse("no second owner was begun", RelaisLivenessState.snapshot.startupInProgress)
+  }
+
+  @Test fun `missing weights enter provision without ERROR and duplicate reloads share the startup`() {
+    RelaisLivenessState.publishIdleUnloaded(true)
+    RelaisEngine.lastInitFailed = true
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val calls = AtomicInteger()
+    val probing = provisioningProbe(entered, release, calls)
+    try {
+      RelaisEngine.ensureInitializedInBackground(probing)
+      assertTrue(entered.await(5, TimeUnit.SECONDS))
+      assertTrue(RelaisLivenessState.snapshot.startupInProgress)
+      assertFalse("missing weights are being provisioned, not a failed init", RelaisEngine.lastInitFailed)
+      assertFalse(RelaisLivenessState.snapshot.idleUnloaded)
+      repeat(5) { RelaisEngine.ensureInitializedInBackground(probing) }
+      RelaisLivenessState.publishListenersUp(true)
+      val retry = assertThrows(ModelNotOnDiskException::class.java) {
+        RelaisEngine.generate(ctx, RelaisRequest("hello"), onToken = {})
+      }
+      assertTrue("text lane shares the already-running background provision", retry.provisioning)
+      assertEquals("all duplicate kicks attach to the same startup", 1, calls.get())
+      assertEquals(ProvisionPhase.RESOLVING, RelaisNodeProgress.phase)
+    } finally {
+      release.countDown()
+      awaitStartupEnded()
+    }
+    assertTrue("a genuine provisioning failure records ERROR", RelaisEngine.lastInitFailed)
+    assertEquals("failed provisioning must clear stale progress", ProvisionPhase.IDLE, RelaisNodeProgress.phase)
+  }
+
+  @Test fun `STOP during provisioning remains prompt and prevents init after provision succeeds`() {
+    RelaisConfig.setModelId(ctx, "test/model")
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val loading = AtomicBoolean(false)
+    val present = File(ctx.cacheDir, "provisioned-after-stop.litertlm")
+    val probing = provisioningProbe(entered, release, AtomicInteger(), failProvision = false, loading = loading)
+    try {
+      RelaisEngine.ensureInitializedInBackground(probing)
+      assertTrue(entered.await(5, TimeUnit.SECONDS))
+      // STOP acquires the engine lock; if provisioning held it this could not return until release.
+      RelaisEngine.shutdown()
+      present.writeBytes(byteArrayOf(0))
+      RelaisConfig.setModelPath(ctx, present.absolutePath)
+      release.countDown()
+      awaitStartupEnded()
+      assertFalse("the original shutdown epoch must be retained through provision", loading.get())
+      assertFalse("STOP owns the outcome; skipped init is not a failure", RelaisEngine.lastInitFailed)
+      assertFalse(RelaisLivenessState.snapshot.idleUnloaded)
+    } finally {
+      release.countDown()
+      awaitStartupEnded()
+      present.delete()
+      RelaisModelProvisioner.resetPathCacheForTest()
+    }
+  }
+
+  @Test fun `provisioned missing weights continue into init under the same startup owner`() {
+    RelaisConfig.setModelId(ctx, "test/model")
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val loading = AtomicBoolean(false)
+    val startupInsideInit = AtomicBoolean(false)
+    val present = File(ctx.cacheDir, "just-provisioned.litertlm")
+    val probing = provisioningProbe(
+      entered, release, AtomicInteger(), failProvision = false,
+      loading = loading, startupInsideInit = startupInsideInit,
+    )
+    try {
+      RelaisEngine.ensureInitializedInBackground(probing)
+      assertTrue(entered.await(5, TimeUnit.SECONDS))
+      present.writeBytes(byteArrayOf(0))
+      RelaisConfig.setModelPath(ctx, present.absolutePath)
+      release.countDown()
+      awaitStartupEnded()
+      assertTrue("a missing-model reload must proceed past provisioning to init", loading.get())
+      assertTrue("startup remains published inside init after provisioning", startupInsideInit.get())
+      assertTrue("the deliberate init probe failure is genuine ERROR", RelaisEngine.lastInitFailed)
+    } finally {
+      release.countDown()
+      awaitStartupEnded()
+      present.delete()
+      RelaisModelProvisioner.resetPathCacheForTest()
+    }
+  }
+
+  @Test fun `present weights initialize directly without entering provision`() {
+    val present = File(ctx.cacheDir, "already-present.litertlm").apply { writeBytes(byteArrayOf(0)) }
+    RelaisConfig.setModelPath(ctx, present.absolutePath)
+    val provisioned = AtomicBoolean(false)
+    val loading = AtomicBoolean(false)
+    val probing = object : ContextWrapper(ctx) {
+      override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
+        if (RelaisNodeProgress.phase == ProvisionPhase.RESOLVING) provisioned.set(true)
+        return super.getSharedPreferences(name, mode)
+      }
+      override fun getExternalFilesDir(type: String?): File? {
+        if (RelaisNodeProgress.phase == ProvisionPhase.LOADING_ENGINE) {
+          loading.set(true)
+          throw ProbeStop()
+        }
+        return super.getExternalFilesDir(type)
+      }
+    }
+    try {
+      RelaisEngine.ensureInitializedInBackground(probing)
+      awaitStartupEnded()
+      assertTrue(loading.get())
+      assertFalse("existing weights must take the direct init path", provisioned.get())
+    } finally {
+      present.delete()
+    }
+  }
+
+  @Test fun `thread start Error rolls back lazy liveness and leaves guard available for retry`() {
+    RelaisLivenessState.publishIdleUnloaded(true)
+    RelaisEngine.lastInitFailed = true
+    RelaisNodeProgress.onDownloadProgress(10, 100)
+    RelaisEngine.startBackgroundStartup = { _, _ -> throw OutOfMemoryError("no native thread") }
+    RelaisEngine.ensureInitializedInBackground(ctx) // Error must not escape an HTTP/UI caller
+    assertFalse(RelaisLivenessState.snapshot.startupInProgress)
+    assertTrue("a dispatch failure is not an attempted reload", RelaisLivenessState.snapshot.idleUnloaded)
+    assertTrue("the previous init outcome must be preserved", RelaisEngine.lastInitFailed)
+    assertEquals(ProvisionPhase.IDLE, RelaisNodeProgress.phase)
+    assertEquals(0L, RelaisNodeProgress.downloadReceivedBytes)
+    var dispatched = false
+    RelaisEngine.startBackgroundStartup = { _, _ -> dispatched = true; throw OutOfMemoryError("again") }
+    RelaisEngine.ensureInitializedInBackground(ctx)
+    assertTrue("the failed dispatch must release single-flight", dispatched)
+  }
+
+  @Test fun `STOP between dispatch and worker entry skips presence and provision`() {
+    var queued: (() -> Unit)? = null
+    RelaisEngine.startBackgroundStartup = { _, work -> queued = work }
+    val accessed = AtomicBoolean(false)
+    val probing = object : ContextWrapper(ctx) {
+      override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
+        accessed.set(true)
+        throw ProbeStop()
+      }
+    }
+    RelaisEngine.ensureInitializedInBackground(probing)
+    assertTrue(RelaisLivenessState.snapshot.startupInProgress)
+    RelaisEngine.shutdown()
+    requireNotNull(queued).invoke()
+    assertFalse("STOP must be checked before any model resolution", accessed.get())
+    assertFalse(RelaisLivenessState.snapshot.startupInProgress)
+    assertFalse(RelaisEngine.lastInitFailed)
+  }
+
+  @Test fun `provision dispatch Error rolls back idle and init outcome and answers retryable absence`() {
+    RelaisLivenessState.publishIdleUnloaded(true)
+    RelaisLivenessState.publishListenersUp(true)
+    RelaisEngine.startBackgroundStartup = { _, _ -> throw OutOfMemoryError("no native thread") }
+    val retry = assertThrows(ModelNotOnDiskException::class.java) {
+      RelaisEngine.generate(ctx, RelaisRequest("hello"), onToken = {})
+    }
+    assertFalse("no startup was actually dispatched", retry.provisioning)
+    assertTrue("a failed dispatch must restore healthy idle", RelaisLivenessState.snapshot.idleUnloaded)
+    assertFalse("no init/provision attempt ran, so do not invent ERROR", RelaisEngine.lastInitFailed)
+    assertFalse(RelaisLivenessState.snapshot.startupInProgress)
+    assertEquals(ProvisionPhase.IDLE, RelaisNodeProgress.phase)
+  }
+
+  private fun provisioningProbe(
+    entered: CountDownLatch,
+    release: CountDownLatch,
+    calls: AtomicInteger,
+    failProvision: Boolean = true,
+    loading: AtomicBoolean = AtomicBoolean(),
+    startupInsideInit: AtomicBoolean = AtomicBoolean(),
+  ): ContextWrapper = object : ContextWrapper(ctx) {
+    override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
+      if (RelaisNodeProgress.phase == ProvisionPhase.RESOLVING && calls.getAndIncrement() == 0) {
+        entered.countDown()
+        check(release.await(5, TimeUnit.SECONDS)) { "provision probe was not released" }
+        if (failProvision) throw ProbeStop()
+      }
+      return super.getSharedPreferences(name, mode)
+    }
+    override fun getExternalFilesDir(type: String?): File? {
+      if (RelaisNodeProgress.phase == ProvisionPhase.LOADING_ENGINE) {
+        loading.set(true)
+        startupInsideInit.set(RelaisLivenessState.snapshot.startupInProgress)
+        throw ProbeStop()
+      }
+      return super.getExternalFilesDir(type)
+    }
   }
 
   @Test fun `every shutdown clears idle-unloaded — STOP after an idle release must not read idle`() {

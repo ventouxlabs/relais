@@ -81,7 +81,7 @@ class RelaisModelPresenceTest {
   }
 
   @Test fun `the not-on-disk message names the model`() {
-    assertTrue(ModelNotOnDiskException("gemma-y", provisioning = true).message!!.contains("gemma-y"))
+    assertTrue(ModelNotOnDiskException("gemma-y", provisioning = true).message?.contains("gemma-y") == true)
   }
 
   // --- modelStateMessage: the dispatcher's ONE "503 or 500, and which text" decision ---

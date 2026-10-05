@@ -702,7 +702,7 @@ class RelaisHttpServer(
         // committed — see isUncommittedRetryable), so answer like the classifier's own swap 503.
         val retryMessage = modelStateMessage(e)
         if (retryMessage != null) {
-          Log.w(TAG, "served-model check failed: ${e.message}")
+          Log.w(TAG, "retryable model state: ${e.message}")
           RelaisMetrics.recordRequest(endpoint, 503)
           runCatching {
             respond(

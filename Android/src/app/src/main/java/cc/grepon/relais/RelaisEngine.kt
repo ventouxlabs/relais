@@ -284,7 +284,7 @@ object RelaisEngine {
 
   /**
    * True iff the engine's current not-ready state is a graceful idle-TTL unload ([releaseIfIdle],
-   * #178), not a crash — i.e. **true iff the last close was an idle release**. Set by
+   * #178), with no later init/provision attempt or shutdown taking ownership. Set by
    * [releaseIfIdle] immediately BEFORE it closes the engine, so the writer's state sequence never
    * has an instant with the engine gone and the flag clear; a reader's own two-read tear remains —
    * see the comment in [releaseIfIdle]. Cleared by every other [shutdown] (so STOP clears it —
@@ -292,7 +292,8 @@ object RelaisEngine {
    * service is alive, and after idle → STOP there is no service behind it) and by
    * [ensureInitialized]'s real-init branch at ATTEMPT START (any reason — idle-TTL, watchdog, an
    * ordinary request — restores normal "not ready" semantics the moment a real attempt begins, in
-   * the same snapshot that publishes `startupInProgress`).
+   * the same snapshot that publishes `startupInProgress`). A background provision also clears it
+   * when it takes ownership of the attempt; a dispatch failure restores the prior idle state.
    *
    * Read-only here and delegating (feature-22): the fact lives in [RelaisLivenessState.snapshot]
    * beside `listenersUp`/`startupInProgress`, so readers deriving a composite state take the
@@ -306,8 +307,10 @@ object RelaisEngine {
   /** Guards [ensureInitializedInBackground] so a burst of requests during an idle-reload dispatches at most one thread. */
   private val backgroundReloadDispatching = java.util.concurrent.atomic.AtomicBoolean(false)
 
-  /** Guards [ensureProvisionedInBackground] so a burst of requests for a missing model dispatches at most one thread. */
-  private val backgroundProvisionDispatching = java.util.concurrent.atomic.AtomicBoolean(false)
+  /** Narrow thread-start seam: tests can fail dispatch before any worker exists. */
+  internal var startBackgroundStartup: (String, () -> Unit) -> Unit = { name, work ->
+    thread(name = name, block = work)
+  }
 
   /**
    * Consecutive [shutdown] failures ([Engine.close] threw). Read by [shouldUnloadIdleEngine] as a
@@ -356,7 +359,7 @@ object RelaisEngine {
    *  - `RelaisNodeService`'s "relais-init" thread (same shape; pre-existing twin);
    *  - [ensureModelSwapInBackground]'s thread (its untargeted `resolveModel` may block on the
    *    allowlist fetch before it takes [lock]); it checks before its OWN [shutdown], which bumps this;
-   *  - [ensureInitializedInBackground]'s thread (only a thread-spawn window, gated for the same price).
+   *  - [ensureInitializedInBackground]'s thread (may provision missing weights before init).
    * NOT closed: [generate]'s own synchronous cold start — a request blocked on [lock] while STOP's
    * [shutdown] holds it then cold-starts the configured model. Not a long provision (the request
    * thread is already inside `generate`, with the file on disk), and a request in flight at STOP is
@@ -557,34 +560,7 @@ object RelaisEngine {
    * CAS reset here, so nothing can latch `startupInProgress` true with no thread to clear it.
    */
   fun ensureInitializedInBackground(context: Context) {
-    if (isReady || RelaisLivenessState.snapshot.startupInProgress) return
-    if (!backgroundReloadDispatching.compareAndSet(false, true)) return // a reload is already dispatching
-    val epoch = shutdownEpoch // before the thread exists: a STOP between spawn and lock must not be outlived
-    RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead" — on the CALLER, see KDoc
-    try {
-      thread(name = "relais-idle-reload") {
-        try {
-          // publishes its own nested pair and sets lastInitFailed on a throw
-          if (!ensureInitializedUnlessShutdownSince(epoch, context)) {
-            Log.i(TAG, "idle-reload skipped init: engine was shut down since it was kicked")
-          }
-        } catch (t: Throwable) {
-          // Throwable: ensureInitialized rethrows an Error from a native engine-create, and on a
-          // bare thread an uncaught Error kills the WHOLE node process (the swap path's own reason).
-          Log.w(TAG, "background idle-reload failed: ${t.message}")
-        } finally {
-          backgroundReloadDispatching.set(false) // release single-flight FIRST …
-          RelaisLivenessState.endStartup() // … so endStartup() stays the LAST write: a kick that
-          // observes startupInProgress=false then finds the guard already open, never a lost kick.
-        }
-      }
-    } catch (t: Throwable) {
-      // Thread.start() failed (e.g. OOM creating a native thread) — the body never ran, so its
-      // finally never will. Undo the caller-side begin and release the single-flight guard.
-      RelaisLivenessState.endStartup()
-      backgroundReloadDispatching.set(false)
-      throw t
-    }
+    kickBackgroundStartup(context, provisionOnly = false)
   }
 
   /**
@@ -600,11 +576,10 @@ object RelaisEngine {
    * revive was the ONLY thing that ever provisioned the model. Answering a bare 503 instead without
    * this kick would leave nothing fetching the file — the node would answer 503 forever.
    *
-   * A SIBLING of [ensureInitializedInBackground], not a change to it: that one's callers (the audio
-   * lane, [cc.grepon.relais.core.RelaisInference]) carry a "never blind-cold-start a download"
-   * contract this one deliberately breaks. Same shape otherwise — guard on `isReady ||
-   * startupInProgress`, its own single-flight CAS, `startupInProgress` published synchronously on the
-   * CALLER before the thread exists, CAS released before `endStartup()` so that stays the LAST write.
+   * Shares dispatch ownership and the provisioning body with [ensureInitializedInBackground].
+   * The latter checks disk presence under [lock] before choosing init or provisioning. Calling
+   * this helper from inside an already-published reload would skip its own startup, so the worker
+   * invokes the shared body directly, retaining the original shutdown epoch and startup owner.
    *
    * Clears `idleUnloaded` in that caller-side begin (`clearIdleUnloaded = true`): an idle-unloaded
    * node whose kick FAILS must read ERROR, not IDLE. Left set, `idleUnloaded && listenersUp` is the
@@ -628,59 +603,100 @@ object RelaisEngine {
    * Only [generate] calls this, and only when [shouldKickProvision] says a live service owns the outcome.
    *
    * @return true iff a startup is in progress for the caller to report: this call started one, or one
-   * was already running / being dispatched. False only when the engine is already ready.
+   * was already running / being dispatched. False when the engine is already ready or thread
+   * dispatch failed without another startup remaining in progress.
    */
-  fun ensureProvisionedInBackground(context: Context): Boolean {
+  private fun ensureProvisionedInBackground(context: Context): Boolean {
+    check(Thread.holdsLock(lock)) { "provision kick requires the engine lock" }
+    return kickBackgroundStartup(context, provisionOnly = true)
+  }
+
+  private fun kickBackgroundStartup(context: Context, provisionOnly: Boolean): Boolean {
     if (isReady) return false
     if (RelaisLivenessState.snapshot.startupInProgress) return true
-    if (!backgroundProvisionDispatching.compareAndSet(false, true)) return true // a provision is already dispatching
-    val epoch = shutdownEpoch // the caller (generate) holds [lock], which every shutdown() takes: consistent
-    // On the CALLER, before the thread exists (see ensureInitializedInBackground's KDoc); clears idle — see above.
-    RelaisLivenessState.beginStartup(clearIdleUnloaded = true)
-    lastInitFailed = false // attempt start, after the begin — same order and reason as ensureInitialized
+    if (!backgroundReloadDispatching.compareAndSet(false, true)) return true
+    val epoch = shutdownEpoch // original epoch, BEFORE dispatch and any slow provisioning
+    val priorIdle = RelaisLivenessState.snapshot.idleUnloaded
+    val priorFailed = lastInitFailed
+    // A lazy kick has not yet checked whether it owns an init/provision. Preserve idle/failure
+    // until the worker checks the epoch under lock. The provision-only caller already holds lock.
+    RelaisLivenessState.beginStartup(clearIdleUnloaded = provisionOnly)
+    if (provisionOnly) {
+      lastInitFailed = false
+      RelaisNodeProgress.reset()
+    }
     try {
-      thread(name = "relais-provision") {
+      startBackgroundStartup(if (provisionOnly) "relais-provision" else "relais-idle-reload") {
         try {
-          // Both re-read the CONFIGURED id themselves (ensureModel's idAtStart, read after its own
-          // applyDeviceDefaultIfFresh; ensureInitialized's modelId default), so a config change — or
-          // that fresh-install default — mid-download can make this
-          // fetch/load a different id than the request checked. Harmless: that request was already
-          // answered 503, and its retry re-checks against whatever is configured then.
-          RelaisModelProvisioner.ensureModel(context)
-          // publishes its own nested pair and sets lastInitFailed on a real init throw
-          if (!ensureInitializedUnlessShutdownSince(epoch, context)) {
-            Log.i(TAG, "background provision skipped init: engine was shut down since this provision started")
-          }
+          runBackgroundStartup(context, epoch, provisionOnly)
         } catch (t: Throwable) {
-          // Throwable: an uncaught Error on a bare thread kills the WHOLE node process. Recorded so a
-          // PROVISIONING failure (401, offline — ensureInitialized never ran) reads ERROR and the
-          // watchdog revives with backoff — but only while the node is still this kick's to fail (see
-          // shouldRecordProvisionFailure): never over an engine something else brought up, a healthy
-          // idle node, or a STOP/swap that has since taken ownership. Idempotent when
-          // ensureInitialized already set it. Under [lock] so the facts read can't move under the write.
-          synchronized(lock) {
-            if (shouldRecordProvisionFailure(
-                ready = isReady,
-                idleUnloaded = RelaisLivenessState.snapshot.idleUnloaded,
-                shutdownSinceKick = shutdownEpoch != epoch,
-              )
-            ) {
-              lastInitFailed = true
-            }
-          }
-          Log.w(TAG, "background provision failed: ${t.message}")
+          recordBackgroundStartupFailure(epoch, t)
         } finally {
-          backgroundProvisionDispatching.set(false) // release single-flight FIRST …
+          backgroundReloadDispatching.set(false) // release single-flight FIRST …
           RelaisLivenessState.endStartup() // … so endStartup() stays the LAST write (see the sibling)
         }
       }
     } catch (t: Throwable) {
-      // Thread.start() failed — the body never ran, so its finally never will. Undo both.
+      // No attempt ran. The provision caller still holds lock, so rollback cannot overwrite a
+      // competing init/STOP. A lazy kick changed neither flag; do not restore a stale snapshot.
+      synchronized(lock) {
+        if (shutdownEpoch == epoch && !isReady) {
+          if (provisionOnly) {
+            RelaisLivenessState.publishIdleUnloaded(priorIdle)
+            lastInitFailed = priorFailed
+          }
+          RelaisNodeProgress.reset()
+        }
+      }
+      Log.w(TAG, "background startup dispatch failed: ${t.message}")
+      backgroundReloadDispatching.set(false)
       RelaisLivenessState.endStartup()
-      backgroundProvisionDispatching.set(false)
-      throw t
+      return RelaisLivenessState.snapshot.startupInProgress
     }
     return true
+  }
+
+  private fun runBackgroundStartup(context: Context, epoch: Long, provisionOnly: Boolean) {
+    val needsProvision = synchronized(lock) {
+      // Check BEFORE any Context/disk access: STOP during dispatch owns the engine and must not
+      // leave us downloading on its behalf. Keep this original epoch throughout provisioning.
+      if (shutdownEpoch != epoch || isReady) return
+      val modelId = RelaisConfig.modelId(context)
+      val path = RelaisModelProvisioner.pathFor(context, modelId)
+      if (!provisionOnly && !configuredModelMissing(isReady, path) { File(it).exists() }) {
+        ensureInitialized(context, modelPath = path, modelId = modelId)
+        false
+      } else {
+        // Absence is a provision attempt, not an init failure. Publish before releasing the lock
+        // and keep the caller's startup owner until the complete provision+init has settled.
+        RelaisLivenessState.publishIdleUnloaded(false)
+        lastInitFailed = false
+        RelaisNodeProgress.reset()
+        true
+      }
+    }
+    if (!needsProvision) return
+    // Download outside the engine lock: STOP remains prompt and the provisioner's existing
+    // single-flight owner attaches to any ModelsScreen download already in progress.
+    RelaisModelProvisioner.ensureModel(context)
+    if (!ensureInitializedUnlessShutdownSince(epoch, context)) {
+      Log.i(TAG, "background provision skipped init: engine was shut down since this startup was kicked")
+    }
+  }
+
+  private fun recordBackgroundStartupFailure(epoch: Long, failure: Throwable) {
+    synchronized(lock) {
+      if (shouldRecordProvisionFailure(
+          ready = isReady,
+          idleUnloaded = RelaisLivenessState.snapshot.idleUnloaded,
+          shutdownSinceKick = shutdownEpoch != epoch,
+        )
+      ) {
+        lastInitFailed = true
+        RelaisNodeProgress.reset()
+      }
+    }
+    Log.w(TAG, "background startup failed: ${failure.message}")
   }
 
   /**

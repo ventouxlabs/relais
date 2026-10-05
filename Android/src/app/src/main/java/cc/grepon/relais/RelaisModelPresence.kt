@@ -18,7 +18,7 @@ package cc.grepon.relais
  * `ensureInitialized` — which, with the file not on disk, threw, recorded `lastInitFailed`, and put
  * the node in ERROR. The client got a 500 (or a 200 + SSE error), and the watchdog's revive was the
  * only thing that ever provisioned the model. Now `generate` checks first, under its lock: a missing
- * model kicks [RelaisEngine.ensureProvisionedInBackground] (when [shouldKickProvision] says a live
+ * model kicks a background provision in [RelaisEngine] (when [shouldKickProvision] says a live
  * service will own it) and throws [ModelNotOnDiskException], which
  * the HTTP dispatcher answers 503 + Retry-After exactly like a [ModelNotResidentException].
  *
@@ -85,7 +85,7 @@ internal fun modelStateMessage(e: Throwable): String? =
   }
 
 /**
- * Whether [RelaisEngine.generate] should kick [RelaisEngine.ensureProvisionedInBackground] for a missing
+ * Whether [RelaisEngine.generate] should kick a background provision for a missing
  * configured model (#362) — i.e. whether a live service will own the outcome and nothing else will
  * retry it. All three inputs come off ONE liveness snapshot plus `lastInitFailed` read after it.
  *
