@@ -13,6 +13,10 @@
 package cc.grepon.relais
 
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -23,9 +27,10 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Robolectric tests for [ModelSwitch]'s persisted state — needs a real `Context` because every
- * assertion is on what [RelaisConfig] reads back.
+ * Robolectric tests for [ModelSwitch]: its persisted state (needs a real `Context`, since those
+ * assertions are on what [RelaisConfig] reads back) and the post-pick reload observer, on virtual time.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class ModelSwitchTest {
@@ -75,5 +80,50 @@ class ModelSwitchTest {
     ModelSwitch.applyManualId(ctx, RelaisConfig.DEFAULT_MODEL_ID, resolvedPath = null)
     assertEquals(RelaisConfig.DEFAULT_MODEL_ID, RelaisConfig.modelId(ctx))
     assertTrue(RelaisConfig.hasExplicitModelId(ctx))
+  }
+
+  // ---- observeReload (#364) ----
+
+  @Test
+  fun `a pick with nothing loading never shows reloading`() = runTest {
+    // IDLE, OFF and ERROR: the engine is not resident and nothing is starting. A pick starts no load
+    // (it applies on the next one), so nothing is reloading. Reading `!isReady` latched the flag true
+    // here, and the chat screen's SEND (`canSend = !reloadingModel`) stayed disabled with it.
+    assertFalse("precondition: a leaked startup from another test", RelaisLivenessState.snapshot.startupInProgress)
+    assertFalse("precondition: no engine in a JVM test", RelaisEngine.isReady)
+    val seen = mutableListOf<Boolean>()
+    val job = ModelSwitch.observeReload(backgroundScope) { seen += it }
+    runCurrent()
+    // Exactly one publish, then done: with no cap, the `!loading` exit is the only thing that ends
+    // the loop, so a missing exit would keep re-publishing false here — and poll for the screen's life.
+    assertTrue("the observation must end once nothing is loading", job.isCompleted)
+    advanceTimeBy(10 * ModelSwitch.RELOAD_POLL_INTERVAL_MS)
+    assertEquals(listOf(false), seen)
+  }
+
+  @Test
+  fun `reloading follows a running startup past the old 60 s cap and clears when it settles`() = runTest {
+    assertFalse("precondition: a leaked startup from another test", RelaisLivenessState.snapshot.startupInProgress)
+    RelaisLivenessState.beginStartup() // some owner's load: the service's START, a swap, a request's reload
+    var ended = false
+    try {
+      var reloading: Boolean? = null
+      val job = ModelSwitch.observeReload(backgroundScope) { reloading = it }
+      runCurrent()
+      assertEquals(true, reloading)
+      // A startup can be a multi-GB download. The old wait gave up at 500 ms × 120 = 60 s and froze the
+      // flag at its last reading, so it never cleared even after the load finished.
+      advanceTimeBy(90_000)
+      assertEquals("still loading at 90 s: still reloading", true, reloading)
+      RelaisLivenessState.endStartup()
+      ended = true
+      advanceTimeBy(ModelSwitch.RELOAD_POLL_INTERVAL_MS + 1)
+      // Settled with no engine resident (a failed load, or a startup that ended without one): the node
+      // shows that as ERROR/IDLE elsewhere; the pick is not reloading any more.
+      assertEquals("settled: not reloading", false, reloading)
+      assertTrue("and the observation ends", job.isCompleted)
+    } finally {
+      if (!ended) RelaisLivenessState.endStartup()
+    }
   }
 }

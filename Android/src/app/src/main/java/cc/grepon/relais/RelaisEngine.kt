@@ -434,8 +434,9 @@ object RelaisEngine {
    * that buys: a synchronous reload reads STARTING on every surface instead of IDLE or "stalled";
    * the watchdog stays out of every reload for the same reason it stays out of the service's;
    * `ensureInitializedInBackground` stops dispatching a redundant thread behind [lock];
-   * `ModelSwitch.awaitReload` actually waits. The publisher nests, so an outer owner (service, swap)
-   * wrapping this pair is fine — the outer `endStartup()` is what finally clears the flag.
+   * `ModelSwitch.observeReload` sees a reload already underway. The publisher nests, so an outer owner
+   * (service, swap) wrapping this pair is fine — the outer `endStartup()` is what finally clears the
+   * flag.
    *
    * Lock order: engine [lock] → publisher monitor (a leaf `@Synchronized`), never the reverse;
    * `listenerLifecycleLock` is never nested with [lock].
@@ -549,9 +550,9 @@ object RelaisEngine {
    * simply never initialized, since then the service might not be running at all).
    *
    * Publishes `startupInProgress` **synchronously on the caller, before the thread exists**
-   * (feature-22): every "kick then wait" caller — `ModelSwitch.awaitReload`, the widget worker,
-   * the poll loop — then sees STARTING on return instead of racing the spawned thread's first
-   * statement and exiting immediately on a snapshot the thread has not written yet. The thread's
+   * (feature-22): every "kick then wait" caller — the widget worker, the poll loop — then sees
+   * STARTING on return instead of racing the spawned thread's first statement and exiting
+   * immediately on a snapshot the thread has not written yet. The thread's
    * `finally` still ends it; if thread creation itself throws, the begun startup is ended and the
    * CAS reset here, so nothing can latch `startupInProgress` true with no thread to clear it.
    */

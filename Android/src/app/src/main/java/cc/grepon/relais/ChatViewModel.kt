@@ -584,13 +584,13 @@ class ChatViewModel @JvmOverloads constructor(
     return if (file.exists()) file.readBytes() else null
   }
 
-  /** Switches to a curated ref (persisting the full ref, not just its id) and reflects the reload. */
+  /** Switches to a curated ref (persisting the full ref, not just its id); see [observeReload]. */
   fun switchToRef(ref: cc.grepon.relais.data.RelaisModelRef) {
     ModelSwitch.applyRef(getApplication(), ref)
     observeReload()
   }
 
-  /** Switches to a raw manual id (dropping any curated ref) and reflects the reload. */
+  /** Switches to a raw manual id (dropping any curated ref); see [observeReload]. */
   fun switchToManualId(modelId: String) {
     // resolvedPath = null: this surface holds no path to hand over. The reload resolves the id with
     // RelaisModelProvisioner.pathFor (on-device sources only — no allowlist, no download), and the
@@ -599,16 +599,12 @@ class ChatViewModel @JvmOverloads constructor(
     observeReload()
   }
 
-  /** Reflects [RelaisEngine]'s lazy model reload into [reloadingModel] (see [ModelSwitch.awaitReload]). */
+  /** Reflects a load already underway at pick time into [reloadingModel] (see [ModelSwitch.observeReload]). */
   private fun observeReload() {
     // Cancel any in-flight poll first so a rapid re-pick doesn't leave overlapping pollers racing to
     // write _reloadingModel (harmless final value, but avoids flicker and wasted coroutines).
     reloadJob?.cancel()
-    reloadJob =
-      viewModelScope.launch {
-        _reloadingModel.value = true
-        _reloadingModel.value = !ModelSwitch.awaitReload()
-      }
+    reloadJob = ModelSwitch.observeReload(viewModelScope) { _reloadingModel.value = it }
   }
 
   fun rename(id: String, title: String) {
