@@ -33,7 +33,7 @@ private const val TAG = "RelaisInference"
  * Wraps [RelaisEngine.generate].
  *
  * CRITICAL CONTRACT: this is a *consumer* of an already-resident engine. It does NOT cold-start or
- * provision a multi-GB model — so a home-screen tap can never trigger a download/init with no
+ * provision a multi-GB model without the service-backed idle exception below — no download/init with no
  * foreground service behind it (which the OS would OOM-kill). When the engine isn't ready it fails
  * fast and **eagerly** with [NodeNotReadyException] (thrown by the call itself, before the Flow is
  * returned), so callers surface "node not running" instead of hanging or provisioning.
@@ -43,7 +43,7 @@ private const val TAG = "RelaisInference"
  * [cc.grepon.relais.RelaisNodeService] itself, so if the engine was idle-unloaded, the OOM-kill
  * concern above (no service behind the reload) cannot apply. In that specific case this still fails
  * fast with [NodeNotReadyException] on THIS call (never blocks a UI tap on a multi-second reload),
- * but also kicks a background reload so the tap that follows self-heals instead of surfacing "not
+ * but also kicks a background reload (provisioning configured weights if absent) so the tap that follows self-heals instead of surfacing "not
  * running" indefinitely until the caller happens to hit a text endpoint (#178 review finding — before
  * this, tile/share/Tasker/NFC/widget callers had no path back to ready after an idle-unload).
  */
