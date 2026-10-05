@@ -225,8 +225,10 @@ object RelaisModelProvisioner {
     // [ensureModel]'s gate reads the preference separately and earlier, so the two reads can disagree
     // — flip the selection mid-provision (ModelSwitch.applyRef while an earlier startup is still
     // running) and the id that gets resolved and DOWNLOADED is one no gate ever inspected. The #11
-    // drift guard does not save us: it only declines to PERSIST the path, which is still returned and
-    // still handed to engine init. Checking here closes that window by construction.
+    // drift guard does not save us: it only declines to PERSIST the path, which is still returned to
+    // the caller — and a caller that loaded it would pair it with a fresh id read (the service and the
+    // provision kick used to; both now resolve the path by id). Checking here closes that window by
+    // construction.
     //
     // This is also the ONLY compat gate on [RelaisEngine.ensureModelSwapInBackground]'s untargeted
     // path (`target == null`), which calls resolveModel directly and never passes through ensureModel.

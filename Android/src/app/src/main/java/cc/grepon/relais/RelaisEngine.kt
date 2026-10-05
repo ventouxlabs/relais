@@ -306,6 +306,9 @@ object RelaisEngine {
   /** Guards [ensureInitializedInBackground] so a burst of requests during an idle-reload dispatches at most one thread. */
   private val backgroundReloadDispatching = java.util.concurrent.atomic.AtomicBoolean(false)
 
+  /** Guards [ensureProvisionedInBackground] so a burst of requests for a missing model dispatches at most one thread. */
+  private val backgroundProvisionDispatching = java.util.concurrent.atomic.AtomicBoolean(false)
+
   /**
    * Consecutive [shutdown] failures ([Engine.close] threw). Read by [shouldUnloadIdleEngine] as a
    * circuit breaker: after repeated close failures, idle-TTL stops attempting further auto-unloads
@@ -319,9 +322,12 @@ object RelaisEngine {
    * True when the most recent init attempt threw: set by [RelaisNodeService]'s init thread (which
    * also covers provisioning and listener-bind failures) **or** by [ensureInitialized] when a real
    * init attempt throws (feature-22 — a request-driven reload after an idle unload that fails must
-   * read ERROR, not IDLE forever behind the watchdog's shield). Lets
+   * read ERROR, not IDLE forever behind the watchdog's shield), **or** by
+   * [ensureProvisionedInBackground]'s catch when its provisioning throws (#362, and only while
+   * [shouldRecordProvisionFailure] says the node is still the kick's to fail). Lets
    * [cc.grepon.relais.core.computeNodeState] surface ERROR rather than an indefinite STARTING when
-   * provisioning/init fails. Cleared at the START of every attempt (both writers), so a retry never
+   * provisioning/init fails. Cleared at the START of every attempt (every writer, the #362 kick's
+   * caller-side begin included), so a retry never
    * reads as failed while it loads — `computeControlPanelState`'s STARTING-over-failure arm needs
    * `ready`, which a cold reload cannot offer, so a stale `true` there would show OFFLINE + "start
    * failed" for the whole load.
@@ -333,6 +339,32 @@ object RelaisEngine {
    * down" via its `unreachable` predicate. Accepted.
    */
   @Volatile var lastInitFailed: Boolean = false
+
+  /**
+   * Bumped by every [shutdown] — STOP (`RelaisNodeService.onDestroy`) and the swap thread's
+   * close-before-reload — as the LAST act inside its `synchronized(lock)`, and by NOTHING else: an idle-TTL unload
+   * ([releaseIfIdle], via [closeEngine]) is not a teardown and does not bump it, so a startup that
+   * outlives an idle unload still loads.
+   *
+   * Closes "init after teardown" (#362 review) for every startup that captures it BEFORE its slow
+   * part and loads only through [ensureInitializedUnlessShutdownSince] — i.e. every such startup that
+   * began before a shutdown COMPLETED (a capture during the close still reads the old value, because
+   * the bump is last). A startup that begins after a shutdown completed is not gated by it. Without it, a STOP landing
+   * mid-provision closed the engine and the startup then re-created a multi-GB engine with no service,
+   * no listeners, no idle-TTL ticker and `shouldRun=false`. Gated sites:
+   *  - [ensureProvisionedInBackground]'s thread (`ensureModel` — minutes — then init);
+   *  - `RelaisNodeService`'s "relais-init" thread (same shape; pre-existing twin);
+   *  - [ensureModelSwapInBackground]'s thread (its untargeted `resolveModel` may block on the
+   *    allowlist fetch before it takes [lock]); it checks before its OWN [shutdown], which bumps this;
+   *  - [ensureInitializedInBackground]'s thread (only a thread-spawn window, gated for the same price).
+   * NOT closed: [generate]'s own synchronous cold start — a request blocked on [lock] while STOP's
+   * [shutdown] holds it then cold-starts the configured model. Not a long provision (the request
+   * thread is already inside `generate`, with the file on disk), and a request in flight at STOP is
+   * a separate, pre-existing window.
+   *
+   * Written only under [lock]; `@Volatile` so the lock-free caller-side captures read a current value.
+   */
+  @Volatile private var shutdownEpoch: Long = 0L
 
   /**
    * True iff the resident engine initialized with the FULL multimodal config (vision+audio
@@ -476,6 +508,34 @@ object RelaisEngine {
     }
   }
 
+  /** The current [shutdownEpoch], for a startup to capture BEFORE its slow part. */
+  internal fun currentShutdownEpoch(): Long = shutdownEpoch
+
+  /**
+   * [ensureInitialized], unless a [shutdown] ran since [epoch] was captured — then nothing is loaded
+   * and this returns false. The check and the init run under ONE acquisition of [lock] (the monitor is
+   * reentrant; [ensureInitialized] takes the same one), so no STOP can land between them: a [shutdown]
+   * either completed before (the epoch moved → false) or waits for the init to finish and closes what
+   * it built. Same parameters as [ensureInitialized]; pass them by NAME (see its KDoc on the
+   * positional-String trap). A throw from the init propagates exactly as from [ensureInitialized].
+   *
+   * @return true iff the epoch was unchanged and [ensureInitialized] returned (engine resident).
+   */
+  fun ensureInitializedUnlessShutdownSince(
+    epoch: Long,
+    context: Context,
+    modelPath: String? = null,
+    modelId: String = RelaisConfig.modelId(context),
+  ): Boolean =
+    synchronized(lock) {
+      if (shutdownEpoch != epoch) {
+        false
+      } else {
+        ensureInitialized(context, modelPath = modelPath, modelId = modelId)
+        true
+      }
+    }
+
   /**
    * Kicks a background reload if the engine isn't already ready or already coming up — an idempotent
    * no-op otherwise, and safe to call from any thread without blocking it on the reload itself.
@@ -498,11 +558,15 @@ object RelaisEngine {
   fun ensureInitializedInBackground(context: Context) {
     if (isReady || RelaisLivenessState.snapshot.startupInProgress) return
     if (!backgroundReloadDispatching.compareAndSet(false, true)) return // a reload is already dispatching
+    val epoch = shutdownEpoch // before the thread exists: a STOP between spawn and lock must not be outlived
     RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead" — on the CALLER, see KDoc
     try {
       thread(name = "relais-idle-reload") {
         try {
-          ensureInitialized(context) // publishes its own nested pair and sets lastInitFailed on a throw
+          // publishes its own nested pair and sets lastInitFailed on a throw
+          if (!ensureInitializedUnlessShutdownSince(epoch, context)) {
+            Log.i(TAG, "idle-reload skipped init: engine was shut down since it was kicked")
+          }
         } catch (t: Throwable) {
           // Throwable: ensureInitialized rethrows an Error from a native engine-create, and on a
           // bare thread an uncaught Error kills the WHOLE node process (the swap path's own reason).
@@ -520,6 +584,102 @@ object RelaisEngine {
       backgroundReloadDispatching.set(false)
       throw t
     }
+  }
+
+  /**
+   * Kicks a background PROVISION + init of the configured model — [RelaisModelProvisioner.ensureModel]
+   * (download if absent) then [ensureInitialized] — if the engine isn't ready and nothing is already
+   * coming up; an idempotent no-op otherwise. Called by [generate], under [lock], when the configured
+   * model is not on disk (#362), so it only ever spawns: it never blocks the caller and never takes
+   * [lock] on the caller's thread (the spawned thread's [ensureInitialized] waits for it like any
+   * other request would).
+   *
+   * Why it exists (#362): before it, a request for a configured model with no file went through
+   * [ensureInitialized], failed, set [lastInitFailed] and put the node in ERROR, and the watchdog's
+   * revive was the ONLY thing that ever provisioned the model. Answering a bare 503 instead without
+   * this kick would leave nothing fetching the file — the node would answer 503 forever.
+   *
+   * A SIBLING of [ensureInitializedInBackground], not a change to it: that one's callers (the audio
+   * lane, [cc.grepon.relais.core.RelaisInference]) carry a "never blind-cold-start a download"
+   * contract this one deliberately breaks. Same shape otherwise — guard on `isReady ||
+   * startupInProgress`, its own single-flight CAS, `startupInProgress` published synchronously on the
+   * CALLER before the thread exists, CAS released before `endStartup()` so that stays the LAST write.
+   *
+   * Clears `idleUnloaded` in that caller-side begin (`clearIdleUnloaded = true`): an idle-unloaded
+   * node whose kick FAILS must read ERROR, not IDLE. Left set, `idleUnloaded && listenersUp` is the
+   * watchdog's healthy-idle branch, which returns before its revive — so a failed provision on an
+   * idle node would read as healthy idle and never be retried. Safe here, unlike the other non-init
+   * owners [RelaisLivenessPublisher.beginStartup] warns about, because every exit of this thread leaves
+   * an owner of the node's state BEFORE `endStartup()`: a resident engine; [lastInitFailed] set (by
+   * [ensureInitialized] itself, or by the catch below for a provisioning failure); or — the exits that
+   * set neither — a STOP or swap that ran [shutdown] since the kick (skipped init, or a failure not
+   * recorded), an engine something else brought up, or a healthy-idle node (see
+   * [shouldRecordProvisionFailure]).
+   *
+   * If a ModelsScreen pick is already downloading the same model, [RelaisModelProvisioner.ensureModel]
+   * attaches to that work through #365's single-flight owner rather than starting a second download.
+   *
+   * Captures [shutdownEpoch] before the thread exists and loads only through
+   * [ensureInitializedUnlessShutdownSince]: a STOP (or a swap) that lands during the download owns the
+   * engine, and this thread must not re-create one after it. A skipped init is not a failure — after
+   * STOP `shouldRun=false` reads OFF; after a swap the swap's outcome stands — so it records nothing.
+   *
+   * Only [generate] calls this, and only when [shouldKickProvision] says a live service owns the outcome.
+   *
+   * @return true iff a startup is in progress for the caller to report: this call started one, or one
+   * was already running / being dispatched. False only when the engine is already ready.
+   */
+  fun ensureProvisionedInBackground(context: Context): Boolean {
+    if (isReady) return false
+    if (RelaisLivenessState.snapshot.startupInProgress) return true
+    if (!backgroundProvisionDispatching.compareAndSet(false, true)) return true // a provision is already dispatching
+    val epoch = shutdownEpoch // the caller (generate) holds [lock], which every shutdown() takes: consistent
+    // On the CALLER, before the thread exists (see ensureInitializedInBackground's KDoc); clears idle — see above.
+    RelaisLivenessState.beginStartup(clearIdleUnloaded = true)
+    lastInitFailed = false // attempt start, after the begin — same order and reason as ensureInitialized
+    try {
+      thread(name = "relais-provision") {
+        try {
+          // Both re-read the CONFIGURED id themselves (ensureModel's idAtStart, read after its own
+          // applyDeviceDefaultIfFresh; ensureInitialized's modelId default), so a config change — or
+          // that fresh-install default — mid-download can make this
+          // fetch/load a different id than the request checked. Harmless: that request was already
+          // answered 503, and its retry re-checks against whatever is configured then.
+          RelaisModelProvisioner.ensureModel(context)
+          // publishes its own nested pair and sets lastInitFailed on a real init throw
+          if (!ensureInitializedUnlessShutdownSince(epoch, context)) {
+            Log.i(TAG, "background provision skipped init: engine was shut down since this provision started")
+          }
+        } catch (t: Throwable) {
+          // Throwable: an uncaught Error on a bare thread kills the WHOLE node process. Recorded so a
+          // PROVISIONING failure (401, offline — ensureInitialized never ran) reads ERROR and the
+          // watchdog revives with backoff — but only while the node is still this kick's to fail (see
+          // shouldRecordProvisionFailure): never over an engine something else brought up, a healthy
+          // idle node, or a STOP/swap that has since taken ownership. Idempotent when
+          // ensureInitialized already set it. Under [lock] so the facts read can't move under the write.
+          synchronized(lock) {
+            if (shouldRecordProvisionFailure(
+                ready = isReady,
+                idleUnloaded = RelaisLivenessState.snapshot.idleUnloaded,
+                shutdownSinceKick = shutdownEpoch != epoch,
+              )
+            ) {
+              lastInitFailed = true
+            }
+          }
+          Log.w(TAG, "background provision failed: ${t.message}")
+        } finally {
+          backgroundProvisionDispatching.set(false) // release single-flight FIRST …
+          RelaisLivenessState.endStartup() // … so endStartup() stays the LAST write (see the sibling)
+        }
+      }
+    } catch (t: Throwable) {
+      // Thread.start() failed — the body never ran, so its finally never will. Undo both.
+      RelaisLivenessState.endStartup()
+      backgroundProvisionDispatching.set(false)
+      throw t
+    }
+    return true
   }
 
   /**
@@ -547,8 +707,9 @@ object RelaisEngine {
    * reload happen once the new model is confirmed present on disk.
    *
    * @return true iff THIS call won [swapDispatching] and started a swap thread — **not** that the
-   * swap succeeded. The thread can still bail (target not on disk) or roll back (engine-create
-   * failed), both of which leave the previous model resident. Callers that persist an operator's
+   * swap succeeded. The thread can still bail (target not on disk), roll back (engine-create
+   * failed), both of which leave the previous model resident, or bail because a STOP ran
+   * [shutdown] since dispatch (#362 review, [shutdownEpoch]) — nothing is resident then, by STOP's design. Callers that persist an operator's
    * choice must dispatch FIRST and persist only on true: the CAS is the only atomic arbiter, so a
    * check-then-act on any other flag races it, and persisting after a false would leave config
    * naming a model no swap is bringing up. A false is the caller's cue to answer "busy, retry"
@@ -556,6 +717,9 @@ object RelaisEngine {
    */
   fun ensureModelSwapInBackground(context: Context, target: ProvisionedModel? = null): Boolean {
     if (!swapDispatching.compareAndSet(false, true)) return false // a swap is already dispatching
+    // Before the thread exists and before resolveModel (which may block on the allowlist fetch): a
+    // STOP landing in that window must not be followed by this swap loading an engine (shutdownEpoch).
+    val epoch = shutdownEpoch
     thread(name = "relais-model-swap") {
       // Set only on a SUCCESSFUL engine transition. The rollback catch below swallows and lets
       // execution continue, so a post-lock re-publish with no flag would also fire after a failed
@@ -592,6 +756,13 @@ object RelaisEngine {
         // them here is safe: any other caller blocks on `lock` for the FULL close+reload, then sees the
         // fully-updated engine/residentModelId together.
         synchronized(lock) {
+          // Checked FIRST, before this swap's own shutdown() (which bumps the epoch): a STOP since
+          // dispatch already closed the engine and owns the outcome. Bail like the file-missing
+          // return above — nothing changed, `swapped` stays false, the finally ends the startup.
+          if (shutdownEpoch != epoch) {
+            Log.w(TAG, "model swap skipped: engine was shut down since this swap was dispatched")
+            return@thread
+          }
           // Capture what is working BEFORE tearing it down. `File.exists()` is the only pre-check we
           // can do — whether a model actually LOADS is unknowable until init runs — and the allowlist
           // ships models that download fine but fail engine-create (e.g. Qwen2.5-1.5B on litertlm
@@ -799,7 +970,32 @@ object RelaisEngine {
         // blocks on `lock` until any in-progress unload finishes, then re-inits lazily right here
         // (ensureInitialized() below is idempotent/cheap when already ready, and does a real —
         // cold-start — init when not). Either way no request ever observes/uses a closed `engine`.
-        ensureInitialized(context)
+        //
+        // #362: the configured model's file is checked BEFORE that cold start. Missing, a cold start
+        // can only fail — recording lastInitFailed (ERROR) and answering 500 — so instead throw
+        // ModelNotOnDiskException (503 + Retry-After), first kicking its provisioning when
+        // shouldKickProvision says a live service will own it and nothing else will retry it (no
+        // kick with the node OFF — in-app chat reaches here in-process — nor in ERROR, where the
+        // watchdog's revive owns retries). The request itself writes no liveness and no
+        // lastInitFailed — only the kick publishes, and owns, its startup pair. The id is read ONCE,
+        // so the check and the init are about the same model; `!isReady` first keeps prefs reads and
+        // a stat off the ready path.
+        val configuredId = RelaisConfig.modelId(context)
+        if (!isReady &&
+          configuredModelMissing(isReady, RelaisModelProvisioner.pathFor(context, configuredId)) { File(it).exists() }
+        ) {
+          // Snapshot ONCE, first, then the engine flag — computeNodeState's read-order rule.
+          val liveness = RelaisLivenessState.snapshot
+          val kick =
+            shouldKickProvision(
+              lastInitFailed = lastInitFailed,
+              listenersUp = liveness.listenersUp,
+              idleUnloaded = liveness.idleUnloaded,
+            )
+          val provisioning = if (kick) ensureProvisionedInBackground(context) else liveness.startupInProgress
+          throw ModelNotOnDiskException(configuredId, provisioning = provisioning)
+        }
+        ensureInitialized(context, modelId = configuredId)
         val e = engine ?: error("Engine not initialized")
         // #352: what serves is only knowable here. Read once, so the check and the echo agree.
         val served = residentModelId
@@ -1157,8 +1353,16 @@ object RelaisEngine {
    */
   fun shutdown() {
     synchronized(lock) {
-      closeEngine()
-      RelaisLivenessState.publishIdleUnloaded(false)
+      try {
+        closeEngine()
+        RelaisLivenessState.publishIdleUnloaded(false)
+      } finally {
+        // LAST, after the close: a lock-free capture that reads the epoch while this is mid-close must
+        // read the OLD value, so its startup — blocked on [lock] until now — sees it move and skips.
+        // Bumped first, that capture would read the new value and load after this teardown. In a
+        // finally because closeEngine() catches only Exception. See shutdownEpoch.
+        shutdownEpoch++
+      }
     }
   }
 

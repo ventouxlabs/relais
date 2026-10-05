@@ -30,8 +30,8 @@ import org.json.JSONObject
  * The 200 header is committed LAZILY (#352): every writer commits it first, once, so no byte can
  * reach the socket on an uncommitted stream and a handler never has to remember to commit. Until the
  * first write the socket is untouched, so a request that fails before its first event — a
- * served-model mismatch under the engine lock ([ModelNotResidentException]) — can still be answered
- * with a real HTTP status. [onCommit] runs once, at commit, and is where a streaming handler records
+ * served-model mismatch under the engine lock ([ModelNotResidentException]), or the configured model
+ * not on disk yet ([ModelNotOnDiskException], #362) — can still be answered with a real HTTP status. [onCommit] runs once, at commit, and is where a streaming handler records
  * its 200: a stream that never commits never counted as one.
  */
 class SseWriter(private val out: OutputStream, private val onCommit: () -> Unit) {

@@ -70,19 +70,19 @@ class RelaisServedModelTest {
     assertEquals("msg", body.getJSONObject("error").getString("message"))
   }
 
-  // --- isUncommittedModelMismatch: which stream failures unwind to the 503 ---
+  // --- isUncommittedRetryable (RelaisModelPresence.kt): the #352 rows; #362 rows in RelaisModelPresenceTest ---
 
   @Test fun `a mismatch on an uncommitted stream is rethrown for the 503`() {
-    assertTrue(isUncommittedModelMismatch(ModelNotResidentException("y", "x"), committed = false))
+    assertTrue(isUncommittedRetryable(ModelNotResidentException("y", "x"), committed = false))
   }
 
   @Test fun `a mismatch after the header went out stays with the stream's own handling`() {
-    assertFalse(isUncommittedModelMismatch(ModelNotResidentException("y", "x"), committed = true))
+    assertFalse(isUncommittedRetryable(ModelNotResidentException("y", "x"), committed = true))
   }
 
   @Test fun `any other failure stays with the stream's own handling, committed or not`() {
-    assertFalse(isUncommittedModelMismatch(IllegalStateException("engine"), committed = false))
-    assertFalse(isUncommittedModelMismatch(IllegalStateException("engine"), committed = true))
+    assertFalse(isUncommittedRetryable(IllegalStateException("engine"), committed = false))
+    assertFalse(isUncommittedRetryable(IllegalStateException("engine"), committed = true))
   }
 
   // --- StreamEchoModel: the streaming echo, resolved at the first event ---

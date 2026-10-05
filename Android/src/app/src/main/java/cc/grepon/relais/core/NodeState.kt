@@ -50,7 +50,9 @@ private const val THERMAL_HOT_THRESHOLD = 3
  *    `lastInitFailed && [idleUnloaded]` alone IS reachable (a bind-failed node whose service-side
  *    catch sets [lastInitFailed] *after* the attempt cleared idle, later evicted by the TTL —
  *    `releaseIfIdle` never touches [lastInitFailed] — always with `listenersUp=false`). Only the
- *    three-way `lastInitFailed && [idleUnloaded] && [listenersUp]` is unreachable. Either way this
+ *    three-way `lastInitFailed && [idleUnloaded] && [listenersUp]` is unreachable — including from
+ *    #362's provision kick, whose late failure is recorded only while `shouldRecordProvisionFailure`
+ *    (RelaisModelPresence.kt) sees no resident engine, no idle flag and no shutdown since the kick. Either way this
  *    row is load-bearing, not redundant: it is what makes that node read ERROR instead of falling
  *    through to STARTING, because IDLE is exactly the state the watchdog leaves alone;
  *  - a node asked-to-run **whose listeners are up** and whose engine was released by idle-TTL reads

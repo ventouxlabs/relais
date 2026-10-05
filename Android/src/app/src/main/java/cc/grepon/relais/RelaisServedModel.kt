@@ -44,19 +44,14 @@ fun servedModelMismatch(expected: String?, resident: String?): Boolean =
 
 /** Thrown under the engine lock when the resident model is not the one the request was classified for. */
 class ModelNotResidentException(val expected: String, val resident: String?) :
-  IllegalStateException("requested model '$expected' is not resident (resident: ${resident ?: "none"})")
+  RetryableModelUnavailableException("requested model '$expected' is not resident (resident: ${resident ?: "none"})")
+
+// Which failures unwind to the dispatcher's 503, and with which text, is decided by
+// `isUncommittedRetryable` and `modelStateMessage` in RelaisModelPresence.kt, both keyed on the sealed
+// RetryableModelUnavailableException — shared with #362's ModelNotOnDiskException.
 
 /**
- * Whether a streaming handler's catch must rethrow [e] to the dispatcher, which answers 503 +
- * Retry-After: only a [ModelNotResidentException] on a stream that has written nothing. Anything else,
- * or a mismatch after the header went out (not reachable today — the engine throws before any
- * token), stays with the handler's existing post-commit handling, unchanged.
- */
-internal fun isUncommittedModelMismatch(e: Throwable, committed: Boolean): Boolean =
-  e is ModelNotResidentException && !committed
-
-/**
- * The 503 body for a [ModelNotResidentException], in the envelope of the lane that raised it. Keyed on
+ * The 503 body for a [RetryableModelUnavailableException], in the envelope of the lane that raised it. Keyed on
  * the endpoint label because the answer is written by the dispatcher's catch, which knows only that.
  */
 internal fun modelNotResidentBody(endpoint: String, message: String): JSONObject =
