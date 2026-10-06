@@ -294,8 +294,9 @@ class RelaisNodeService : Service() {
         // is a fresh read, so handing one to the other lets a selection change mid-download load one
         // model's weights under another's id (#337's class; the #11 drift guard only declines to
         // PERSIST that path, it is still returned). Resolved by id instead, as the provision kick
-        // does: ensureModel's remember() tags the in-memory cache with idAtStart, so pathFor finds a
-        // file holding idAtStart's weights — not necessarily the very file ensureModel returned (a
+        // does: an undrifted ensureModel result is tagged with its captured ID/ref; a stale result
+        // publishes neither cache nor prefs/registry. pathFor still resolves by the current ID,
+        // not necessarily the very file ensureModel returned (a
         // same-id build pick can replace it; that applies on restart, #354). On a changed id it finds
         // the new id's file or fails honestly (ERROR → watchdog revive).
         if (!RelaisEngine.ensureInitializedUnlessShutdownSince(shutdownEpoch, applicationContext)) {

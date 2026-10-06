@@ -205,11 +205,11 @@ object RelaisConfig {
    * Test/reset seam: forgets that a model id was ever chosen, for on-device probes that must leave
    * a device's Pixel-10 default eligibility as they found it ([hasExplicitModelId]).
    */
-  internal fun clearModelIdForTest(context: Context) {
+  @Synchronized internal fun clearModelIdForTest(context: Context) {
     prefs(context).edit().remove(KEY_MODEL_ID).apply()
   }
 
-  fun setModelId(context: Context, value: String) {
+  @Synchronized fun setModelId(context: Context, value: String) {
     val p = prefs(context)
     val changed = p.getString(KEY_MODEL_ID, null) != value
     val edit = p.edit().putString(KEY_MODEL_ID, value)
@@ -278,7 +278,7 @@ object RelaisConfig {
    * previously provisioned model. Writes the id directly (not via [setModelId]) so the stale-ref
    * cleanup there never fires against the ref being set.
    */
-  fun setModelRef(context: Context, ref: RelaisModelRef) {
+  @Synchronized fun setModelRef(context: Context, ref: RelaisModelRef) {
     val p = prefs(context)
     val json = ref.toJson()
     val changed =
@@ -299,7 +299,7 @@ object RelaisConfig {
   fun provisionedModels(context: Context): List<ProvisionedModel> =
     decodeProvisioned(prefs(context).getString(KEY_PROVISIONED_MODELS, null))
 
-  fun setProvisionedModels(context: Context, entries: List<ProvisionedModel>) {
+  @Synchronized fun setProvisionedModels(context: Context, entries: List<ProvisionedModel>) {
     prefs(context).edit().putString(KEY_PROVISIONED_MODELS, encodeProvisioned(entries)).apply()
   }
 
@@ -314,7 +314,7 @@ object RelaisConfig {
    * from, and keeping the path is what lets an offline node boot without the allowlist. One editor,
    * one commit, matching [setModelRef].
    */
-  fun clearModelRef(context: Context) {
+  @Synchronized fun clearModelRef(context: Context) {
     val p = prefs(context)
     val edit = p.edit().remove(KEY_MODEL_REF)
     if (p.contains(KEY_MODEL_REF)) edit.remove(KEY_MODEL_PATH)
@@ -364,9 +364,39 @@ object RelaisConfig {
    */
   fun modelPath(context: Context): String? = prefs(context).getString(KEY_MODEL_PATH, null)
 
-  fun setModelPath(context: Context, value: String) {
+  @Synchronized fun setModelPath(context: Context, value: String) {
     prefs(context).edit().putString(KEY_MODEL_PATH, value).apply()
   }
+
+  /** Short prefs-only critical section. Never acquire the engine lock or do network IO inside it. */
+  internal fun <T> withModelSelection(block: () -> T): T = synchronized(this) { block() }
+
+  /** Capture the ID, effective ref and persisted path together, excluding stale mismatched refs. */
+  internal fun modelSelection(context: Context): ConfiguredModelSelection {
+    val p = prefs(context)
+    return synchronized(this) {
+      val id = p.getString(KEY_MODEL_ID, null) ?: DEFAULT_MODEL_ID
+      val ref = RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null))?.takeIf { it.modelId == id }
+      ConfiguredModelSelection(id, ref, p.getString(KEY_MODEL_PATH, null))
+    }
+  }
+
+  /** Fresh-default decision and write are one operation; a concurrent operator pick wins. */
+  internal fun applyDefaultModelRefIfFresh(context: Context, enabled: Boolean, ref: RelaisModelRef): RelaisModelRef? {
+    val p = prefs(context) // acquire the Context-owned handle before taking our preference monitor
+    return synchronized(this) {
+      if (!enabled || p.contains(KEY_MODEL_ID) || RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null)) != null) {
+        null
+      } else {
+        p.edit().putString(KEY_MODEL_REF, ref.toJson()).putString(KEY_MODEL_ID, ref.modelId)
+          .remove(KEY_MODEL_PATH).apply()
+        ref
+      }
+    }
+  }
+
+  internal fun isCurrentSelection(context: Context, selection: ConfiguredModelSelection): Boolean =
+    modelSelection(context).sameIdentity(selection)
 
   /**
    * Random per-install password protecting the runtime-generated TLS keystore. Generated and

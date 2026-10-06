@@ -74,10 +74,12 @@ object ModelSwitch {
    * not defeat the guard by passing a null id: the guard is not the problem here.
    */
   fun applyManualId(context: Context, id: String, resolvedPath: String?) {
-    RelaisConfig.clearModelRef(context)
-    RelaisConfig.setModelId(context, id)
-    if (resolvedPath != null) {
-      RelaisModelProvisioner.remember(context, resolvedPath, persistForId = id)
+    RelaisConfig.withModelSelection {
+      RelaisConfig.clearModelRef(context)
+      RelaisConfig.setModelId(context, id)
+      if (resolvedPath != null) {
+        RelaisModelProvisioner.remember(context, resolvedPath, persistForId = id)
+      }
     }
   }
 

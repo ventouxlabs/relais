@@ -17,6 +17,7 @@ import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -44,15 +45,6 @@ class RelaisModelPathCacheTest {
   private companion object {
     const val OPERATOR_ID = "operator/typed-this"
 
-    /**
-     * The prefs read to flip the model id on: one call after `ensureModel`'s `idAtStart` capture
-     * (modelRef, modelId, idAtStart, then modelPath for fast path 1). Not asserted by counting —
-     * a counter only proves the Nth read happened, not which read it was. The test instead asserts
-     * that the staged file reached neither the registry nor the persisted path: if a read-order
-     * change moved the capture to or past this call, `idAtStart` would be the flipped DEFAULT id,
-     * adoption would be legitimate, `remember` would persist it, and that assertion fails loudly.
-     */
-    const val FLIP_ON_PREFS_CALL = 4
   }
 
   /** A real file, because every resolution step below the default is gated on the file existing. */
@@ -120,10 +112,9 @@ class RelaisModelPathCacheTest {
 
   @Test
   fun `the staged default file is not adopted for a non-default id`() {
-    // The window is an id change landing between ensureModel's `idAtStart` capture and the
-    // staged-adoption gate. Driving it needs no concurrency: RelaisConfig.prefs is a plain per-call
-    // getSharedPreferences, so every RelaisConfig.xxx(context) is one observable call on a wrapper,
-    // and flipping the id from inside the Nth call is synchronously equivalent to a racing write.
+    // Flip after the snapshot captures ID/ref, while it reads its last field (persisted path).
+    // Observe that field rather than counting Context calls: a snapshot deliberately uses fewer
+    // prefs handles than the old independent reads, so Nth-call instrumentation is brittle.
     //
     // The dangerous direction is non-default -> default: a gate that re-read the id would see
     // DEFAULT and adopt, while `remember` tags with the captured `idAtStart`, binding the default
@@ -134,24 +125,28 @@ class RelaisModelPathCacheTest {
     // Fast path 1 must miss, or it returns before the staged branch is ever reached.
     RelaisConfig.setModelPath(ctx, File(ctx.cacheDir, "absent.litertlm").absolutePath)
 
-    var prefsCalls = 0
+    var flipped = false
     val flipping = object : android.content.ContextWrapper(ctx) {
       override fun getSharedPreferences(name: String?, mode: Int): android.content.SharedPreferences {
         val real = super.getSharedPreferences(name, mode)
-        prefsCalls++
-        // One call AFTER idAtStart is captured — see FLIP_ON_PREFS_CALL for how a read-order change
-        // that moves the capture is caught.
-        if (prefsCalls == FLIP_ON_PREFS_CALL) {
-          real.edit().putString("model_id", RelaisConfig.DEFAULT_MODEL_ID).commit()
+        return object : android.content.SharedPreferences by real {
+          override fun getString(key: String?, defValue: String?): String? {
+            val value = real.getString(key, defValue)
+            if (key == "model_path" && !flipped) {
+              flipped = true
+              real.edit().putString("model_id", RelaisConfig.DEFAULT_MODEL_ID).commit()
+            }
+            return value
+          }
         }
-        return real
       }
     }
 
     try {
       // With the gate reading idAtStart this falls through to allowlist resolution, which cannot
       // reach the network under Robolectric. The throw is expected; the binding is the assertion.
-      runCatching { RelaisModelProvisioner.ensureModel(flipping) }
+      val result = runCatching { RelaisModelProvisioner.ensureModel(flipping) }
+      assertTrue("a non-default snapshot must not return the staged default weights", result.isFailure)
 
       assertEquals(
         "the id really did change mid-call, or the test proves nothing",
