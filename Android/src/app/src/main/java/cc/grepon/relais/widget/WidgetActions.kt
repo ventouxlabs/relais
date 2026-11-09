@@ -77,7 +77,7 @@ class RunPromptAction : ActionCallback {
       }
     }
     updateAppWidgetState(context, glanceId) { prefs ->
-      writeState(prefs, WidgetUiState.idle().loading(WIDGET_PROMPT))
+      writeState(prefs, WidgetUiState.idle().loading(WIDGET_PROMPT, sinceMs = System.currentTimeMillis()))
     }
     RelaisWidget().update(context, glanceId)
     WidgetPromptWorker.enqueue(context, glanceId, templateId, warm = warm)

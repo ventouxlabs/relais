@@ -36,18 +36,23 @@ data class WidgetUiState(
   val phase: WidgetPhase,
   val prompt: String?,
   val response: String?,
+  /** Wall-clock ms the LOADING began (null outside LOADING); lets a dead worker's LOADING expire (#353). */
+  val loadingSinceMs: Long? = null,
 ) {
-  /** Enters LOADING for [prompt], dropping any prior answer so a stale response can't flash. */
-  fun loading(prompt: String): WidgetUiState =
-    WidgetUiState(WidgetPhase.LOADING, prompt = prompt, response = null)
+  /**
+   * Enters LOADING for [prompt], dropping any prior answer so a stale response can't flash.
+   * [sinceMs] stamps when the worker was enqueued, for [settleStaleLoading].
+   */
+  fun loading(prompt: String, sinceMs: Long? = null): WidgetUiState =
+    WidgetUiState(WidgetPhase.LOADING, prompt = prompt, response = null, loadingSinceMs = sinceMs)
 
   /** Settles to DONE, keeping the originating [prompt] and carrying the capped [response]. */
   fun done(response: String): WidgetUiState =
-    copy(phase = WidgetPhase.DONE, response = capResponse(response))
+    copy(phase = WidgetPhase.DONE, response = capResponse(response), loadingSinceMs = null)
 
   /** Settles to ERROR, keeping the originating [prompt] and carrying the capped [message]. */
   fun error(message: String): WidgetUiState =
-    copy(phase = WidgetPhase.ERROR, response = capResponse(message))
+    copy(phase = WidgetPhase.ERROR, response = capResponse(message), loadingSinceMs = null)
 
   /** CLEAR: back to the empty IDLE state (no prompt, no response). */
   fun cleared(): WidgetUiState = idle()
@@ -147,6 +152,25 @@ fun widgetDisplayState(
   } else {
     nodeState
   }
+
+/**
+ * Longer than the worker's own worst case: the 60 s warm wait ([ModelSwitch]'s poll cap) plus inference.
+ * A LOADING older than this has no live worker behind it.
+ */
+const val LOADING_CEILING_MS = 3 * 60_000L
+
+/**
+ * #353: the worker writes LOADING and later DONE/ERROR, but a process death in between (OOM kill,
+ * force-stop, a crash mid-inference) leaves LOADING stored forever, with the buttons disabled and no
+ * click action attached. A LOADING older than [LOADING_CEILING_MS] — or one with no recorded start,
+ * persisted before the stamp existed — settles to ERROR so the operator can tap again.
+ */
+fun settleStaleLoading(state: WidgetUiState, nowMs: Long): WidgetUiState {
+  if (state.phase != WidgetPhase.LOADING) return state
+  val since = state.loadingSinceMs
+  if (since != null && nowMs - since <= LOADING_CEILING_MS) return state
+  return state.error("prompt didn't finish — tap to retry")
+}
 
 fun widgetCanRun(nodeState: NodeState, thermalHot: Boolean, phase: WidgetPhase): Boolean =
   phase != WidgetPhase.LOADING &&

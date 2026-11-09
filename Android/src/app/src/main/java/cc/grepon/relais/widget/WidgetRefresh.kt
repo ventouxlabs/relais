@@ -121,6 +121,31 @@ private fun renderWidgets(context: Context, key: WidgetRenderKey) = runBlocking 
 }
 
 /**
+ * #353: settles every placed widget whose stored LOADING has outlived its worker (see
+ * [settleStaleLoading]) and re-renders it. Reads one pref per widget per tick and writes only on a
+ * stale LOADING, so an idle widget costs nothing. A restarted service's first tick clears a LOADING
+ * left by a worker that died with the old process.
+ */
+private fun settleStaleLoadingWidgets(context: Context) = runBlocking {
+  val widget = RelaisWidget()
+  val nowMs = System.currentTimeMillis()
+  for (id in GlanceAppWidgetManager(context).getGlanceIds(RelaisWidget::class.java)) {
+    runCatching {
+      var settled = false
+      updateAppWidgetState(context, id) { prefs ->
+        val state = readState(prefs)
+        val next = settleStaleLoading(state, nowMs)
+        if (next != state) {
+          writeState(prefs, next)
+          settled = true
+        }
+      }
+      if (settled) widget.update(context, id)
+    }.onFailure { Log.w(TAG, "widget $id stale-LOADING check failed", it) }
+  }
+}
+
+/**
  * True when the widget must re-render. Null [lastRendered] (the first observation of a service
  * instance) always renders: the widget may be holding a render from before this instance existed.
  */
@@ -171,6 +196,7 @@ internal class WidgetStateRefresher(private val context: Context) {
   private fun currentKey() = WidgetRenderKey(widgetNodeState(context), thermalHot())
 
   private fun tick() {
+    settleStaleLoadingWidgets(context)
     val now = currentKey()
     if (!widgetNeedsRefresh(lastRendered, now)) return
     renderAll(now)

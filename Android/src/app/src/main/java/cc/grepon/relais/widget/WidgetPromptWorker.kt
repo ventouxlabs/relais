@@ -16,6 +16,7 @@ import android.content.Context
 import android.util.Log
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.glance.GlanceId
 import androidx.glance.appwidget.GlanceAppWidgetManager
@@ -46,19 +47,26 @@ const val WIDGET_PROMPT = "Give me a one-line status check."
 private val PHASE_KEY = stringPreferencesKey("relais_widget_phase")
 private val PROMPT_KEY = stringPreferencesKey("relais_widget_prompt")
 private val RESPONSE_KEY = stringPreferencesKey("relais_widget_response")
+private val LOADING_SINCE_KEY = longPreferencesKey("relais_widget_loading_since")
 
 /** Serializes [state] into Glance's [MutablePreferences] (the persisted widget store). */
 fun writeState(prefs: MutablePreferences, state: WidgetUiState) {
   prefs[PHASE_KEY] = state.phase.name
   state.prompt?.let { prefs[PROMPT_KEY] = it } ?: prefs.remove(PROMPT_KEY)
   state.response?.let { prefs[RESPONSE_KEY] = it } ?: prefs.remove(RESPONSE_KEY)
+  state.loadingSinceMs?.let { prefs[LOADING_SINCE_KEY] = it } ?: prefs.remove(LOADING_SINCE_KEY)
 }
 
 /** Reconstructs the [WidgetUiState] from Glance's [Preferences]; missing/garbled phase reads as IDLE. */
 fun readState(prefs: Preferences): WidgetUiState {
   val phase = prefs[PHASE_KEY]?.let { name -> WidgetPhase.entries.firstOrNull { it.name == name } }
     ?: WidgetPhase.IDLE
-  return WidgetUiState(phase = phase, prompt = prefs[PROMPT_KEY], response = prefs[RESPONSE_KEY])
+  return WidgetUiState(
+    phase = phase,
+    prompt = prefs[PROMPT_KEY],
+    response = prefs[RESPONSE_KEY],
+    loadingSinceMs = prefs[LOADING_SINCE_KEY],
+  )
 }
 
 /**

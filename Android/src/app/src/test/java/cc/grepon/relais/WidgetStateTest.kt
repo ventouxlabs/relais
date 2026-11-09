@@ -16,11 +16,13 @@ import cc.grepon.relais.core.NodeState
 import cc.grepon.relais.widget.RESPONSE_CAP
 import cc.grepon.relais.widget.WidgetPhase
 import cc.grepon.relais.widget.WidgetTapAction
+import cc.grepon.relais.widget.LOADING_CEILING_MS
 import cc.grepon.relais.widget.WidgetUiState
 import cc.grepon.relais.widget.awaitEngineReady
 import cc.grepon.relais.widget.capResponse
 import cc.grepon.relais.widget.shouldAwaitWarm
 import cc.grepon.relais.widget.shouldGiveUpWarm
+import cc.grepon.relais.widget.settleStaleLoading
 import cc.grepon.relais.widget.shouldRunWidgetPrompt
 import cc.grepon.relais.widget.widgetCanRun
 import cc.grepon.relais.widget.widgetDisplayState
@@ -351,5 +353,35 @@ class WidgetStateTest {
     for (s in NodeState.entries.filter { it != NodeState.STARTING }) {
       assertEquals(s, widgetDisplayState(s, startupInProgress = false, listenersUp = false, ready = false, idleUnloaded = false))
     }
+  }
+
+  // ---- #353: a LOADING whose worker died must not be a dead end ----
+
+  @Test fun `a LOADING older than the worker ceiling settles to ERROR`() {
+    val loading = WidgetUiState.idle().loading("ask", sinceMs = 1_000L)
+    val settled = settleStaleLoading(loading, nowMs = 1_000L + LOADING_CEILING_MS + 1)
+    assertEquals(WidgetPhase.ERROR, settled.phase)
+    assertEquals("ask", settled.prompt)
+    assertEquals(null, settled.loadingSinceMs)
+    // ERROR re-enables the buttons.
+    assertTrue(widgetCanRun(NodeState.LIVE, thermalHot = false, phase = settled.phase))
+  }
+
+  @Test fun `a fresh LOADING is left alone`() {
+    val loading = WidgetUiState.idle().loading("ask", sinceMs = 1_000L)
+    assertEquals(loading, settleStaleLoading(loading, nowMs = 1_000L + LOADING_CEILING_MS))
+  }
+
+  @Test fun `a LOADING with no recorded start is stale (persisted before the stamp existed)`() {
+    assertEquals(
+      WidgetPhase.ERROR,
+      settleStaleLoading(WidgetUiState.idle().loading("ask"), nowMs = 5L).phase,
+    )
+  }
+
+  @Test fun `non-LOADING phases are never touched`() {
+    val done = WidgetUiState.idle().loading("ask", sinceMs = 1L).done("answer")
+    assertEquals(done, settleStaleLoading(done, nowMs = Long.MAX_VALUE / 2))
+    assertEquals(WidgetUiState.idle(), settleStaleLoading(WidgetUiState.idle(), nowMs = Long.MAX_VALUE / 2))
   }
 }
