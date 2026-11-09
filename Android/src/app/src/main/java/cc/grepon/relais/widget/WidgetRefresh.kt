@@ -96,7 +96,10 @@ internal fun widgetNodeState(context: Context): NodeState {
  */
 internal fun refreshWidgetsOnceAsync(context: Context) {
   thread(name = "relais-widget-launch") {
-    runCatching { renderWidgets(context, WidgetRenderKey(widgetNodeState(context), thermalHot())) }
+    runCatching {
+      settleStaleLoadingWidgets(context)
+      renderWidgets(context, WidgetRenderKey(widgetNodeState(context), thermalHot()))
+    }
       .onFailure { Log.w(TAG, "launch widget render failed", it) }
   }
 }
@@ -121,27 +124,15 @@ private fun renderWidgets(context: Context, key: WidgetRenderKey) = runBlocking 
 }
 
 /**
- * #353: settles every placed widget whose stored LOADING has outlived its worker (see
- * [settleStaleLoading]) and re-renders it. Reads one pref per widget per tick and writes only on a
- * stale LOADING, so an idle widget costs nothing. A restarted service's first tick clears a LOADING
- * left by a worker that died with the old process.
+ * #353: settles every placed widget whose stored LOADING has no live worker behind it
+ * ([settleStaleWidget]) and re-renders it. Runs on the refresher tick AND at app-process start, so it
+ * does not depend on the service: after a force-stop nothing else runs until the app is opened.
  */
-private fun settleStaleLoadingWidgets(context: Context) = runBlocking {
+internal fun settleStaleLoadingWidgets(context: Context) = runBlocking {
   val widget = RelaisWidget()
-  val nowMs = System.currentTimeMillis()
   for (id in GlanceAppWidgetManager(context).getGlanceIds(RelaisWidget::class.java)) {
-    runCatching {
-      var settled = false
-      updateAppWidgetState(context, id) { prefs ->
-        val state = readState(prefs)
-        val next = settleStaleLoading(state, nowMs)
-        if (next != state) {
-          writeState(prefs, next)
-          settled = true
-        }
-      }
-      if (settled) widget.update(context, id)
-    }.onFailure { Log.w(TAG, "widget $id stale-LOADING check failed", it) }
+    runCatching { if (settleStaleWidget(context, id)) widget.update(context, id) }
+      .onFailure { Log.w(TAG, "widget $id stale-LOADING check failed", it) }
   }
 }
 

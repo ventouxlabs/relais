@@ -36,23 +36,28 @@ data class WidgetUiState(
   val phase: WidgetPhase,
   val prompt: String?,
   val response: String?,
-  /** Wall-clock ms the LOADING began (null outside LOADING); lets a dead worker's LOADING expire (#353). */
-  val loadingSinceMs: Long? = null,
+  /** Identifies the tap whose worker owns this LOADING; only that worker may settle it (#353). Null outside LOADING. */
+  val runToken: String? = null,
+  /** Wall-clock ms of the owning worker's last sign of life (tap, then each worker step); null outside LOADING. */
+  val heartbeatMs: Long? = null,
 ) {
   /**
    * Enters LOADING for [prompt], dropping any prior answer so a stale response can't flash.
-   * [sinceMs] stamps when the worker was enqueued, for [settleStaleLoading].
+   * [runToken] and [nowMs] stamp the owning run and its first heartbeat, for [settleStaleLoading].
    */
-  fun loading(prompt: String, sinceMs: Long? = null): WidgetUiState =
-    WidgetUiState(WidgetPhase.LOADING, prompt = prompt, response = null, loadingSinceMs = sinceMs)
+  fun loading(prompt: String, runToken: String? = null, nowMs: Long? = null): WidgetUiState =
+    WidgetUiState(WidgetPhase.LOADING, prompt = prompt, response = null, runToken = runToken, heartbeatMs = nowMs)
+
+  /** The same LOADING, with the worker's heartbeat moved to [nowMs]. */
+  fun heartbeat(nowMs: Long): WidgetUiState = copy(heartbeatMs = nowMs)
 
   /** Settles to DONE, keeping the originating [prompt] and carrying the capped [response]. */
   fun done(response: String): WidgetUiState =
-    copy(phase = WidgetPhase.DONE, response = capResponse(response), loadingSinceMs = null)
+    copy(phase = WidgetPhase.DONE, response = capResponse(response), runToken = null, heartbeatMs = null)
 
   /** Settles to ERROR, keeping the originating [prompt] and carrying the capped [message]. */
   fun error(message: String): WidgetUiState =
-    copy(phase = WidgetPhase.ERROR, response = capResponse(message), loadingSinceMs = null)
+    copy(phase = WidgetPhase.ERROR, response = capResponse(message), runToken = null, heartbeatMs = null)
 
   /** CLEAR: back to the empty IDLE state (no prompt, no response). */
   fun cleared(): WidgetUiState = idle()
@@ -153,23 +158,41 @@ fun widgetDisplayState(
     nodeState
   }
 
+/** What WorkManager says about this widget's prompt work (unique name `relais-widget-<id>`). */
+enum class WidgetWork { NONE, ENQUEUED, RUNNING }
+
 /**
- * Longer than the worker's own worst case: the 60 s warm wait ([ModelSwitch]'s poll cap) plus inference.
- * A LOADING older than this has no live worker behind it.
+ * Silence that proves a worker is gone when WorkManager also reports none: well above the longest
+ * single worker step between heartbeats (warm wait 60 s; engine lock behind an HTTP request up to
+ * 120 s; decode timeout 120 s — each step is bracketed by a heartbeat, so they do not add up).
  */
-const val LOADING_CEILING_MS = 3 * 60_000L
+const val HEARTBEAT_CEILING_MS = 150_000L
+
+/** An ENQUEUED worker may legitimately wait (Doze, deferral); past this it is treated as lost. */
+const val ENQUEUED_HARD_CAP_MS = 30 * 60_000L
 
 /**
  * #353: the worker writes LOADING and later DONE/ERROR, but a process death in between (OOM kill,
  * force-stop, a crash mid-inference) leaves LOADING stored forever, with the buttons disabled and no
- * click action attached. A LOADING older than [LOADING_CEILING_MS] — or one with no recorded start,
- * persisted before the stamp existed — settles to ERROR so the operator can tap again.
+ * click action attached. Settles such a LOADING to ERROR so the operator can tap again:
+ *  - [WidgetWork.RUNNING]: never stale — the worker is alive, however the wall clock moved;
+ *  - [WidgetWork.ENQUEUED]: stale only past [ENQUEUED_HARD_CAP_MS] since the last heartbeat;
+ *  - [WidgetWork.NONE]: stale when the heartbeat is missing (persisted before heartbeats existed),
+ *    older than [HEARTBEAT_CEILING_MS], or in the future (the clock went backwards: no live worker
+ *    is behind it, since WorkManager reports none).
+ * Wall-clock based: a forward jump with no work reported can expire a LOADING early (worst case an
+ * ERROR the operator retries past), never the other way round.
  */
-fun settleStaleLoading(state: WidgetUiState, nowMs: Long): WidgetUiState {
+fun settleStaleLoading(state: WidgetUiState, nowMs: Long, work: WidgetWork): WidgetUiState {
   if (state.phase != WidgetPhase.LOADING) return state
-  val since = state.loadingSinceMs
-  if (since != null && nowMs - since <= LOADING_CEILING_MS) return state
-  return state.error("prompt didn't finish — tap to retry")
+  val beat = state.heartbeatMs
+  val age = if (beat == null) null else nowMs - beat
+  val stale = when (work) {
+    WidgetWork.RUNNING -> false
+    WidgetWork.ENQUEUED -> age != null && age > ENQUEUED_HARD_CAP_MS
+    WidgetWork.NONE -> age == null || age < 0 || age > HEARTBEAT_CEILING_MS
+  }
+  return if (stale) state.error("prompt didn't finish — tap to retry") else state
 }
 
 fun widgetCanRun(nodeState: NodeState, thermalHot: Boolean, phase: WidgetPhase): Boolean =

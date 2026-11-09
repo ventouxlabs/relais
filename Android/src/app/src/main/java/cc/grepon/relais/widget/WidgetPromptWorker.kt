@@ -23,7 +23,6 @@ import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.glance.appwidget.state.updateAppWidgetState
 import androidx.work.CoroutineWorker
 import androidx.work.Data
-import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -38,6 +37,7 @@ private const val TAG = "WidgetPromptWorker"
 private const val KEY_TEMPLATE_ID = "template_id"
 private const val KEY_APP_WIDGET_ID = "app_widget_id"
 private const val KEY_WARM = "warm"
+private const val KEY_RUN_TOKEN = "run_token"
 
 /** The fixed canned prompt the widget runs (the template only supplies the system prompt). */
 const val WIDGET_PROMPT = "Give me a one-line status check."
@@ -47,14 +47,16 @@ const val WIDGET_PROMPT = "Give me a one-line status check."
 private val PHASE_KEY = stringPreferencesKey("relais_widget_phase")
 private val PROMPT_KEY = stringPreferencesKey("relais_widget_prompt")
 private val RESPONSE_KEY = stringPreferencesKey("relais_widget_response")
-private val LOADING_SINCE_KEY = longPreferencesKey("relais_widget_loading_since")
+private val HEARTBEAT_KEY = longPreferencesKey("relais_widget_heartbeat")
+private val RUN_TOKEN_KEY = stringPreferencesKey("relais_widget_run_token")
 
 /** Serializes [state] into Glance's [MutablePreferences] (the persisted widget store). */
 fun writeState(prefs: MutablePreferences, state: WidgetUiState) {
   prefs[PHASE_KEY] = state.phase.name
   state.prompt?.let { prefs[PROMPT_KEY] = it } ?: prefs.remove(PROMPT_KEY)
   state.response?.let { prefs[RESPONSE_KEY] = it } ?: prefs.remove(RESPONSE_KEY)
-  state.loadingSinceMs?.let { prefs[LOADING_SINCE_KEY] = it } ?: prefs.remove(LOADING_SINCE_KEY)
+  state.heartbeatMs?.let { prefs[HEARTBEAT_KEY] = it } ?: prefs.remove(HEARTBEAT_KEY)
+  state.runToken?.let { prefs[RUN_TOKEN_KEY] = it } ?: prefs.remove(RUN_TOKEN_KEY)
 }
 
 /** Reconstructs the [WidgetUiState] from Glance's [Preferences]; missing/garbled phase reads as IDLE. */
@@ -65,7 +67,8 @@ fun readState(prefs: Preferences): WidgetUiState {
     phase = phase,
     prompt = prefs[PROMPT_KEY],
     response = prefs[RESPONSE_KEY],
-    loadingSinceMs = prefs[LOADING_SINCE_KEY],
+    runToken = prefs[RUN_TOKEN_KEY],
+    heartbeatMs = prefs[HEARTBEAT_KEY],
   )
 }
 
@@ -82,8 +85,8 @@ fun readState(prefs: Preferences): WidgetUiState {
  * Once the engine IS ready, re-asserts [thermalHot] too (Codex P2, defense in depth): the ~20 s
  * reload window is long enough for the device to heat up after the tap-time gate already passed, so
  * this is the same "never add inference heat while hot" HOT already enforces for a resident engine,
- * checked again just before the prompt actually runs. Enqueued with `enqueueUniqueWork(KEEP)` so
- * rapid taps don't stack inferences on the single engine.
+ * checked again just before the prompt actually runs. Enqueued with `enqueueUniqueWork(REPLACE)` and a per-tap run token (#353): a
+ * superseded worker's result is discarded rather than overwriting newer state.
  */
 class WidgetPromptWorker(context: Context, params: WorkerParameters) :
   CoroutineWorker(context, params) {
@@ -92,12 +95,18 @@ class WidgetPromptWorker(context: Context, params: WorkerParameters) :
     val appWidgetId = inputData.getInt(KEY_APP_WIDGET_ID, -1).takeIf { it >= 0 }
       ?: return Result.failure()
     val templateId = inputData.getString(KEY_TEMPLATE_ID)?.takeIf { it.isNotBlank() }
+    val runToken = inputData.getString(KEY_RUN_TOKEN)
     val glanceId = runCatching {
       GlanceAppWidgetManager(applicationContext).getGlanceIdBy(appWidgetId)
     }.getOrElse {
       Log.w(TAG, "no GlanceId for appWidgetId=$appWidgetId; widget removed?", it)
       return Result.failure()
     }
+
+    // Heartbeats (#353): the stored LOADING is only declared dead after a silence well above the
+    // longest single step, so beat before each step. A false return means this run was superseded
+    // (re-tap), cleared, or already settled stale: do nothing, the owner of the state moved on.
+    if (!beat(glanceId, runToken)) return Result.success()
 
     // Read order: the liveness snapshot FIRST, then the engine flag (computeNodeState's rule).
     val warm = inputData.getBoolean(KEY_WARM, false)
@@ -126,9 +135,10 @@ class WidgetPromptWorker(context: Context, params: WorkerParameters) :
         maxIterations = ModelSwitch.MAX_RELOAD_POLL_ITERATIONS,
       )
     }
+    if (!beat(glanceId, runToken)) return Result.success()
     if (!RelaisInference.isReady()) {
       Log.i(TAG, "engine not resident at run time; skipping widget prompt")
-      settle(glanceId, WidgetUiState.idle().error("node off — open app to start"))
+      settle(glanceId, runToken, WidgetUiState.idle().error("node off — open app to start"))
       return Result.failure()
     }
     if (thermalHot()) {
@@ -136,10 +146,11 @@ class WidgetPromptWorker(context: Context, params: WorkerParameters) :
       // ~20 s reload window is enough time for that to change since the tap-time gate passed. Never
       // add inference heat while hot, same as the HOT NodeState's policy for a resident engine.
       Log.i(TAG, "device thermally hot at run time; skipping widget prompt")
-      settle(glanceId, WidgetUiState.idle().error("hot — throttling, try later"))
+      settle(glanceId, runToken, WidgetUiState.idle().error("hot — throttling, try later"))
       return Result.failure()
     }
 
+    if (!beat(glanceId, runToken)) return Result.success() // before the engine lock + inference
     val system = WorkflowRegistry.resolve(applicationContext, templateId)?.system
     val answer = runCatching {
       RelaisInference.completeText(applicationContext, WIDGET_PROMPT, system = system)
@@ -147,39 +158,55 @@ class WidgetPromptWorker(context: Context, params: WorkerParameters) :
       if (it is kotlinx.coroutines.CancellationException) throw it // never swallow cancellation
       if (it is RelaisInference.NodeNotReadyException) {
         Log.i(TAG, "node went down mid-run", it)
-        settle(glanceId, WidgetUiState.idle().loading(WIDGET_PROMPT).error("node went off"))
+        settle(glanceId, runToken, WidgetUiState.idle().loading(WIDGET_PROMPT).error("node went off"))
       } else {
         Log.e(TAG, "widget prompt failed", it) // never silently swallow
-        settle(glanceId, WidgetUiState.idle().loading(WIDGET_PROMPT).error("inference failed"))
+        settle(glanceId, runToken, WidgetUiState.idle().loading(WIDGET_PROMPT).error("inference failed"))
       }
       return Result.failure()
     }
 
-    settle(glanceId, WidgetUiState.idle().loading(WIDGET_PROMPT).done(answer))
+    settle(glanceId, runToken, WidgetUiState.idle().loading(WIDGET_PROMPT).done(answer))
     return Result.success()
   }
 
-  /** Persists [state] into the widget's Glance store and re-renders it. */
-  private suspend fun settle(glanceId: GlanceId, state: WidgetUiState) {
-    updateAppWidgetState(applicationContext, glanceId) { prefs -> writeState(prefs, state) }
-    RelaisWidget().update(applicationContext, glanceId)
+  /**
+   * Persists [state] and re-renders — only if this run still owns the stored LOADING ([ownedRunPrefs]);
+   * a late worker never overwrites an ERROR, a CLEAR or a newer tap's LOADING.
+   */
+  private suspend fun settle(glanceId: GlanceId, runToken: String?, state: WidgetUiState) {
+    var wrote = false
+    updateAppWidgetState(applicationContext, glanceId) { prefs ->
+      wrote = ownedRunPrefs(prefs, runToken) { state }
+    }
+    if (wrote) RelaisWidget().update(applicationContext, glanceId) else Log.i(TAG, "run superseded; result discarded")
+  }
+
+  /** Moves this run's heartbeat to now; false when the run no longer owns the stored LOADING. */
+  private suspend fun beat(glanceId: GlanceId, runToken: String?): Boolean {
+    var owned = false
+    updateAppWidgetState(applicationContext, glanceId) { prefs ->
+      owned = ownedRunPrefs(prefs, runToken) { it.heartbeat(System.currentTimeMillis()) }
+    }
+    return owned
   }
 
   companion object {
-    /** Enqueues a per-widget unique run (KEEP coalesces rapid taps onto the single engine lock). */
-    fun enqueue(context: Context, glanceId: GlanceId, templateId: String?, warm: Boolean) {
+    /** Enqueues a per-widget unique run (REPLACE: a re-tap supersedes any older run; see [WIDGET_WORK_POLICY]). */
+    fun enqueue(context: Context, glanceId: GlanceId, templateId: String?, warm: Boolean, runToken: String) {
       val appWidgetId = GlanceAppWidgetManager(context).getAppWidgetId(glanceId)
       val request = OneTimeWorkRequestBuilder<WidgetPromptWorker>()
-        .setInputData(inputData(appWidgetId, templateId, warm))
+        .setInputData(inputData(appWidgetId, templateId, warm, runToken))
         .build()
       WorkManager.getInstance(context.applicationContext)
-        .enqueueUniqueWork("relais-widget-$appWidgetId", ExistingWorkPolicy.KEEP, request)
+        .enqueueUniqueWork(widgetWorkName(appWidgetId), WIDGET_WORK_POLICY, request)
     }
 
-    private fun inputData(appWidgetId: Int, templateId: String?, warm: Boolean): Data =
+    private fun inputData(appWidgetId: Int, templateId: String?, warm: Boolean, runToken: String): Data =
       Data.Builder()
         .putInt(KEY_APP_WIDGET_ID, appWidgetId)
         .putBoolean(KEY_WARM, warm)
+        .putString(KEY_RUN_TOKEN, runToken)
         .apply { templateId?.let { putString(KEY_TEMPLATE_ID, it) } }
         .build()
   }
