@@ -162,9 +162,11 @@ fun widgetDisplayState(
 enum class WidgetWork { NONE, ENQUEUED, RUNNING }
 
 /**
- * Silence that proves a worker is gone when WorkManager also reports none: well above the longest
- * single worker step between heartbeats (warm wait 60 s; engine lock behind an HTTP request up to
- * 120 s; decode timeout 120 s — each step is bracketed by a heartbeat, so they do not add up).
+ * Silence that proves a worker is gone when WorkManager also reports none. Above the warm wait
+ * (60 s) between beats. The last step — the engine lock behind an HTTP request (up to 120 s) plus
+ * decode (up to 120 s) — can run ~240 s with no beat, longer than this; it is protected by
+ * [WidgetWork.RUNNING] (a live worker is never stale), and this ceiling only applies once
+ * WorkManager reports no work.
  */
 const val HEARTBEAT_CEILING_MS = 150_000L
 
