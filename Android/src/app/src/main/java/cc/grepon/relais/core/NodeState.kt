@@ -42,9 +42,11 @@ private const val THERMAL_HOT_THRESHOLD = 3
  *    and the watchdog read the same signal, so the false LIVE suppressed the retry that would have
  *    fixed it — the state needing recovery was the state preventing it. [ready] answers "did the
  *    engine initialise?"; only [listenersUp] answers "can anyone reach this node?";
- *  - an in-progress startup reads STARTING even after a prior failure (an active retry is not an error)
+ *  - an in-progress startup of a node asked-to-run reads STARTING even after a prior failure (an active retry is not an error)
  *    — and since every real init attempt publishes its own startup, a request-driven reload after an
  *    idle unload reads STARTING here too, not IDLE;
+ *    With `shouldRun` false (STOP) a download that is still running does not make the node STARTING: the
+ *    operator's intent is off, and a surface rendered at STOP must not freeze on STARTING (#367);
  *  - only a node asked-to-run whose last init failed and is NOT currently retrying reads ERROR —
  *    and ERROR stays **above** IDLE deliberately, not as defence against an impossible state:
  *    `lastInitFailed && [idleUnloaded]` alone IS reachable (a bind-failed node whose service-side
@@ -80,7 +82,7 @@ fun computeNodeState(
 ): NodeState = when {
   ready && listenersUp && thermalStatus >= THERMAL_HOT_THRESHOLD -> NodeState.HOT
   ready && listenersUp -> NodeState.LIVE
-  startupInProgress -> NodeState.STARTING
+  shouldRun && startupInProgress -> NodeState.STARTING
   shouldRun && lastInitFailed -> NodeState.ERROR
   shouldRun && listenersUp && idleUnloaded -> NodeState.IDLE
   shouldRun -> NodeState.STARTING

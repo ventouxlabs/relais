@@ -90,8 +90,10 @@ class NodeStateTest {
     assertEquals(NodeState.STARTING, state(shouldRun = true))
   }
 
-  @Test fun `starting when startupInProgress even if shouldRun is false`() {
-    assertEquals(NodeState.STARTING, state(startupInProgress = true))
+  @Test fun `stopped node reads OFF while a background download still holds startupInProgress (#367)`() {
+    // STOP writes shouldRun=false but the download thread keeps startupInProgress until its finally.
+    // The operator's intent is off, so the node is OFF whatever a background download is doing.
+    assertEquals(NodeState.OFF, state(startupInProgress = true))
   }
 
   @Test fun `live when engine ready`() {
