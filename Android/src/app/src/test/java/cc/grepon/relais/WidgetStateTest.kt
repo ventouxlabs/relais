@@ -16,11 +16,15 @@ import cc.grepon.relais.core.NodeState
 import cc.grepon.relais.widget.RESPONSE_CAP
 import cc.grepon.relais.widget.WidgetPhase
 import cc.grepon.relais.widget.WidgetTapAction
+import cc.grepon.relais.widget.ENQUEUED_HARD_CAP_MS
+import cc.grepon.relais.widget.HEARTBEAT_CEILING_MS
+import cc.grepon.relais.widget.WidgetWork
 import cc.grepon.relais.widget.WidgetUiState
 import cc.grepon.relais.widget.awaitEngineReady
 import cc.grepon.relais.widget.capResponse
 import cc.grepon.relais.widget.shouldAwaitWarm
 import cc.grepon.relais.widget.shouldGiveUpWarm
+import cc.grepon.relais.widget.settleStaleLoading
 import cc.grepon.relais.widget.shouldRunWidgetPrompt
 import cc.grepon.relais.widget.widgetCanRun
 import cc.grepon.relais.widget.widgetDisplayState
@@ -351,5 +355,51 @@ class WidgetStateTest {
     for (s in NodeState.entries.filter { it != NodeState.STARTING }) {
       assertEquals(s, widgetDisplayState(s, startupInProgress = false, listenersUp = false, ready = false, idleUnloaded = false))
     }
+  }
+
+  // ---- #353: a LOADING whose worker died must not be a dead end ----
+
+  private val t0 = 1_000_000L
+
+  private fun loading(beat: Long? = t0) = WidgetUiState.idle().loading("ask", runToken = "tok", nowMs = beat)
+
+  @Test fun `no work and a silent heartbeat settles to ERROR and re-enables the buttons`() {
+    val settled = settleStaleLoading(loading(), t0 + HEARTBEAT_CEILING_MS + 1, WidgetWork.NONE)
+    assertEquals(WidgetPhase.ERROR, settled.phase)
+    assertEquals("ask", settled.prompt)
+    assertNull(settled.runToken)
+    assertNull(settled.heartbeatMs)
+    assertTrue(widgetCanRun(NodeState.LIVE, thermalHot = false, phase = settled.phase))
+  }
+
+  @Test fun `a recent heartbeat is left alone`() {
+    assertEquals(loading(), settleStaleLoading(loading(), t0 + HEARTBEAT_CEILING_MS, WidgetWork.NONE))
+  }
+
+  @Test fun `a running worker is never stale however long or whatever the clock did`() {
+    assertEquals(loading(), settleStaleLoading(loading(), t0 + 10 * HEARTBEAT_CEILING_MS, WidgetWork.RUNNING))
+    assertEquals(loading(), settleStaleLoading(loading(), t0 - 5_000_000L, WidgetWork.RUNNING))
+  }
+
+  @Test fun `an enqueued worker may wait long but not forever`() {
+    assertEquals(loading(), settleStaleLoading(loading(), t0 + ENQUEUED_HARD_CAP_MS, WidgetWork.ENQUEUED))
+    assertEquals(
+      WidgetPhase.ERROR,
+      settleStaleLoading(loading(), t0 + ENQUEUED_HARD_CAP_MS + 1, WidgetWork.ENQUEUED).phase,
+    )
+  }
+
+  @Test fun `a heartbeat in the future with no work is stale (clock went backwards)`() {
+    assertEquals(WidgetPhase.ERROR, settleStaleLoading(loading(), t0 - 1, WidgetWork.NONE).phase)
+  }
+
+  @Test fun `a LOADING with no heartbeat (legacy) is settled when no work runs`() {
+    assertEquals(WidgetPhase.ERROR, settleStaleLoading(loading(beat = null), 5L, WidgetWork.NONE).phase)
+  }
+
+  @Test fun `non-LOADING phases are never touched`() {
+    val done = loading().done("answer")
+    assertEquals(done, settleStaleLoading(done, Long.MAX_VALUE / 2, WidgetWork.NONE))
+    assertEquals(WidgetUiState.idle(), settleStaleLoading(WidgetUiState.idle(), Long.MAX_VALUE / 2, WidgetWork.NONE))
   }
 }

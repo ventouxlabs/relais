@@ -13,6 +13,7 @@
 package cc.grepon.relais.widget
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -84,6 +85,8 @@ class RelaisWidget : GlanceAppWidget() {
   override val sizeMode: SizeMode = SizeMode.Exact
 
   override suspend fun provideGlance(context: Context, id: GlanceId) {
+    // #353: heal a LOADING with no worker behind it whenever the widget is drawn, service or not.
+    settleStaleWidgetSafely({ settleStaleWidget(context, id) }) { Log.w("RelaisWidget", "stale-LOADING check failed", it) }
     provideContent {
       // Read HERE, in the lambda that recomposes when this widget's Glance state changes, and pass
       // down (#343). An open Glance session does not re-run provideGlance on update(): it only

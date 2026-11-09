@@ -49,6 +49,7 @@ class RunPromptAction : ActionCallback {
     parameters: ActionParameters,
   ) {
     val templateId = parameters[TemplateIdKey]?.takeIf { it.isNotBlank() }
+    val run = startTapRun(System.currentTimeMillis())
     val nodeState = RelaisNodeController.state(context)
     val warm = when (shouldRunWidgetPrompt(nodeState, thermalHot(), WIDGET_PROMPT)) {
       WidgetTapAction.IGNORE -> {
@@ -77,10 +78,10 @@ class RunPromptAction : ActionCallback {
       }
     }
     updateAppWidgetState(context, glanceId) { prefs ->
-      writeState(prefs, WidgetUiState.idle().loading(WIDGET_PROMPT))
+      writeState(prefs, run.state)
     }
     RelaisWidget().update(context, glanceId)
-    WidgetPromptWorker.enqueue(context, glanceId, templateId, warm = warm)
+    WidgetPromptWorker.enqueue(context, glanceId, templateId, warm = warm, runToken = run.runToken)
   }
 }
 

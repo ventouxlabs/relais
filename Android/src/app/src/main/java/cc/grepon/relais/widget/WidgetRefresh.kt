@@ -96,6 +96,9 @@ internal fun widgetNodeState(context: Context): NodeState {
  */
 internal fun refreshWidgetsOnceAsync(context: Context) {
   thread(name = "relais-widget-launch") {
+    // Separate: a failed settle (e.g. listing the widgets) must not skip the render.
+    runCatching { settleStaleLoadingWidgets(context) }
+      .onFailure { Log.w(TAG, "launch stale-LOADING settle failed", it) }
     runCatching { renderWidgets(context, WidgetRenderKey(widgetNodeState(context), thermalHot())) }
       .onFailure { Log.w(TAG, "launch widget render failed", it) }
   }
@@ -117,6 +120,22 @@ private fun renderWidgets(context: Context, key: WidgetRenderKey) = runBlocking 
       updateAppWidgetState(context, id) { it[NODE_STAMP_KEY] = stamp }
       widget.update(context, id)
     }.onFailure { Log.w(TAG, "widget $id refresh failed", it) }
+  }
+}
+
+/**
+ * #353: settles every placed widget whose stored LOADING has no live worker behind it
+ * ([settleStaleWidget]) and re-renders it. Runs on the refresher tick AND at app-process start, so it
+ * does not depend on the service: after a force-stop nothing else runs until the app is opened.
+ */
+internal fun settleStaleLoadingWidgets(context: Context) = runBlocking {
+  val widget = RelaisWidget()
+  for (id in GlanceAppWidgetManager(context).getGlanceIds(RelaisWidget::class.java)) {
+    runCatching {
+      if (settleStaleWidgetSafely({ settleStaleWidget(context, id) }) { Log.w(TAG, "widget $id stale-LOADING check failed", it) }) {
+        widget.update(context, id)
+      }
+    }.onFailure { Log.w(TAG, "widget $id stale-LOADING re-render failed", it) }
   }
 }
 
@@ -171,6 +190,7 @@ internal class WidgetStateRefresher(private val context: Context) {
   private fun currentKey() = WidgetRenderKey(widgetNodeState(context), thermalHot())
 
   private fun tick() {
+    settleStaleLoadingWidgets(context)
     val now = currentKey()
     if (!widgetNeedsRefresh(lastRendered, now)) return
     renderAll(now)
