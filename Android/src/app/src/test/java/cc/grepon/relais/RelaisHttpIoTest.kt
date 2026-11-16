@@ -83,6 +83,25 @@ class RelaisHttpIoTest {
     assertNull(reader(ByteArray(0)).readLine())
   }
 
+  @Test
+  fun `readLine accepts a CRLF line at the cap`() {
+    val line = "a".repeat(MAX_HTTP_LINE_BYTES - 1) // the CR before LF counts toward the cap
+    assertEquals(line, reader(buf(line, "\r\n")).readLine())
+  }
+
+  @Test(expected = HttpLineTooLongException::class)
+  fun `readLine rejects a line longer than the cap instead of buffering it`() {
+    reader(buf("a".repeat(MAX_HTTP_LINE_BYTES + 1), "\r\n")).readLine()
+  }
+
+  @Test(expected = HttpLineTooLongException::class)
+  fun `readLine rejects an endless newline-less stream`() {
+    val endless = object : java.io.InputStream() {
+      override fun read(): Int = 'a'.code
+    }
+    HttpRequestReader(endless).readLine()
+  }
+
   // ---- HttpRequestReader.readBodyBytes ----
 
   @Test

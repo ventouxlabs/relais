@@ -24,6 +24,13 @@ import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 
+/** Cap on a single request/header line. Matches the server's whole-header-block cap (16 KB), so one
+ *  line can never exceed what the header block could hold anyway. */
+internal const val MAX_HTTP_LINE_BYTES = 16 * 1024
+
+/** Thrown by [HttpRequestReader.readLine] when a line exceeds [MAX_HTTP_LINE_BYTES]. */
+class HttpLineTooLongException : java.io.IOException("HTTP line exceeds $MAX_HTTP_LINE_BYTES bytes")
+
 /**
  * Byte-oriented HTTP request reader for [RelaisHttpServer]. Exists because the previous
  * `BufferedReader(InputStreamReader(...))` decoded the socket through the platform charset, which is
@@ -42,7 +49,9 @@ class HttpRequestReader(input: InputStream) {
    * Reads one line: bytes up to (and consuming) the next `\n`, with a trailing `\r` stripped, decoded
    * as ISO-8859-1 (Latin-1 is a total, lossless byte->char map, correct for ASCII HTTP header lines).
    * A final line with no trailing newline is returned as-is. Returns null only at EOF with no bytes
-   * read (so the header loop terminates cleanly). Splits on both CRLF and bare LF.
+   * read (so the header loop terminates cleanly). Splits on both CRLF and bare LF. Throws
+   * [HttpLineTooLongException] once a line passes [MAX_HTTP_LINE_BYTES] without a newline, so a
+   * hostile client can't make the worker buffer an unbounded line.
    */
   fun readLine(): String? {
     val buf = ByteArrayOutputStream(64)
@@ -55,6 +64,7 @@ class HttpRequestReader(input: InputStream) {
       }
       sawAny = true
       if (b == LF) break
+      if (buf.size() >= MAX_HTTP_LINE_BYTES) throw HttpLineTooLongException()
       buf.write(b)
     }
     var bytes = buf.toByteArray()
