@@ -746,6 +746,7 @@ constructor(
   }
 
   fun getJsSkillUrl(skillName: String, scriptName: String): String? {
+    if (!SkillScriptName.isSafe(scriptName)) return null
     val skill = getSkill(name = skillName) ?: return null
     var baseUrl = ""
     // Construct a local URL for imported skill and built-in skills.
