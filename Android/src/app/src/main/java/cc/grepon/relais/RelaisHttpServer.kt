@@ -695,6 +695,13 @@ class RelaisHttpServer(
 
           else -> reply(404, RelaisError.json("not found", RelaisError.NOT_FOUND))
         }
+      } catch (e: JsonTooDeepException) {
+        RelaisMetrics.recordRequest(endpoint, 400)
+        runCatching { respond(sock, 400, RelaisError.json(e.message ?: "JSON nesting too deep", RelaisError.INVALID_REQUEST)) }
+      } catch (e: StackOverflowError) {
+        // Defense in depth: a future scanner/parser mismatch must not crash the worker thread.
+        RelaisMetrics.recordRequest(endpoint, 400)
+        runCatching { respond(sock, 400, RelaisError.json("JSON nesting too deep", RelaisError.INVALID_REQUEST)) }
       } catch (e: Exception) {
         // Non-null iff `e` is a retryable model state (the sealed RetryableModelUnavailableException):
         // #352, a swap won the engine lock after this request was classified; #362, the configured
@@ -2274,7 +2281,7 @@ class RelaisHttpServer(
    * read the SAME body stream as raw bytes. The size cap (security M1) lives in [HttpRequestReader].
    */
   private fun readBody(reader: HttpRequestReader, length: Int): String =
-    String(reader.readBodyBytes(length), Charsets.UTF_8)
+    reader.readJsonBody(length)
 
   private fun decode(b64: String): ByteArray = Base64.decode(b64, Base64.DEFAULT)
 

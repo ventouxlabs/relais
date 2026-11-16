@@ -84,6 +84,17 @@ class HttpRequestReader(input: InputStream) {
     return out.toByteArray()
   }
 
+  /**
+   * Reads the body as UTF-8 text for a JSON endpoint, rejecting bodies nested deeper than
+   * [MAX_JSON_DEPTH] with [JsonTooDeepException] BEFORE org.json's recursive-descent parser sees them
+   * (a 32 MB `[[[[...` body would otherwise overflow the worker thread's stack).
+   */
+  fun readJsonBody(length: Int): String {
+    val text = String(readBodyBytes(length), Charsets.UTF_8)
+    if (jsonNestingExceeds(text, MAX_JSON_DEPTH)) throw JsonTooDeepException()
+    return text
+  }
+
   private companion object {
     const val LF = '\n'.code
     const val CR_BYTE = '\r'.code.toByte()
@@ -322,4 +333,45 @@ fun buildMultipartChatRequest(
 private fun sanitizeImageMime(raw: String?): String {
   val base = raw?.substringBefore(';')?.trim()?.lowercase() ?: return DEFAULT_IMAGE_MIME
   return if (base.matches(IMAGE_MIME_REGEX)) base else DEFAULT_IMAGE_MIME
+}
+
+/** Max `[`/`{` nesting accepted in a request body; legitimate API payloads nest < 10 levels. */
+internal const val MAX_JSON_DEPTH = 64
+
+/** Thrown by [HttpRequestReader.readJsonBody]; the server maps it to HTTP 400. */
+class JsonTooDeepException : IllegalArgumentException("JSON nesting too deep (max $MAX_JSON_DEPTH)")
+
+/**
+ * True if [text] must be rejected before org.json's recursive parser sees it: it opens more than
+ * [max] nested `[`/`{` at once, OR it uses syntax where org.json's lenient lexer and this scanner
+ * could disagree about where strings end. Android's org.json also accepts single-quoted strings,
+ * `#`, `//` and `/* */` comments, `=`/`;` separators and unquoted literals (which may even contain a
+ * `"`), so a lone `"` inside such a construct would hide later brackets from a naive scanner while
+ * the parser still recurses into them. Strict approach: outside double-quoted strings only
+ * whitespace, `[]{},:` and plain literal characters (letters, digits, `-+.`) are allowed, and a `"`
+ * may not directly follow a literal character. Standard JSON never trips this. Pure and O(n).
+ */
+internal fun jsonNestingExceeds(text: String, max: Int): Boolean {
+  var depth = 0
+  var inString = false
+  var escaped = false
+  var prevLiteral = false
+  for (c in text) {
+    if (inString) {
+      if (escaped) escaped = false else if (c == '\\') escaped = true else if (c == '"') inString = false
+      continue
+    }
+    when (c) {
+      '"' -> {
+        if (prevLiteral) return true
+        inString = true
+      }
+      '[', '{' -> if (++depth > max) return true
+      ']', '}' -> if (depth > 0) depth--
+      ',', ':', ' ', '\t', '\r', '\n' -> {}
+      else -> if (!(c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' || c == '-' || c == '+' || c == '.')) return true
+    }
+    prevLiteral = c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' || c == '-' || c == '+' || c == '.'
+  }
+  return false
 }
