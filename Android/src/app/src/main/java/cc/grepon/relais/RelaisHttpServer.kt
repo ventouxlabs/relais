@@ -698,6 +698,10 @@ class RelaisHttpServer(
       } catch (e: JsonTooDeepException) {
         RelaisMetrics.recordRequest(endpoint, 400)
         runCatching { respond(sock, 400, RelaisError.json(e.message ?: "JSON nesting too deep", RelaisError.INVALID_REQUEST)) }
+      } catch (e: StackOverflowError) {
+        // Defense in depth: a future scanner/parser mismatch must not crash the worker thread.
+        RelaisMetrics.recordRequest(endpoint, 400)
+        runCatching { respond(sock, 400, RelaisError.json("JSON nesting too deep", RelaisError.INVALID_REQUEST)) }
       } catch (e: Exception) {
         // Non-null iff `e` is a retryable model state (the sealed RetryableModelUnavailableException):
         // #352, a swap won the engine lock after this request was classified; #362, the configured

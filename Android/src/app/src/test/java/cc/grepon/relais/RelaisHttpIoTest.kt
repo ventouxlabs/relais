@@ -400,6 +400,30 @@ class RelaisHttpIoTest {
   }
 
   @Test
+  fun jsonNestingDepth_singleQuoteBypassIsRejected() {
+    val body = "{'a':'\"','b':" + "[".repeat(1_000_000)
+    assertTrue(jsonNestingExceeds(body, MAX_JSON_DEPTH))
+    assertTrue(jsonNestingExceeds("{'a':1}", MAX_JSON_DEPTH))
+  }
+
+  @Test
+  fun jsonNestingDepth_commentBypassesAreRejected() {
+    assertTrue(jsonNestingExceeds("#\"\n" + "[".repeat(1_000_000), MAX_JSON_DEPTH))
+    assertTrue(jsonNestingExceeds("// \"\n[[1]]", MAX_JSON_DEPTH))
+    assertTrue(jsonNestingExceeds("/* \" */ [[1]]", MAX_JSON_DEPTH))
+  }
+
+  @Test
+  fun jsonNestingDepth_unquotedLiteralQuoteBypassIsRejected() {
+    assertTrue(jsonNestingExceeds("[ab\"c," + "[".repeat(1_000_000), MAX_JSON_DEPTH))
+  }
+
+  @Test
+  fun jsonNestingDepth_standardJsonWithLiteralsIsAccepted() {
+    assertFalse(jsonNestingExceeds("""{"a":-1.5e+3,"b":true,"c":null,"d":["x\"y"]}""", MAX_JSON_DEPTH))
+  }
+
+  @Test
   fun readJsonBody_throwsOnDeepNesting() {
     val deep = "[".repeat(MAX_JSON_DEPTH + 1)
     val r = reader(deep.toByteArray())
