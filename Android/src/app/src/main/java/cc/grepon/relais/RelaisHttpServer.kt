@@ -695,6 +695,10 @@ class RelaisHttpServer(
 
           else -> reply(404, RelaisError.json("not found", RelaisError.NOT_FOUND))
         }
+      } catch (e: HttpLineTooLongException) {
+        Log.w(TAG, "request/header line too long; closing")
+        RelaisMetrics.recordRequest(endpoint, 431)
+        runCatching { respond(sock, 431, RelaisError.json("header too large", RelaisError.INVALID_REQUEST)) }
       } catch (e: Exception) {
         // Non-null iff `e` is a retryable model state (the sealed RetryableModelUnavailableException):
         // #352, a swap won the engine lock after this request was classified; #362, the configured
