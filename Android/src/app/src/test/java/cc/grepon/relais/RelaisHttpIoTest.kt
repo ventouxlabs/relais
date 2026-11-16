@@ -379,4 +379,33 @@ class RelaisHttpIoTest {
       .getJSONArray("content").getJSONObject(1).getJSONObject("image_url").getString("url")
     assertTrue("params stripped + lowercased", paramMime.startsWith("data:image/webp;base64,"))
   }
+
+  @Test
+  fun jsonNestingDepth_flatAndModerateBodiesAreAccepted() {
+    assertFalse(jsonNestingExceeds("""{"a":[1,{"b":"c"}]}""", MAX_JSON_DEPTH))
+    assertFalse(jsonNestingExceeds("[".repeat(MAX_JSON_DEPTH) + "]".repeat(MAX_JSON_DEPTH), MAX_JSON_DEPTH))
+  }
+
+  @Test
+  fun jsonNestingDepth_deepBodyIsRejected() {
+    val deep = "[".repeat(MAX_JSON_DEPTH + 1) + "]".repeat(MAX_JSON_DEPTH + 1)
+    assertTrue(jsonNestingExceeds(deep, MAX_JSON_DEPTH))
+    assertTrue(jsonNestingExceeds("[".repeat(1_000_000), MAX_JSON_DEPTH))
+  }
+
+  @Test
+  fun jsonNestingDepth_bracketsInsideStringsAreIgnored() {
+    val body = """{"text":"${"[".repeat(500)} \" ${"{".repeat(500)}"}"""
+    assertFalse(jsonNestingExceeds(body, MAX_JSON_DEPTH))
+  }
+
+  @Test
+  fun readJsonBody_throwsOnDeepNesting() {
+    val deep = "[".repeat(MAX_JSON_DEPTH + 1)
+    val r = reader(deep.toByteArray())
+    try {
+      r.readJsonBody(deep.length)
+      org.junit.Assert.fail("expected JsonTooDeepException")
+    } catch (_: JsonTooDeepException) {}
+  }
 }
