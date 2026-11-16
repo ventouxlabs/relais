@@ -20,8 +20,13 @@ import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
+import java.security.MessageDigest
 
 private const val TAG = "RelaisControl"
+
+/** Constant-time check of the presented adb token against the node's API key. */
+internal fun controlTokenMatches(presented: String?, apiKey: String): Boolean =
+  presented != null && MessageDigest.isEqual(presented.toByteArray(), apiKey.toByteArray())
 
 /**
  * Key-gated adb trampoline for the Relais node — no UI, no launcher icon. Honors
@@ -37,7 +42,7 @@ class RelaisControlActivity : ComponentActivity() {
     val cmd = intent?.getStringExtra("cmd") ?: return
     // Gate external start/stop: reject unless the caller presents the node's API key. Prevents a
     // co-installed app from toggling the service (loading a multi-GB model, binding the endpoint).
-    if (intent.getStringExtra("token") != RelaisConfig.apiKey(this)) {
+    if (!controlTokenMatches(intent.getStringExtra("token"), RelaisConfig.apiKey(this))) {
       Log.w(TAG, "Ignoring cmd=$cmd from intent: missing/invalid token")
       return
     }
