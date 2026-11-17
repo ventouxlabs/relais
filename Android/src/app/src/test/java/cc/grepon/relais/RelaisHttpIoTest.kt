@@ -102,6 +102,72 @@ class RelaisHttpIoTest {
     HttpRequestReader(endless).readLine()
   }
 
+  // ---- HttpRequestReader total read deadlines (slow trickle) ----
+
+  /** A fake clock plus a stream that hands out one byte of [bytes] per read and advances the clock
+   *  by [msPerByte] — a slowloris peer that never trips the per-read socket timeout. */
+  private class Trickle(private val bytes: ByteArray, private val msPerByte: Long) : java.io.InputStream() {
+    var nowMs = 0L
+    private var pos = 0
+
+    override fun read(): Int {
+      if (pos >= bytes.size) return -1
+      nowMs += msPerByte
+      return bytes[pos++].toInt() and 0xFF
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+      if (len == 0) return 0
+      val c = read()
+      if (c < 0) return -1
+      b[off] = c.toByte()
+      return 1
+    }
+  }
+
+  private fun trickleReader(t: Trickle, headerMs: Long = 30_000, bodyMs: Long = 30_000) =
+    HttpRequestReader(t, headerDeadlineMs = headerMs, bodyDeadlineMs = bodyMs, nowMs = { t.nowMs })
+
+  @Test(expected = HttpReadDeadlineException::class)
+  fun `readLine fails once a trickled header passes the total deadline`() {
+    // 1 byte/s, 100 bytes, no newline: far under the line cap and every read is "fast", so only a
+    // total deadline stops it.
+    val t = Trickle("a".repeat(100).toByteArray(), msPerByte = 1_000)
+    trickleReader(t).readLine()
+  }
+
+  @Test(expected = HttpReadDeadlineException::class)
+  fun `the header deadline spans lines, not each line`() {
+    // Each line is 10s, well under the 30s deadline on its own; four of them are not.
+    val t = Trickle("X-A: 12345\nX-B: 12345\nX-C: 12345\nX-D: 12345\n".toByteArray(), msPerByte = 900)
+    val r = trickleReader(t)
+    repeat(4) { r.readLine() }
+  }
+
+  @Test
+  fun `a header block that arrives within the deadline is read normally`() {
+    val t = Trickle("GET / HTTP/1.1\r\nHost: relais\r\n\r\n".toByteArray(), msPerByte = 100)
+    val r = trickleReader(t)
+    assertEquals("GET / HTTP/1.1", r.readLine())
+    assertEquals("Host: relais", r.readLine())
+    assertEquals("", r.readLine())
+  }
+
+  @Test(expected = HttpReadDeadlineException::class)
+  fun `readBodyBytes fails once a trickled body passes its total deadline`() {
+    val t = Trickle(ByteArray(100) { 'b'.code.toByte() }, msPerByte = 1_000)
+    trickleReader(t).readBodyBytes(100)
+  }
+
+  @Test
+  fun `the body deadline starts at the body read, not at construction`() {
+    // 25s of headers, then a 5s body: each phase is under its own 30s budget.
+    val t = Trickle(buf("a".repeat(25), "\n", "b".repeat(5)), msPerByte = 1_000)
+    val r = trickleReader(t, headerMs = 30_000, bodyMs = 30_000)
+    assertEquals("a".repeat(25), r.readLine())
+    assertArrayEquals("bbbbb".toByteArray(), r.readBodyBytes(5))
+  }
+
   // ---- HttpRequestReader.readBodyBytes ----
 
   @Test
@@ -397,5 +463,40 @@ class RelaisHttpIoTest {
       .getJSONArray("messages").getJSONObject(0)
       .getJSONArray("content").getJSONObject(1).getJSONObject("image_url").getString("url")
     assertTrue("params stripped + lowercased", paramMime.startsWith("data:image/webp;base64,"))
+  }
+
+  // ---- withWriteDeadline ----
+
+  @Test(timeout = 20_000) // without the watchdog the write blocks forever; fail instead of hanging
+  fun `withWriteDeadline unblocks a write to a peer that never reads`() {
+    val scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+    java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress()).use { server ->
+      java.net.Socket(server.inetAddress, server.localPort).use { client ->
+        server.accept().use { _ -> // accepted but never read: the send/receive buffers fill and write() blocks
+          val started = System.nanoTime()
+          val failed = runCatching {
+            withWriteDeadline(scheduler, client, timeoutMs = 300) {
+              client.getOutputStream().write(ByteArray(64 * 1024 * 1024))
+            }
+          }.isFailure
+          val elapsedMs = (System.nanoTime() - started) / 1_000_000
+          assertTrue("blocked write must fail, not hang", failed)
+          assertTrue("unblocked near the deadline, took ${elapsedMs}ms", elapsedMs < 10_000)
+          assertTrue(client.isClosed)
+        }
+      }
+    }
+    scheduler.shutdownNow()
+  }
+
+  @Test
+  fun `withWriteDeadline leaves the target open when the write finishes in time`() {
+    val scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+    var closed = false
+    val target = java.io.Closeable { closed = true }
+    assertEquals(42, withWriteDeadline(scheduler, target, timeoutMs = 200) { 42 })
+    Thread.sleep(400) // past the deadline: the cancelled watchdog must not fire
+    assertFalse(closed)
+    scheduler.shutdownNow()
   }
 }

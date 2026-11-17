@@ -76,7 +76,14 @@ import org.json.JSONObject
 private const val TAG = "RelaisHttpServer"
 // Retry-After for a model swap, or a load already in flight (#180/#347): roughly one model load.
 private const val MODEL_SWAP_RETRY_AFTER_SECONDS = 25
-private const val SOCKET_TIMEOUT_MS = 15_000 // read timeout: bounds slow/idle clients (slowloris)
+private const val SOCKET_TIMEOUT_MS = 15_000 // per-read timeout: bounds idle clients
+// Total read budgets (slow trickle: one byte per read never trips SOCKET_TIMEOUT_MS). The header budget
+// covers request line + headers from connect; the body budget starts at the body read and allows a
+// 32 MB upload at ~270 KB/s.
+private const val HEADER_READ_DEADLINE_MS = 30_000L
+private const val BODY_READ_DEADLINE_MS = 120_000L
+// A buffered response write that stalls this long (peer stopped reading) closes the socket.
+private const val RESPONSE_WRITE_TIMEOUT_MS = 30_000L
 private const val MAX_CONNECTIONS = 16 // cap worker threads (single-engine node serializes anyway)
 
 // How long stop() waits for the accept thread to exit before giving up. Normally microseconds —
@@ -233,6 +240,9 @@ class RelaisHttpServer(
   val isListening: Boolean
     get() = running && serverSocket?.isClosed == false
   private val pool = Executors.newFixedThreadPool(MAX_CONNECTIONS)
+  // Fires socket closes for stalled response writes ([withWriteDeadline]); daemon so it never pins the VM.
+  private val writeWatchdog =
+    Executors.newSingleThreadScheduledExecutor { Thread(it, "relais-write-watchdog").apply { isDaemon = true } }
   @Volatile private var running = false
   private val apiKey by lazy { RelaisConfig.apiKey(context) }
   private val rateLimiter = RateLimiter(RATE_LIMIT, RATE_WINDOW_MS)
@@ -324,7 +334,7 @@ class RelaisHttpServer(
       var requestLineRead = false
       try {
         sock.soTimeout = SOCKET_TIMEOUT_MS // don't let an idle/slow client hold a worker thread
-        val reader = HttpRequestReader(sock.getInputStream())
+        val reader = HttpRequestReader(sock.getInputStream(), HEADER_READ_DEADLINE_MS, BODY_READ_DEADLINE_MS)
         val requestLine = reader.readLine() ?: return
         requestLineRead = true
         val parts = requestLine.split(" ")
@@ -699,6 +709,10 @@ class RelaisHttpServer(
         Log.w(TAG, "request/header line too long; closing")
         RelaisMetrics.recordRequest(endpoint, 431)
         runCatching { respond(sock, 431, RelaisError.json("header too large", RelaisError.INVALID_REQUEST)) }
+      } catch (e: HttpReadDeadlineException) {
+        Log.w(TAG, "${e.message}; closing")
+        RelaisMetrics.recordRequest(endpoint, 408)
+        runCatching { respond(sock, 408, RelaisError.json("request timeout", RelaisError.INVALID_REQUEST)) }
       } catch (e: Exception) {
         // Non-null iff `e` is a retryable model state (the sealed RetryableModelUnavailableException):
         // #352, a swap won the engine lock after this request was classified; #362, the configured
@@ -2292,6 +2306,7 @@ class RelaisHttpServer(
       401 -> "Unauthorized"
       403 -> "Forbidden"
       404 -> "Not Found"
+      408 -> "Request Timeout"
       413 -> "Payload Too Large"
       429 -> "Too Many Requests"
       431 -> "Request Header Fields Too Large"
@@ -2326,9 +2341,11 @@ class RelaisHttpServer(
     head.append("Content-Length: ${payload.size}\r\nConnection: close\r\n")
     extraHeaders.forEach { head.append(it).append("\r\n") }
     head.append("\r\n")
-    out.write(head.toString().toByteArray())
-    out.write(payload)
-    out.flush()
+    withWriteDeadline(writeWatchdog, sock, RESPONSE_WRITE_TIMEOUT_MS) {
+      out.write(head.toString().toByteArray())
+      out.write(payload)
+      out.flush()
+    }
   }
 
   /**
@@ -2349,6 +2366,7 @@ class RelaisHttpServer(
     acceptThread = null
     serverSocket = null
     pool.shutdownNow()
+    writeWatchdog.shutdownNow()
     Log.i(TAG, "Stopped")
   }
 }
