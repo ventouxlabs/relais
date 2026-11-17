@@ -67,8 +67,8 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.Executors
 import javax.net.ssl.SSLHandshakeException
-import javax.net.ssl.SSLServerSocketFactory
 import javax.net.ssl.SSLProtocolException
+import javax.net.ssl.SSLSocketFactory
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -78,8 +78,9 @@ private const val TAG = "RelaisHttpServer"
 private const val MODEL_SWAP_RETRY_AFTER_SECONDS = 25
 private const val SOCKET_TIMEOUT_MS = 15_000 // per-read timeout: bounds idle clients
 // Total read budgets (slow trickle: one byte per read never trips SOCKET_TIMEOUT_MS). The header budget
-// covers request line + headers from connect; the body budget starts at the body read and allows a
-// 32 MB upload at ~270 KB/s.
+// covers the TLS handshake + request line + headers from connect; the body budget starts at the body
+// read and allows a 32 MB upload at ~270 KB/s. Enforced by wall-clock watchdogs on the plain transport
+// (plus READ_WATCHDOG_GRACE_MS), so a TLS drip that never completes a record is cut off too.
 private const val HEADER_READ_DEADLINE_MS = 30_000L
 private const val BODY_READ_DEADLINE_MS = 120_000L
 // A buffered response write that stalls this long (peer stopped reading) closes the socket.
@@ -216,7 +217,8 @@ class RelaisHttpServer(
   private val port: Int = 8080,
   private val tls: Boolean = false,
   private val bindAddr: String = "127.0.0.1", // safe default; callers opt into 0.0.0.0 for TLS (C1)
-  private val socketFactory: SSLServerSocketFactory? = null,
+  // Server-mode TLS layer applied to each accepted plain socket (see [layerServerTls]).
+  private val socketFactory: SSLSocketFactory? = null,
 ) {
   // Volatile: written on the accept thread, read by stop() on whatever thread called it. Without
   // it a stop() racing startup can read a stale null and close nothing.
@@ -240,9 +242,14 @@ class RelaisHttpServer(
   val isListening: Boolean
     get() = running && serverSocket?.isClosed == false
   private val pool = Executors.newFixedThreadPool(MAX_CONNECTIONS)
-  // Fires socket closes for stalled response writes ([withWriteDeadline]); daemon so it never pins the VM.
-  private val writeWatchdog =
-    Executors.newSingleThreadScheduledExecutor { Thread(it, "relais-write-watchdog").apply { isDaemon = true } }
+  // Fires transport closes for stalled reads and writes ([withCloseDeadline]); daemon so it never pins
+  // the VM. One thread is enough because it only ever closes plain sockets, which never block.
+  private val socketWatchdog =
+    Executors.newSingleThreadScheduledExecutor { Thread(it, "relais-socket-watchdog").apply { isDaemon = true } }
+  // Served socket (TLS layer or plain) -> its plain TCP transport, so [respondBytes] can arm its write
+  // watchdog on the transport. Identity-keyed: entries live exactly as long as [handle] runs.
+  private val transports: MutableMap<java.net.Socket, java.net.Socket> =
+    java.util.Collections.synchronizedMap(java.util.IdentityHashMap())
   @Volatile private var running = false
   private val apiKey by lazy { RelaisConfig.apiKey(context) }
   private val rateLimiter = RateLimiter(RATE_LIMIT, RATE_WINDOW_MS)
@@ -279,10 +286,13 @@ class RelaisHttpServer(
    */
   fun start() {
     if (running) return
+    // Always a plain listener: TLS is layered per connection in [handle] so the watchdogs can close
+    // the transport under a stuck TLS read or write (see [layerServerTls]).
+    val tlsLayer = socketFactory ?: RelaisTls.serverTlsLayer(context, tls)
     // bindOrClose, not apply: a bind that throws must not leave the socket it created open. The
     // retry below makes that leak unbounded — see the function's KDoc.
     val bound =
-      bindOrClose(socketFactory?.createServerSocket() ?: RelaisTls.buildServerSocket(context, tls)) {
+      bindOrClose(ServerSocket()) {
         it.reuseAddress = true
         it.bind(InetSocketAddress(bindAddr, port))
       }
@@ -301,7 +311,7 @@ class RelaisHttpServer(
                 try {
                   while (running) {
                     val client = it.accept()
-                    pool.execute { handle(client) }
+                    pool.execute { handle(client, tlsLayer) }
                   }
                 } catch (e: Exception) {
                   if (running) Log.e(TAG, "Server loop error", e)
@@ -326,15 +336,48 @@ class RelaisHttpServer(
 
   // TLS keystore/cert minting moved to [RelaisTls] (#173); LAN-IP discovery to [RelaisLanIp].
 
-  private fun handle(client: java.net.Socket) {
-    client.use { sock ->
+  private fun handle(raw: java.net.Socket, tlsLayer: SSLSocketFactory?) {
+    raw.use {
+      val sock =
+        try {
+          tlsLayer?.let { layerServerTls(it, raw) } ?: raw
+        } catch (e: Exception) {
+          Log.w(TAG, "TLS layering failed; closing", e)
+          return
+        }
+      transports[sock] = raw
+      try {
+        serve(sock, raw)
+      } finally {
+        transports.remove(sock)
+        // SSLSocket.close() sends close_notify, which can block on a peer that stopped reading.
+        if (sock !== raw) {
+          withCloseDeadline(socketWatchdog, raw, RESPONSE_WRITE_TIMEOUT_MS) { runCatching { sock.close() } }
+        }
+      }
+    }
+  }
+
+  /** Serves one request on [sock] (TLS layer or plain); [raw] is its plain TCP transport. */
+  private fun serve(sock: java.net.Socket, raw: java.net.Socket) {
+    run {
       var endpoint = "other"
       // A TLS socket performs its handshake lazily, on the first read. Keep this separate from the
       // endpoint label: before a request line exists, the peer has not made an HTTP request at all.
       var requestLineRead = false
       try {
         sock.soTimeout = SOCKET_TIMEOUT_MS // don't let an idle/slow client hold a worker thread
-        val reader = HttpRequestReader(sock.getInputStream(), HEADER_READ_DEADLINE_MS, BODY_READ_DEADLINE_MS)
+        // The read watchdogs close `raw`: a TLS read blocks for a whole record, so the between-reads
+        // deadline check alone can't stop a byte-by-byte drip (see [HttpRequestReader]). Deferred so
+        // Conscrypt's handshake-in-getInputStream() runs under the header watchdog.
+        val reader =
+          HttpRequestReader(
+            DeferredSocketInputStream(sock),
+            HEADER_READ_DEADLINE_MS,
+            BODY_READ_DEADLINE_MS,
+            watchdog = socketWatchdog,
+            transport = raw,
+          )
         val requestLine = reader.readLine() ?: return
         requestLineRead = true
         val parts = requestLine.split(" ")
@@ -710,6 +753,7 @@ class RelaisHttpServer(
         RelaisMetrics.recordRequest(endpoint, 431)
         runCatching { respond(sock, 431, RelaisError.json("header too large", RelaisError.INVALID_REQUEST)) }
       } catch (e: HttpReadDeadlineException) {
+        // If the read watchdog fired, the transport is already closed and this 408 is dropped.
         Log.w(TAG, "${e.message}; closing")
         RelaisMetrics.recordRequest(endpoint, 408)
         runCatching { respond(sock, 408, RelaisError.json("request timeout", RelaisError.INVALID_REQUEST)) }
@@ -2341,7 +2385,7 @@ class RelaisHttpServer(
     head.append("Content-Length: ${payload.size}\r\nConnection: close\r\n")
     extraHeaders.forEach { head.append(it).append("\r\n") }
     head.append("\r\n")
-    withWriteDeadline(writeWatchdog, sock, RESPONSE_WRITE_TIMEOUT_MS) {
+    withCloseDeadline(socketWatchdog, transports[sock] ?: sock, RESPONSE_WRITE_TIMEOUT_MS) {
       out.write(head.toString().toByteArray())
       out.write(payload)
       out.flush()
@@ -2366,7 +2410,7 @@ class RelaisHttpServer(
     acceptThread = null
     serverSocket = null
     pool.shutdownNow()
-    writeWatchdog.shutdownNow()
+    socketWatchdog.shutdownNow()
     Log.i(TAG, "Stopped")
   }
 }

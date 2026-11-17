@@ -17,7 +17,6 @@ import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
 import java.net.InetAddress
-import java.net.ServerSocket
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -31,7 +30,6 @@ import java.util.Base64
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLParameters
-import javax.net.ssl.SSLServerSocketFactory
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManagerFactory
@@ -151,12 +149,14 @@ internal object RelaisTls {
    * between calls, leaving IPv4 serving the old leaf while IPv6 serves the replacement.
    */
   internal data class SocketFactories(
-    val server: SSLServerSocketFactory,
+    /** Server-mode layer for accepted plain sockets ([layerServerTls]); same context as [localClient]. */
+    val server: SSLSocketFactory,
     val localClient: SSLSocketFactory,
   )
 
   /**
-   * Plain (tls=false) or TLS server socket.
+   * The server-mode TLS layer for accepted plain sockets ([layerServerTls]), or null for a plain
+   * (tls=false) listener.
    *
    * A **software** RSA leaf key is used deliberately: AndroidKeyStore keys (RSA and EC) cannot sign
    * the TLS server handshake through conscrypt's native upcall on-device, so the key is generated
@@ -167,9 +167,9 @@ internal object RelaisTls {
    * keygen on a cold start, and the plain (`tls = false`) loopback listener must not pay it — hence
    * the short-circuit on the first line, which predates this feature and must stay.
    */
-  fun buildServerSocket(context: Context, tls: Boolean): ServerSocket {
-    if (!tls) return ServerSocket()
-    return socketFactories(context).server.createServerSocket()
+  fun serverTlsLayer(context: Context, tls: Boolean): SSLSocketFactory? {
+    if (!tls) return null
+    return socketFactories(context).server
   }
 
   /** Builds [SocketFactories] from one load-or-mint transaction. */
@@ -186,7 +186,7 @@ internal object RelaisTls {
     }
     val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(trustStore) }
     val ctx = SSLContext.getInstance("TLS").apply { init(kmf.keyManagers, tmf.trustManagers, null) }
-    return SocketFactories(server = ctx.serverSocketFactory, localClient = ctx.socketFactory)
+    return SocketFactories(server = ctx.socketFactory, localClient = ctx.socketFactory)
   }
 
   /**
@@ -343,7 +343,7 @@ internal object RelaisTls {
    *
    * **`@Synchronized` makes the whole load → mint → store sequence one transaction, and that is
    * the point rather than a precaution.** This has two genuinely concurrent callers that share no
-   * other lock: the accept thread inside `buildServerSocket`, and the LAN re-issue thread. When
+   * other lock: the accept thread inside `serverTlsLayer`, and the LAN re-issue thread. When
    * DHCP lands during the initial HTTPS startup, both could observe an absent TLS keystore and
    * each mint a *different* leaf key pair — one of which then gets served while the other is
    * what the store, and therefore the reported NODE KEY PIN, contains. Or neither, and a half
