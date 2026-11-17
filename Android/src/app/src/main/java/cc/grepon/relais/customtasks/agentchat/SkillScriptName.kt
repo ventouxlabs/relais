@@ -12,6 +12,7 @@
 
 package cc.grepon.relais.customtasks.agentchat
 
+import java.io.File
 import java.net.URLDecoder
 
 /**
@@ -37,4 +38,15 @@ object SkillScriptName {
     if (current.startsWith("/") || current.startsWith("\\")) return false
     return current.split('/', '\\').none { it == ".." || it == "." }
   }
+
+  /** Resolves [name] inside [dir], or null if it is unsafe or its canonical path leaves [dir]. */
+  fun resolveIn(dir: File, name: String): File? {
+    if (!isSafe(name)) return null
+    val file = File(dir, name)
+    val root = dir.canonicalFile
+    return if (file.canonicalFile.toPath().startsWith(root.toPath())) file else null
+  }
+
+  /** Checks a relative webview url: its path (before any `?`/`#`) must be a safe name. */
+  fun isSafeAssetUrl(url: String): Boolean = isSafe(url.substringBefore('?').substringBefore('#'))
 }
