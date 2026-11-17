@@ -22,7 +22,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
+import java.io.Closeable
 import java.io.InputStream
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 /** Cap on a single request/header line. Matches the server's whole-header-block cap (16 KB), so one
  *  line can never exceed what the header block could hold anyway. */
@@ -30,6 +33,33 @@ internal const val MAX_HTTP_LINE_BYTES = 16 * 1024
 
 /** Thrown by [HttpRequestReader.readLine] when a line exceeds [MAX_HTTP_LINE_BYTES]. */
 class HttpLineTooLongException : java.io.IOException("HTTP line exceeds $MAX_HTTP_LINE_BYTES bytes")
+
+/** Thrown by [HttpRequestReader] when the header block or the body takes longer than its total read
+ *  deadline. The per-read socket timeout alone can't stop a peer that trickles one byte per read. */
+class HttpReadDeadlineException(phase: String) : java.io.IOException("HTTP $phase read deadline exceeded")
+
+/** "No deadline" sentinel for [HttpRequestReader]'s deadline parameters. */
+internal const val NO_READ_DEADLINE = Long.MAX_VALUE
+
+/**
+ * Runs [block] (a socket write) with a watchdog that closes [target] after [timeoutMs]. A blocking
+ * socket write has no timeout of its own, so a peer that stops reading would hold the worker thread
+ * forever; closing the socket makes the blocked write throw. The watchdog is cancelled when [block]
+ * returns or throws.
+ */
+internal fun <T> withWriteDeadline(
+  scheduler: ScheduledExecutorService,
+  target: Closeable,
+  timeoutMs: Long,
+  block: () -> T,
+): T {
+  val watchdog = scheduler.schedule({ runCatching { target.close() } }, timeoutMs, TimeUnit.MILLISECONDS)
+  try {
+    return block()
+  } finally {
+    watchdog.cancel(false)
+  }
+}
 
 /**
  * Byte-oriented HTTP request reader for [RelaisHttpServer]. Exists because the previous
@@ -41,9 +71,27 @@ class HttpLineTooLongException : java.io.IOException("HTTP line exceeds $MAX_HTT
  * [readLine] and [readBodyBytes] share one [BufferedInputStream], so a body read continues exactly
  * where the header loop stopped. Pure I/O over an [InputStream] — unit-testable on the JVM with a
  * [java.io.ByteArrayInputStream] ([RelaisHttpIoTest]).
+ *
+ * Total read deadlines: every [readLine] call counts against one [headerDeadlineMs] budget that starts
+ * at construction (so it covers the request line plus the whole header block), and each [readBodyBytes]
+ * call gets its own [bodyDeadlineMs] budget starting when it is called (the body may be read after an
+ * admission wait). Both throw [HttpReadDeadlineException]. The check runs between reads, so the real
+ * bound is the deadline plus at most one per-read socket timeout. [nowMs] is injectable for tests.
  */
-class HttpRequestReader(input: InputStream) {
+class HttpRequestReader(
+  input: InputStream,
+  private val headerDeadlineMs: Long = NO_READ_DEADLINE,
+  private val bodyDeadlineMs: Long = NO_READ_DEADLINE,
+  private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+) {
   private val stream = BufferedInputStream(input)
+  private val headerStartMs = nowMs()
+
+  private fun checkDeadline(startMs: Long, deadlineMs: Long, phase: String) {
+    if (deadlineMs != NO_READ_DEADLINE && nowMs() - startMs > deadlineMs) {
+      throw HttpReadDeadlineException(phase)
+    }
+  }
 
   /**
    * Reads one line: bytes up to (and consuming) the next `\n`, with a trailing `\r` stripped, decoded
@@ -58,6 +106,7 @@ class HttpRequestReader(input: InputStream) {
     var sawAny = false
     while (true) {
       val b = stream.read()
+      checkDeadline(headerStartMs, headerDeadlineMs, "header")
       if (b < 0) {
         if (!sawAny) return null // EOF before any byte -> no more lines
         break // EOF terminates the final (newline-less) line
@@ -81,6 +130,7 @@ class HttpRequestReader(input: InputStream) {
    */
   fun readBodyBytes(length: Int): ByteArray {
     if (length <= 0) return ByteArray(0)
+    val startMs = nowMs()
     val cap = minOf(length, MAX_BODY_BYTES)
     val out = ByteArrayOutputStream(minOf(cap, 64 * 1024))
     val chunk = ByteArray(8192)
@@ -88,6 +138,7 @@ class HttpRequestReader(input: InputStream) {
     while (remaining > 0) {
       val r = stream.read(chunk, 0, minOf(chunk.size, remaining))
       if (r < 0) break
+      checkDeadline(startMs, bodyDeadlineMs, "body")
       out.write(chunk, 0, r)
       remaining -= r
     }
