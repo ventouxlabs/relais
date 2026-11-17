@@ -234,7 +234,8 @@ class RelaisHttpServer(
     get() = running && serverSocket?.isClosed == false
   private val pool = Executors.newFixedThreadPool(MAX_CONNECTIONS)
   @Volatile private var running = false
-  private val apiKey by lazy { RelaisConfig.apiKey(context) }
+  // Read per call (not cached) so RelaisConfig.rotateApiKey takes effect without a restart.
+  private val apiKey: String get() = RelaisConfig.apiKey(context)
   private val rateLimiter = RateLimiter(RATE_LIMIT, RATE_WINDOW_MS)
   // Separate state, not just a separate ceiling: an auth-exempt poll must not evict or consume the
   // authenticated budget's window. Note this is a second map an unauthenticated caller can populate

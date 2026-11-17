@@ -170,11 +170,20 @@ object RelaisConfig {
   }
 
   /** Stable per-install API key; generated and persisted (encrypted) on first access. */
-  fun apiKey(context: Context): String {
-    val sp = securePrefs(context)
-    sp.getString(KEY_API, null)?.let {
-      return it
-    }
+  fun apiKey(context: Context): String = apiKeyIn(securePrefs(context))
+
+  /**
+   * Replaces the API key with a fresh one and returns it. The old key stops authenticating
+   * immediately (HTTP server and intent entry points read [apiKey] per request); clients must be
+   * reconfigured with the new key.
+   */
+  fun rotateApiKey(context: Context): String = rotateApiKeyIn(securePrefs(context))
+
+  // Store-level seams so the key lifecycle is unit-testable without the AndroidKeystore.
+  internal fun apiKeyIn(sp: SharedPreferences): String =
+    sp.getString(KEY_API, null) ?: rotateApiKeyIn(sp)
+
+  internal fun rotateApiKeyIn(sp: SharedPreferences): String {
     val key = UUID.randomUUID().toString().replace("-", "")
     sp.edit().putString(KEY_API, key).apply()
     return key

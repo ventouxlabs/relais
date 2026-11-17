@@ -30,7 +30,7 @@ internal fun controlTokenMatches(presented: String?, apiKey: String): Boolean =
 
 /**
  * Key-gated adb trampoline for the Relais node — no UI, no launcher icon. Honors
- * `--es cmd start|stop` (and optional `--es modelId <id>` / `--es hfToken <t>`) gated behind the
+ * `--es cmd start|stop|rotate_key` (and optional `--es modelId <id>` / `--es hfToken <t>`) gated behind the
  * node's API key, then forwards to [MainActivity], which hosts the unified shell (the control
  * panel now lives in the shell's dashboard destination, not here).
  *
@@ -51,6 +51,8 @@ class RelaisControlActivity : ComponentActivity() {
     when (cmd) {
       "start" -> RelaisNodeService.start(this)
       "stop" -> RelaisNodeService.stop(this)
+      // Invalidates the presented token; the new key is shown in the dashboard's control panel.
+      "rotate_key" -> RelaisConfig.rotateApiKey(this)
     }
   }
 
