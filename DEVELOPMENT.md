@@ -45,6 +45,7 @@ Hand-maintained — **not** derived from the workflow, so a regeneration must no
 | `./gradlew :app:installFullOpenDebugAndroidTest` | Install the probe/test APK (needed before `am instrument`) |
 | `./gradlew :app:compileFullOpenDebugAndroidTestKotlin` | Compile the on-device probe suite (`src/androidTest`; not run in CI) |
 | `./gradlew :app:clean` | Fixes stale-Hilt failures after switching branches |
+| `./gradlew --write-verification-metadata sha256 <tasks>` | Regenerate `Android/src/gradle/verification-metadata.xml` after a dependency bump (Gradle fails the build on any artifact, incl. the JitPack AARs, whose sha256 is not pinned there) |
 
 > ⚠️ `testDebugUnitTest` and `assembleDebug` are **ambiguous** across the two flavor dimensions — always
 > name the variant. Building/testing more than one heavy variant in a single invocation can OOM the 2 GB
