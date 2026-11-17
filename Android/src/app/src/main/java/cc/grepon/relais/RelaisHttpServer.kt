@@ -350,9 +350,11 @@ class RelaisHttpServer(
         serve(sock, raw)
       } finally {
         transports.remove(sock)
-        // SSLSocket.close() sends close_notify, which can block on a peer that stopped reading.
+        // SSLSocket.close() sends close_notify, which can block on a peer that stopped reading. The
+        // outer runCatching: after stop() the watchdog rejects schedule(), and this finally is outside
+        // every catch, so that would escape a pool thread (and kill the process); raw.use still closes.
         if (sock !== raw) {
-          withCloseDeadline(socketWatchdog, raw, RESPONSE_WRITE_TIMEOUT_MS) { runCatching { sock.close() } }
+          runCatching { withCloseDeadline(socketWatchdog, raw, RESPONSE_WRITE_TIMEOUT_MS) { runCatching { sock.close() } } }
         }
       }
     }
@@ -2380,12 +2382,13 @@ class RelaisHttpServer(
     contentType: String,
     extraHeaders: List<String> = emptyList(),
   ) {
-    val out: OutputStream = sock.getOutputStream()
     val head = StringBuilder("HTTP/1.1 $status ${reason(status)}\r\nContent-Type: $contentType\r\n")
     head.append("Content-Length: ${payload.size}\r\nConnection: close\r\n")
     extraHeaders.forEach { head.append(it).append("\r\n") }
     head.append("\r\n")
     withCloseDeadline(socketWatchdog, transports[sock] ?: sock, RESPONSE_WRITE_TIMEOUT_MS) {
+      // Inside the watchdog: Conscrypt's getOutputStream() can wait for the handshake.
+      val out: OutputStream = sock.getOutputStream()
       out.write(head.toString().toByteArray())
       out.write(payload)
       out.flush()
