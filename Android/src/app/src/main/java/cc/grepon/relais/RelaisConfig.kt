@@ -374,7 +374,7 @@ object RelaisConfig {
    *
    * **`@Synchronized` is load-bearing, not decoration.** This is read-then-generate-then-write with
    * no atomicity of its own, and it now has genuinely concurrent callers: the accept thread minting
-   * in `buildServerSocket` and the LAN re-issue thread. Two callers both reading null would each
+   * in `serverTlsLayer` and the LAN re-issue thread. Two callers both reading null would each
    * generate a different UUID, last write wins — and the keystore written under the loser's
    * password becomes **permanently unreadable**, which routes straight into regenerating the leaf
    * key and silently changing the NODE KEY PIN every pinned client depends on.

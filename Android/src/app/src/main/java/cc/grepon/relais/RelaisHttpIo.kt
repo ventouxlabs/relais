@@ -24,8 +24,11 @@ import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.InputStream
+import java.net.Socket
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 /** Cap on a single request/header line. Matches the server's whole-header-block cap (16 KB), so one
  *  line can never exceed what the header block could hold anyway. */
@@ -41,13 +44,22 @@ class HttpReadDeadlineException(phase: String) : java.io.IOException("HTTP $phas
 /** "No deadline" sentinel for [HttpRequestReader]'s deadline parameters. */
 internal const val NO_READ_DEADLINE = Long.MAX_VALUE
 
+/** Slack past a read deadline before the read watchdog closes the transport, so a peer that is still
+ *  delivering bytes gets the in-band 408 from the between-reads check instead of a silent close. */
+internal const val READ_WATCHDOG_GRACE_MS = 2_000L
+
 /**
- * Runs [block] (a socket write) with a watchdog that closes [target] after [timeoutMs]. A blocking
- * socket write has no timeout of its own, so a peer that stops reading would hold the worker thread
- * forever; closing the socket makes the blocked write throw. The watchdog is cancelled when [block]
- * returns or throws.
+ * Runs [block] (a blocking socket read or write) with a watchdog that closes [target] after
+ * [timeoutMs]. A blocking socket write has no timeout of its own, and a blocking TLS read only returns
+ * once a whole TLS record has arrived (the per-read soTimeout only fires on a gap between bytes), so a
+ * slow peer could hold the worker thread for as long as it likes; closing the socket makes the blocked
+ * call throw. The watchdog is cancelled when [block] returns or throws.
+ *
+ * [target] must be the plain TCP transport, never an [javax.net.ssl.SSLSocket]: `SSLSocket.close()`
+ * tries to send close_notify and can block behind the very write it is meant to unblock, which on a
+ * single-thread [scheduler] would also stall every later watchdog. See [layerServerTls].
  */
-internal fun <T> withWriteDeadline(
+internal fun <T> withCloseDeadline(
   scheduler: ScheduledExecutorService,
   target: Closeable,
   timeoutMs: Long,
@@ -58,6 +70,38 @@ internal fun <T> withWriteDeadline(
     return block()
   } finally {
     watchdog.cancel(false)
+  }
+}
+
+/**
+ * Wraps an accepted plain socket [raw] in a server-mode TLS socket from [factory] (autoClose: closing
+ * the TLS socket closes [raw]). Accepting plain and layering, instead of accepting from an
+ * `SSLServerSocket`, is what keeps [raw] reachable, so the watchdogs in [withCloseDeadline] can close
+ * the transport underneath a TLS read or write that is stuck. The handshake still runs lazily on the
+ * first read.
+ */
+internal fun layerServerTls(factory: SSLSocketFactory, raw: Socket): SSLSocket =
+  (factory.createSocket(raw, raw.inetAddress.hostAddress, raw.port, true) as SSLSocket).apply {
+    useClientMode = false
+  }
+
+/**
+ * [sock]'s input stream, opened on the first read instead of now. Conscrypt (Android's TLS provider)
+ * runs the whole handshake inside `SSLSocket.getInputStream()`, so opening it eagerly would block
+ * before any [HttpRequestReader] watchdog is armed. Deferred, the handshake runs inside the first
+ * [HttpRequestReader.readLine] and counts against the header deadline.
+ */
+internal class DeferredSocketInputStream(sock: Socket) : InputStream() {
+  private val input = lazy { sock.getInputStream() }
+
+  override fun read(): Int = input.value.read()
+
+  override fun read(b: ByteArray, off: Int, len: Int): Int = input.value.read(b, off, len)
+
+  override fun available(): Int = if (input.isInitialized()) input.value.available() else 0
+
+  override fun close() {
+    if (input.isInitialized()) input.value.close()
   }
 }
 
@@ -75,14 +119,27 @@ internal fun <T> withWriteDeadline(
  * Total read deadlines: every [readLine] call counts against one [headerDeadlineMs] budget that starts
  * at construction (so it covers the request line plus the whole header block), and each [readBodyBytes]
  * call gets its own [bodyDeadlineMs] budget starting when it is called (the body may be read after an
- * admission wait). Both throw [HttpReadDeadlineException]. The check runs between reads, so the real
- * bound is the deadline plus at most one per-read socket timeout. [nowMs] is injectable for tests.
+ * admission wait). Both throw [HttpReadDeadlineException].
+ *
+ * Two mechanisms enforce them. A check between reads gives a peer that is still delivering bytes an
+ * in-band 408. That check alone is not enough: a TLS `read()` only returns once a whole handshake
+ * message or TLS record (up to 16 KB) has arrived, and the per-read soTimeout only fires on a gap
+ * between bytes, so a byte-by-byte drip would hold one read open for as long as the peer likes. So,
+ * when [watchdog] and [transport] are given, every [readLine] and [readBodyBytes] call also arms a
+ * wall-clock watchdog for its remaining budget plus [watchdogGraceMs] that closes [transport] (the
+ * plain TCP socket, never the TLS layer; see [withCloseDeadline]). The watchdog is cancelled when the
+ * call returns, so it can never outlive the read and cut off the response that follows. Once it has
+ * fired the socket is closed and no 408 can be sent; that is the intended outcome for a slowloris peer.
+ * [nowMs] is injectable for tests.
  */
 class HttpRequestReader(
   input: InputStream,
   private val headerDeadlineMs: Long = NO_READ_DEADLINE,
   private val bodyDeadlineMs: Long = NO_READ_DEADLINE,
   private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+  private val watchdog: ScheduledExecutorService? = null,
+  private val transport: Closeable? = null,
+  private val watchdogGraceMs: Long = READ_WATCHDOG_GRACE_MS,
 ) {
   private val stream = BufferedInputStream(input)
   private val headerStartMs = nowMs()
@@ -90,6 +147,22 @@ class HttpRequestReader(
   private fun checkDeadline(startMs: Long, deadlineMs: Long, phase: String) {
     if (deadlineMs != NO_READ_DEADLINE && nowMs() - startMs > deadlineMs) {
       throw HttpReadDeadlineException(phase)
+    }
+  }
+
+  /** Runs one read call under the wall-clock watchdog for what is left of its budget (see class KDoc).
+   *  A read the watchdog broke surfaces as [HttpReadDeadlineException], not as a bare socket error. */
+  private fun <T> guarded(startMs: Long, deadlineMs: Long, phase: String, read: () -> T): T {
+    checkDeadline(startMs, deadlineMs, phase)
+    val scheduler = watchdog
+    val target = transport
+    if (scheduler == null || target == null || deadlineMs == NO_READ_DEADLINE) return read()
+    val remainingMs = deadlineMs - (nowMs() - startMs)
+    return try {
+      withCloseDeadline(scheduler, target, remainingMs + watchdogGraceMs, read)
+    } catch (e: java.io.IOException) {
+      checkDeadline(startMs, deadlineMs, phase)
+      throw e
     }
   }
 
@@ -101,7 +174,10 @@ class HttpRequestReader(
    * [HttpLineTooLongException] once a line passes [MAX_HTTP_LINE_BYTES] without a newline, so a
    * hostile client can't make the worker buffer an unbounded line.
    */
-  fun readLine(): String? {
+  fun readLine(): String? =
+    guarded(headerStartMs, headerDeadlineMs, "header") { readLineUnguarded() }
+
+  private fun readLineUnguarded(): String? {
     val buf = ByteArrayOutputStream(64)
     var sawAny = false
     while (true) {
@@ -131,6 +207,10 @@ class HttpRequestReader(
   fun readBodyBytes(length: Int): ByteArray {
     if (length <= 0) return ByteArray(0)
     val startMs = nowMs()
+    return guarded(startMs, bodyDeadlineMs, "body") { readBodyUnguarded(length, startMs) }
+  }
+
+  private fun readBodyUnguarded(length: Int, startMs: Long): ByteArray {
     val cap = minOf(length, MAX_BODY_BYTES)
     val out = ByteArrayOutputStream(minOf(cap, 64 * 1024))
     val chunk = ByteArray(8192)

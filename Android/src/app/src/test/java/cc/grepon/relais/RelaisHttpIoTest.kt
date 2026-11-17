@@ -465,17 +465,17 @@ class RelaisHttpIoTest {
     assertTrue("params stripped + lowercased", paramMime.startsWith("data:image/webp;base64,"))
   }
 
-  // ---- withWriteDeadline ----
+  // ---- withCloseDeadline ----
 
   @Test(timeout = 20_000) // without the watchdog the write blocks forever; fail instead of hanging
-  fun `withWriteDeadline unblocks a write to a peer that never reads`() {
+  fun `withCloseDeadline unblocks a write to a peer that never reads`() {
     val scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
     java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress()).use { server ->
       java.net.Socket(server.inetAddress, server.localPort).use { client ->
         server.accept().use { _ -> // accepted but never read: the send/receive buffers fill and write() blocks
           val started = System.nanoTime()
           val failed = runCatching {
-            withWriteDeadline(scheduler, client, timeoutMs = 300) {
+            withCloseDeadline(scheduler, client, timeoutMs = 300) {
               client.getOutputStream().write(ByteArray(64 * 1024 * 1024))
             }
           }.isFailure
@@ -490,11 +490,11 @@ class RelaisHttpIoTest {
   }
 
   @Test
-  fun `withWriteDeadline leaves the target open when the write finishes in time`() {
+  fun `withCloseDeadline leaves the target open when the write finishes in time`() {
     val scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
     var closed = false
     val target = java.io.Closeable { closed = true }
-    assertEquals(42, withWriteDeadline(scheduler, target, timeoutMs = 200) { 42 })
+    assertEquals(42, withCloseDeadline(scheduler, target, timeoutMs = 200) { 42 })
     Thread.sleep(400) // past the deadline: the cancelled watchdog must not fire
     assertFalse(closed)
     scheduler.shutdownNow()
