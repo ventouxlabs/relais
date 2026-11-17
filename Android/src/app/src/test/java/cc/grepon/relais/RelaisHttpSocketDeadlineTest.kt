@@ -22,8 +22,7 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.security.KeyStore
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
@@ -49,14 +48,14 @@ import org.junit.Test
  */
 class RelaisHttpSocketDeadlineTest {
 
-  private lateinit var scheduler: ScheduledExecutorService
+  private lateinit var scheduler: ScheduledThreadPoolExecutor
   private lateinit var listener: ServerSocket
   private val opened = mutableListOf<Socket>()
 
   @Before
   fun setUp() {
-    // Daemon threads: a RED run whose close() hangs must not pin the Gradle test JVM.
-    scheduler = Executors.newSingleThreadScheduledExecutor { Thread(it, "test-watchdog").apply { isDaemon = true } }
+    // The server's own scheduler (daemon: a RED run whose close() hangs must not pin the test JVM).
+    scheduler = newSocketWatchdog()
     listener = ServerSocket(0, 4, InetAddress.getLoopbackAddress())
   }
 
@@ -181,6 +180,34 @@ class RelaisHttpSocketDeadlineTest {
     assertTrue("blocked TLS write must fail, not hang", failed)
     assertTrue("unblocked near the deadline, took ${elapsedMs}ms", elapsedMs < 10_000)
     assertTrue(raw.isClosed)
+  }
+
+  @Test
+  fun `cancelled watchdogs leave the scheduler queue`() {
+    // Each guarded read arms a watchdog for its whole remaining budget (about 32 s for a header line).
+    // A cancelled one must be dequeued at once; left queued, a header flood keeps millions of tasks
+    // (each holding its socket) alive until their delays expire.
+    val transport = java.io.Closeable {}
+    val headers = (1..40).joinToString("") { "X-H$it: v\r\n" }
+    val request = "POST /v1/x HTTP/1.1\r\n${headers}\r\nbody!"
+    val reader =
+      HttpRequestReader(
+        request.byteInputStream(Charsets.ISO_8859_1),
+        headerDeadlineMs = 30_000,
+        bodyDeadlineMs = 120_000,
+        watchdog = scheduler,
+        transport = transport,
+      )
+    var lines = 0
+    while (!reader.readLine().isNullOrEmpty()) lines++
+    assertTrue(lines == 41)
+    assertTrue(reader.readBodyBytes(5).contentEquals("body!".toByteArray()))
+    assertTrue("cancelled watchdogs still queued: ${scheduler.queue.size}", scheduler.queue.isEmpty())
+    // Guards against a vacuous pass: a watchdog really is queued while its call runs.
+    withCloseDeadline(scheduler, transport, timeoutMs = 30_000) {
+      assertTrue("the watchdog is armed while the call runs", scheduler.queue.size == 1)
+    }
+    assertTrue(scheduler.queue.isEmpty())
   }
 
   private class Contexts(val server: SSLContext, val client: SSLContext)

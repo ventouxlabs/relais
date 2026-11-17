@@ -242,10 +242,8 @@ class RelaisHttpServer(
   val isListening: Boolean
     get() = running && serverSocket?.isClosed == false
   private val pool = Executors.newFixedThreadPool(MAX_CONNECTIONS)
-  // Fires transport closes for stalled reads and writes ([withCloseDeadline]); daemon so it never pins
-  // the VM. One thread is enough because it only ever closes plain sockets, which never block.
-  private val socketWatchdog =
-    Executors.newSingleThreadScheduledExecutor { Thread(it, "relais-socket-watchdog").apply { isDaemon = true } }
+  // Fires transport closes for stalled reads and writes ([withCloseDeadline]).
+  private val socketWatchdog = newSocketWatchdog()
   // Served socket (TLS layer or plain) -> its plain TCP transport, so [respondBytes] can arm its write
   // watchdog on the transport. Identity-keyed: entries live exactly as long as [handle] runs.
   private val transports: MutableMap<java.net.Socket, java.net.Socket> =

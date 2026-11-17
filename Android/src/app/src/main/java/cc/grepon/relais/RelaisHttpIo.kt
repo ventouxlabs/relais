@@ -26,6 +26,7 @@ import java.io.Closeable
 import java.io.InputStream
 import java.net.Socket
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
@@ -72,6 +73,16 @@ internal fun <T> withCloseDeadline(
     watchdog.cancel(false)
   }
 }
+
+/**
+ * The scheduler for [withCloseDeadline]: one daemon thread (it only ever closes plain sockets, which
+ * never block, and it must never pin the VM). Cancelled watchdogs are removed from the queue at once:
+ * every request arms one per header line, one for the body and one per write, mostly before auth, and
+ * with the JDK default each cancelled task (holding its socket) would stay queued for its full delay.
+ */
+internal fun newSocketWatchdog(): ScheduledThreadPoolExecutor =
+  ScheduledThreadPoolExecutor(1) { Thread(it, "relais-socket-watchdog").apply { isDaemon = true } }
+    .apply { removeOnCancelPolicy = true }
 
 /**
  * Wraps an accepted plain socket [raw] in a server-mode TLS socket from [factory] (autoClose: closing
