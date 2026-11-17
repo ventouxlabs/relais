@@ -60,6 +60,9 @@ private const val TAG = "AGSkillManagerVM"
 
 private const val SKILL_ALLOWLIST_URL = ""
 
+/** Shown instead of a skill webview whose relative url fails [SkillScriptName.isSafeAssetUrl]. */
+private const val BLOCKED_WEBVIEW_URL = "about:blank"
+
 val TRYOUT_CHIPS: List<SkillTryOutChip> =
   listOf(
     SkillTryOutChip(
@@ -783,6 +786,10 @@ constructor(
     if (baseUrl.isEmpty()) {
       return url
     }
+    if (!SkillScriptName.isSafeAssetUrl(url)) {
+      Log.w(TAG, "Rejected unsafe webview url for skill $skillName: $url")
+      return BLOCKED_WEBVIEW_URL
+    }
     return "$baseUrl/assets/$url"
   }
 
@@ -1088,7 +1095,11 @@ constructor(
     viewModelScope.launch(Dispatchers.IO) {
       val skillDir = context.filesDir.resolve(skill.importDirName)
       val scriptDir = File(skillDir, "scripts")
-      val scriptFile = File(scriptDir, scriptName)
+      val scriptFile = SkillScriptName.resolveIn(scriptDir, scriptName)
+      if (scriptFile == null) {
+        Log.w(TAG, "Rejected unsafe script name for deletion: $scriptName")
+        return@launch
+      }
 
       if (scriptFile.exists()) {
         try {
@@ -1138,7 +1149,11 @@ constructor(
     scriptDestDir.listFiles()?.forEach { it.delete() }
 
     for ((scriptName, content) in scriptsContent) {
-      val scriptFile = File(scriptDestDir, scriptName)
+      val scriptFile = SkillScriptName.resolveIn(scriptDestDir, scriptName)
+      if (scriptFile == null) {
+        Log.w(TAG, "Skipping unsafe script name: $scriptName")
+        continue
+      }
       Log.d(TAG, "Saving script: ${scriptFile.path}")
       try {
         scriptFile.writeText(content)
