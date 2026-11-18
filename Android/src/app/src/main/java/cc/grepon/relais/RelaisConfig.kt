@@ -185,7 +185,8 @@ object RelaisConfig {
 
   internal fun rotateApiKeyIn(sp: SharedPreferences): String {
     val key = UUID.randomUUID().toString().replace("-", "")
-    sp.edit().putString(KEY_API, key).apply()
+    // commit(), not apply(): a revoked key must not come back if the process dies before the flush.
+    check(sp.edit().putString(KEY_API, key).commit()) { "api key rotation not persisted" }
     return key
   }
 
