@@ -242,8 +242,12 @@ private fun ConfigureScreen(activity: RelaisConfigureActivity) {
       )
       OutlinedButton(
         onClick = {
-          RelaisConfig.setHfToken(ctx, hfToken.trim().ifBlank { null })
-          hfNote = "HF token saved. Restart to apply."
+          hfNote =
+            if (RelaisConfig.setHfToken(ctx, hfToken.trim().ifBlank { null })) {
+              "HF token saved. Restart to apply."
+            } else {
+              "Could not save HF token. Try again."
+            }
         },
         colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber),
       ) {
