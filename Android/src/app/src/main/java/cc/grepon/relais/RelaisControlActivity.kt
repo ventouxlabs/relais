@@ -28,6 +28,16 @@ private const val TAG = "RelaisControl"
 internal fun controlTokenMatches(presented: String?, apiKey: String): Boolean =
   presented != null && MessageDigest.isEqual(presented.toByteArray(), apiKey.toByteArray())
 
+/** Runs [rotate]; false when the new key could not be persisted (never logs key material). */
+internal fun rotateKeyOrFail(rotate: () -> Unit): Boolean =
+  try {
+    rotate()
+    true
+  } catch (e: IllegalStateException) {
+    Log.e(TAG, "rotate_key failed: ${e.message}")
+    false
+  }
+
 /**
  * Key-gated adb trampoline for the Relais node — no UI, no launcher icon. Honors
  * `--es cmd start|stop|rotate_key` (and optional `--es modelId <id>` / `--es hfToken <t>`) gated behind the
@@ -52,7 +62,7 @@ class RelaisControlActivity : ComponentActivity() {
       "start" -> RelaisNodeService.start(this)
       "stop" -> RelaisNodeService.stop(this)
       // Invalidates the presented token; the new key is shown in the dashboard's control panel.
-      "rotate_key" -> RelaisConfig.rotateApiKey(this)
+      "rotate_key" -> if (!rotateKeyOrFail { RelaisConfig.rotateApiKey(this) }) setResult(RESULT_CANCELED)
     }
   }
 

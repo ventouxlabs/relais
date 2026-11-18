@@ -42,4 +42,14 @@ class RelaisControlTokenTest {
     assertFalse(controlTokenMatches(null, "secret-key"))
     assertFalse(controlTokenMatches("", "secret-key"))
   }
+
+  @Test
+  fun `a rotation that cannot be persisted is reported as failure, not thrown`() {
+    assertFalse(rotateKeyOrFail { throw IllegalStateException("api key rotation not persisted") })
+  }
+
+  @Test
+  fun `a persisted rotation is reported as success`() {
+    assertTrue(rotateKeyOrFail { })
+  }
 }
