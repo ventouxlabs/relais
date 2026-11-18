@@ -153,12 +153,22 @@ object RelaisConfig {
   }
 
   /** Move any legacy plaintext secrets from [PREFS] into the encrypted store, once. */
-  private fun migrateSecrets(context: Context, secure: SharedPreferences) {
-    val plain = prefs(context)
+  private fun migrateSecrets(context: Context, secure: SharedPreferences) =
+    migrateSecretsBetween(prefs(context), secure)
+
+  /**
+   * commit(), not apply(): the legacy plaintext value is removed only after the secure copy is known
+   * to be on disk, so a process death (or failed write) can never lose the only copy. On failure the
+   * legacy value stays and migration retries on the next start. Secret values are never logged.
+   */
+  internal fun migrateSecretsBetween(plain: SharedPreferences, secure: SharedPreferences) {
     for (key in listOf(KEY_API, KEY_TLS_PASS, KEY_HF_TOKEN)) {
       val legacy = plain.getString(key, null) ?: continue
-      if (secure.getString(key, null) == null) secure.edit().putString(key, legacy).apply()
-      plain.edit().remove(key).apply()
+      if (secure.getString(key, null) == null && !secure.edit().putString(key, legacy).commit()) {
+        Log.e(TAG, "secure write failed for $key; keeping legacy value, will retry")
+        continue
+      }
+      if (!plain.edit().remove(key).commit()) Log.w(TAG, "could not remove legacy $key; will retry")
     }
   }
 
@@ -338,21 +348,24 @@ object RelaisConfig {
    */
   fun hfToken(context: Context): String? = securePrefs(context).getString(KEY_HF_TOKEN, null)
 
-  fun setHfToken(context: Context, value: String?) {
-    securePrefs(context).edit().putString(KEY_HF_TOKEN, value).apply()
+  /** Returns false if the token could not be persisted durably (commit, not apply). */
+  fun setHfToken(context: Context, value: String?): Boolean = setHfTokenIn(securePrefs(context), value)
+
+  internal fun setHfTokenIn(sp: SharedPreferences, value: String?): Boolean {
+    val ok = sp.edit().putString(KEY_HF_TOKEN, value).commit()
+    if (!ok) Log.e(TAG, "HF token not persisted")
+    return ok
   }
 
   /**
    * HMAC-SHA256 secret for signing batch webhook payloads (the `X-Relais-Signature` header, #14).
    * Generated + stored (encrypted) on first use; the operator reads it to configure their receiver.
    */
-  fun webhookHmacSecret(context: Context): String {
-    val sp = securePrefs(context)
-    return sp.getString(KEY_WEBHOOK_HMAC_SECRET, null)
-      ?: java.util.UUID.randomUUID().toString().replace("-", "").also {
-        sp.edit().putString(KEY_WEBHOOK_HMAC_SECRET, it).apply()
-      }
-  }
+  fun webhookHmacSecret(context: Context): String = webhookHmacSecretIn(securePrefs(context))
+
+  /** Persisted with commit(); throws (never returning an unpersisted secret) if the write fails. */
+  internal fun webhookHmacSecretIn(sp: SharedPreferences): String =
+    sp.getString(KEY_WEBHOOK_HMAC_SECRET, null) ?: persistNewSecret(sp, KEY_WEBHOOK_HMAC_SECRET)
 
   /**
    * Operator-allowlisted webhook hosts (lowercased) that bypass the SSRF https + private-IP checks —

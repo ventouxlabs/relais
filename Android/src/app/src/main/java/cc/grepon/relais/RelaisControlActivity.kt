@@ -57,7 +57,9 @@ class RelaisControlActivity : ComponentActivity() {
       return
     }
     intent.getStringExtra("modelId")?.takeIf { it.isNotBlank() }?.let { RelaisConfig.setModelId(this, it) }
-    intent.getStringExtra("hfToken")?.let { RelaisConfig.setHfToken(this, it.ifBlank { null }) }
+    intent.getStringExtra("hfToken")?.let {
+      if (!RelaisConfig.setHfToken(this, it.ifBlank { null })) Log.w(TAG, "hfToken from intent not persisted")
+    }
     when (cmd) {
       "start" -> RelaisNodeService.start(this)
       "stop" -> RelaisNodeService.stop(this)
