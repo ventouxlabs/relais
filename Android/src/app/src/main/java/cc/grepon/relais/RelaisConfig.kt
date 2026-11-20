@@ -447,6 +447,55 @@ object RelaisConfig {
     return ConfiguredModelSelection(id, ref, p.getString(KEY_MODEL_PATH, null))
   }
 
+  /** Dedicated monitor guarding the selection keys; see [withSelectionPrefs]. */
+  private val selectionLock = Any()
+
+  /**
+   * Runs [block] with the prefs handle inside [selectionLock]. The four
+   * selection keys ([KEY_MODEL_ID], [KEY_MODEL_REF], [KEY_MODEL_PATH], [KEY_PROVISIONED_MODELS])
+   * are written and captured only under it, so a [modelSelection] never straddles a writer.
+   *
+   * [selectionLock] is distinct from this object's monitor held by the secret
+   * paths (Keystore init, store reset, `commit()`), so selection users never wait behind them.
+   * Lock order: the engine `lock` -> [selectionLock], never the reverse. The prefs handle is acquired
+   * BEFORE the monitor (a test probe blocks inside `getSharedPreferences`). Inside [block]: no
+   * engine call, no network, no disk I/O beyond the prefs editor.
+   */
+  private inline fun <T> withSelectionPrefs(context: Context, block: (SharedPreferences) -> T): T {
+    val p = prefs(context)
+    return synchronized(selectionLock) { block(p) }
+  }
+
+  /**
+   * Captures id, effective ref and staged path as one coherent value. A ref naming a different id
+   * than the stored id is stale and excluded. Same lock-order rules as [withSelectionPrefs].
+   */
+  internal fun modelSelection(context: Context): ConfiguredModelSelection =
+    withSelectionPrefs(context) { p ->
+      val id = p.getString(KEY_MODEL_ID, null) ?: DEFAULT_MODEL_ID
+      val ref = RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null))?.takeIf { it.modelId == id }
+      ConfiguredModelSelection(id, ref, p.getString(KEY_MODEL_PATH, null))
+    }
+
+  /** True while the stored selection still has [selection]'s identity (the path is output, not identity). */
+  internal fun isCurrentSelection(context: Context, selection: ConfiguredModelSelection): Boolean =
+    modelSelection(context).sameIdentity(selection)
+
+  /**
+   * Applies [ref] as the device default only if nothing was chosen yet (no explicit id, no ref);
+   * check and write are one critical section, so a concurrent operator pick wins. Returns [ref] if
+   * applied, else null.
+   */
+  internal fun applyDefaultModelRefIfFresh(context: Context, ref: RelaisModelRef): RelaisModelRef? =
+    withSelectionPrefs(context) { p ->
+      if (p.contains(KEY_MODEL_ID) || RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null)) != null) {
+        null
+      } else {
+        writeRef(p, ref, clearPath = true)
+        ref
+      }
+    }
+
   /**
    * Compare-and-publish: runs [block] inside [selectionLock] only if the stored selection still has
    * [selection]'s identity, else returns null without running it. The check and everything [block]
