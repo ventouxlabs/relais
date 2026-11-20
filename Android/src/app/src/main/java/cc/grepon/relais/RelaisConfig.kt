@@ -467,6 +467,15 @@ object RelaisConfig {
       if (captureSelection(p).sameIdentity(selection)) block(p) else null
     }
 
+  /**
+   * Runs [block] with the prefs handle and the selection captured INSIDE [selectionLock], so the
+   * decision and the writes see one selection. Same rules as [ifCurrentSelection].
+   */
+  internal fun <T> withCapturedSelection(
+    context: Context,
+    block: (SharedPreferences, ConfiguredModelSelection) -> T,
+  ): T = withSelectionPrefs(context) { p -> block(p, captureSelection(p)) }
+
   /** True while the stored selection still has [selection]'s identity (the path is output, not identity). */
   internal fun isCurrentSelection(context: Context, selection: ConfiguredModelSelection): Boolean =
     modelSelection(context).sameIdentity(selection)
