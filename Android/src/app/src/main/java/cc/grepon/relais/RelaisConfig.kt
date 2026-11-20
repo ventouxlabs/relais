@@ -334,9 +334,15 @@ object RelaisConfig {
     decodeProvisioned(prefs(context).getString(KEY_PROVISIONED_MODELS, null))
 
   fun setProvisionedModels(context: Context, entries: List<ProvisionedModel>) =
-    withSelectionPrefs(context) { p ->
-      p.edit().putString(KEY_PROVISIONED_MODELS, encodeProvisioned(entries)).apply()
-    }
+    withSelectionPrefs(context) { p -> setProvisionedModelsIn(p, entries) }
+
+  /** Handle-based registry read for [ifCurrentSelection]'s block: no `getSharedPreferences` under the monitor. */
+  internal fun provisionedModelsIn(p: SharedPreferences): List<ProvisionedModel> =
+    decodeProvisioned(p.getString(KEY_PROVISIONED_MODELS, null))
+
+  internal fun setProvisionedModelsIn(p: SharedPreferences, entries: List<ProvisionedModel>) {
+    p.edit().putString(KEY_PROVISIONED_MODELS, encodeProvisioned(entries)).apply()
+  }
 
   /**
    * Drops the persisted ref (e.g. reverting to a pure allowlist id). Leaves [KEY_MODEL_ID] intact.
@@ -402,6 +408,10 @@ object RelaisConfig {
   fun modelPath(context: Context): String? = prefs(context).getString(KEY_MODEL_PATH, null)
 
   fun setModelPath(context: Context, value: String) = withSelectionPrefs(context) { p ->
+    setModelPathIn(p, value)
+  }
+
+  internal fun setModelPathIn(p: SharedPreferences, value: String) {
     p.edit().putString(KEY_MODEL_PATH, value).apply()
   }
 
@@ -429,11 +439,42 @@ object RelaisConfig {
    * than the stored id is stale and excluded. Same lock-order rules as [withSelectionPrefs].
    */
   internal fun modelSelection(context: Context): ConfiguredModelSelection =
+    withSelectionPrefs(context) { p -> captureSelection(p) }
+
+  private fun captureSelection(p: SharedPreferences): ConfiguredModelSelection {
+    val id = p.getString(KEY_MODEL_ID, null) ?: DEFAULT_MODEL_ID
+    val ref = RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null))?.takeIf { it.modelId == id }
+    return ConfiguredModelSelection(id, ref, p.getString(KEY_MODEL_PATH, null))
+  }
+
+  /**
+   * Compare-and-publish: runs [block] inside [selectionLock] only if the stored selection still has
+   * [selection]'s identity, else returns null without running it. The check and everything [block]
+   * writes are one critical section, so a stale provision can never publish across an operator pick.
+   *
+   * [block] receives the prefs handle acquired BEFORE the monitor and must write only through it
+   * ([setModelPathIn], [provisionedModelsIn], [setProvisionedModelsIn]); a context-based accessor
+   * would call `getSharedPreferences` while [selectionLock] is held. Same rules as
+   * [withSelectionPrefs]: no engine call, no network, no file I/O inside [block]; do disk work
+   * before calling this and pass the result in.
+   */
+  internal fun <T> ifCurrentSelection(
+    context: Context,
+    selection: ConfiguredModelSelection,
+    block: (SharedPreferences) -> T,
+  ): T? =
     withSelectionPrefs(context) { p ->
-      val id = p.getString(KEY_MODEL_ID, null) ?: DEFAULT_MODEL_ID
-      val ref = RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null))?.takeIf { it.modelId == id }
-      ConfiguredModelSelection(id, ref, p.getString(KEY_MODEL_PATH, null))
+      if (captureSelection(p).sameIdentity(selection)) block(p) else null
     }
+
+  /**
+   * Runs [block] with the prefs handle and the selection captured INSIDE [selectionLock], so the
+   * decision and the writes see one selection. Same rules as [ifCurrentSelection].
+   */
+  internal fun <T> withCapturedSelection(
+    context: Context,
+    block: (SharedPreferences, ConfiguredModelSelection) -> T,
+  ): T = withSelectionPrefs(context) { p -> block(p, captureSelection(p)) }
 
   /** True while the stored selection still has [selection]'s identity (the path is output, not identity). */
   internal fun isCurrentSelection(context: Context, selection: ConfiguredModelSelection): Boolean =
