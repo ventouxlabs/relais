@@ -16,6 +16,8 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.test.core.app.ApplicationProvider
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
@@ -117,8 +119,8 @@ class ConfiguredModelSelectionTest {
   @Test
   fun `a capture blocks while a writer is parked inside the selection lock`() {
     RelaisConfig.setModelRef(app, tpu)
-    val inside = java.util.concurrent.CountDownLatch(1)
-    val release = java.util.concurrent.CountDownLatch(1)
+    val inside = CountDownLatch(1)
+    val release = CountDownLatch(1)
     val ctx =
       object : ContextWrapper(app) {
         override fun getSharedPreferences(name: String, mode: Int): SharedPreferences {
@@ -134,7 +136,7 @@ class ConfiguredModelSelectionTest {
 
                 override fun apply() {
                   inside.countDown()
-                  release.await()
+                  release.await(5, TimeUnit.SECONDS)
                   e.apply()
                 }
               }
@@ -142,19 +144,24 @@ class ConfiguredModelSelectionTest {
           }
         }
       }
-    val writer = Thread { RelaisConfig.applyManualSelection(ctx, "x/y") }
-    writer.start()
-    assertTrue(inside.await(5, java.util.concurrent.TimeUnit.SECONDS))
+    val writer = Thread { RelaisConfig.applyManualSelection(ctx, "x/y") }.apply { isDaemon = true }
     val seen = AtomicReference<ConfiguredModelSelection?>(null)
-    val reader = Thread { seen.set(RelaisConfig.modelSelection(app)) }
-    reader.start()
-    reader.join(300)
-    assertNull("capture must wait for the in-flight writer", seen.get())
-    release.countDown()
-    writer.join()
-    reader.join()
-    assertEquals("x/y", seen.get()!!.modelId)
-    assertNull(seen.get()!!.ref)
+    val reader = Thread { seen.set(RelaisConfig.modelSelection(app)) }.apply { isDaemon = true }
+    writer.start()
+    try {
+      assertTrue(inside.await(5, TimeUnit.SECONDS))
+      reader.start()
+      reader.join(300)
+      assertNull("capture must wait for the in-flight writer", seen.get())
+    } finally {
+      // A failing assertion must never leave the writer parked (and the suite hung).
+      release.countDown()
+      writer.join(5000)
+    }
+    reader.join(5000)
+    val captured = checkNotNull(seen.get()) { "reader never completed" }
+    assertEquals("x/y", captured.modelId)
+    assertNull(captured.ref)
   }
 
   @Test

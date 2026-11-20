@@ -536,6 +536,22 @@ object RelaisModelProvisioner {
       .onFailure { Log.w(TAG, "Could not update provisioned-model registry: ${it.message}") }
   }
 
+  /** In-memory cache, persisted path and registry entry for [selection]; call only under the selection lock. */
+  private fun publishLocked(
+    p: SharedPreferences,
+    path: String,
+    selection: ConfiguredModelSelection,
+    gone: Set<String>,
+  ) {
+    cachedModelPath = CachedModelPath(modelId = selection.modelId, path = path)
+    RelaisConfig.setModelPathIn(p, path)
+    // #180: the ONE funnel both the already-present and freshly-downloaded paths pass through, so
+    // it is where the provisioned-model registry gains entries. Recording only on local success is
+    // what keeps a per-request swap unable to originate a download. Inside the compare: the
+    // registry entry and the persisted path are the same claim ("this id lives at this file").
+    recordProvisioned(p, path, selection.modelId, selection.ref?.displayName ?: selection.modelId, gone)
+  }
+
   /** Registry paths whose file is gone. File I/O, so it must run BEFORE the selection monitor. */
   private fun goneRegistryPaths(context: Context): Set<String> =
     runCatching {
@@ -545,8 +561,9 @@ object RelaisModelProvisioner {
 
   /**
    * Publishes a finished provision for [selection]: the in-memory cache, the persisted path and the
-   * #180 registry entry, all or nothing, in one compare-and-publish under [RelaisConfig]'s selection
-   * monitor. If the stored selection no longer has [selection]'s identity (an operator pick landed
+   * #180 registry entry in one compare-and-publish under [RelaisConfig]'s selection
+   * monitor (the registry entry is best-effort: a failure to update it is logged and does not
+   * withhold the cache or path). If the stored selection no longer has [selection]'s identity (an operator pick landed
    * mid-provision, a same-id different-build pick included) NOTHING is written and [path] is merely
    * returned: the file belongs to a selection that is gone, and any entry binding it to an id
    * reintroduces #337. The cache used to be written unconditionally here, which is how a drifted
@@ -557,21 +574,7 @@ object RelaisModelProvisioner {
   internal fun remember(context: Context, path: String, selection: ConfiguredModelSelection): String {
     val gone = goneRegistryPaths(context) // file I/O stays outside the monitor
     val published =
-      RelaisConfig.ifCurrentSelection(context, selection) { p ->
-        cachedModelPath = CachedModelPath(modelId = selection.modelId, path = path)
-        RelaisConfig.setModelPathIn(p, path)
-        // #180: the ONE funnel both the already-present and freshly-downloaded paths pass through, so
-        // it is where the provisioned-model registry gains entries. Recording only on local success is
-        // what keeps a per-request swap unable to originate a download. Inside the compare: the
-        // registry entry and the persisted path are the same claim ("this id lives at this file").
-        recordProvisioned(
-          p,
-          path,
-          selection.modelId,
-          selection.ref?.displayName ?: selection.modelId,
-          gone,
-        )
-      }
+      RelaisConfig.ifCurrentSelection(context, selection) { p -> publishLocked(p, path, selection, gone) }
     if (published == null) {
       Log.w(
         TAG,
@@ -591,17 +594,22 @@ object RelaisModelProvisioner {
    * [ConfiguredModelSelection] overload, which suppresses every write on drift.
    */
   internal fun remember(context: Context, path: String, persistForId: String): String {
-    val current = RelaisConfig.modelSelection(context)
-    if (!shouldPersistPath(persistForId, current.modelId)) {
-      cachedModelPath = CachedModelPath(modelId = persistForId, path = path)
-      Log.w(
-        TAG,
-        "Model id changed mid-provision (now ${current.modelId}, provisioned for $persistForId); " +
-          "not persisting stale path",
-      )
-      return path
+    val gone = goneRegistryPaths(context) // file I/O stays outside the monitor
+    // The id comparison and the writes share one critical section: capturing `current` first and
+    // delegating would let a pick land between the check and the publish.
+    RelaisConfig.withCapturedSelection(context) { p, current ->
+      if (shouldPersistPath(persistForId, current.modelId)) {
+        publishLocked(p, path, current, gone)
+      } else {
+        cachedModelPath = CachedModelPath(modelId = persistForId, path = path)
+        Log.w(
+          TAG,
+          "Model id changed mid-provision (now ${current.modelId}, provisioned for $persistForId); " +
+            "not persisting stale path",
+        )
+      }
     }
-    return remember(context, path, current)
+    return path
   }
 
   /**
