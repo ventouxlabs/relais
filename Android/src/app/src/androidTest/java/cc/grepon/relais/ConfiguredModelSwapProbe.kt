@@ -10,9 +10,15 @@ import android.system.Os
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import java.io.BufferedReader
 import java.io.File
+import java.io.InputStreamReader
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -30,9 +36,10 @@ import org.junit.runner.RunWith
  * Requires an unlocked spare device with a real configured ref/path and a registered local
  * device/gemma3-1b-it-int4 model. The test starts Gemma3 X, selects the original configured Y, then
  * RENAMES only Y's unloaded file to a unique adjacent backup. With Y absent and X resident,
- * [resolveModelRequest] must answer [ModelRequestOutcome.NotOnDevice] on every retry: no swap is
- * dispatched, no provisioning or download starts, and X stays resident and serving. Nothing is
- * fabricated or downloaded.
+ * the server must answer NotOnDevice on every retry: no swap is
+ * dispatched, no provisioning or download starts, and X stays resident and serving. Each retry POSTs
+ * /v1/chat/completions (model=Y) to a real loopback [RelaisHttpServer] and asserts 503, the
+ * [notOnDeviceModelMessage] body and no Retry-After. Nothing is fabricated or downloaded.
  *
  * Before running, record original model prefs and Y's inode/size on the HOST. The BACKUP log records
  * the exact recovery path before any rename; if the app process dies, restore that adjacent file
@@ -47,43 +54,66 @@ class ConfiguredModelSwapProbe {
 
   @Test
   fun missingConfiguredModelAnswersNotOnDeviceInsteadOfSwapping() = withMissingConfiguredModel { yId ->
-    repeat(RETRIES) { attempt ->
-      val outcome = requestOutcome(yId)
-      assertEquals("retry $attempt must stay NotOnDevice, never a swap", ModelRequestOutcome.NotOnDevice(yId), outcome)
-      assertEquals(X_ID, RelaisEngine.residentModelId)
-      assertTrue("X must stay ready", RelaisEngine.isReady)
-      assertFalse("no swap may be started by a client request", RelaisLivenessState.snapshot.startupInProgress)
-      assertFalse("no provisioning may start", RelaisNodeProgress.phase == ProvisionPhase.RESOLVING)
-      assertFalse(RelaisEngine.lastInitFailed)
+    withServer {
+      repeat(RETRIES) { attempt ->
+        val response = post(yId)
+        assertTrue("retry $attempt must be 503, got: ${response.statusLine}", response.statusLine.contains(" 503 "))
+        assertTrue(
+          "retry $attempt body must carry notOnDeviceModelMessage, got: ${response.body}",
+          JSONObject(response.body).getJSONObject("error").getString("message").contains(notOnDeviceModelMessage(yId)),
+        )
+        assertFalse("NotOnDevice must not advertise Retry-After: ${response.headers}", response.headers.any { it.startsWith("retry-after", ignoreCase = true) })
+        assertEquals(X_ID, RelaisEngine.residentModelId)
+        assertTrue("X must stay ready", RelaisEngine.isReady)
+        assertFalse("no swap may be started by a client request", RelaisLivenessState.snapshot.startupInProgress)
+        assertFalse("no provisioning may start", RelaisNodeProgress.phase == ProvisionPhase.RESOLVING)
+        assertFalse(RelaisEngine.lastInitFailed)
+      }
     }
-    assertTrue(notOnDeviceModelMessage(yId).contains("not on this device"))
     generateOneToken()
-    Log.i(TAG, "PASS: $RETRIES retries answered NotOnDevice; X stayed resident and generated; no swap, no download")
+    Log.i(TAG, "PASS: $RETRIES retries answered 503 NotOnDevice on the wire; X stayed resident and generated; no swap, no download")
   }
 
   @Test
   fun resolvedRequestForResidentModelStillServes() = withMissingConfiguredModel { _ ->
     // X is the resident model: naming it must keep serving even though configured Y is missing.
-    assertEquals(ModelRequestOutcome.ServeResident, requestOutcome(X_ID))
-    Log.i(TAG, "PASS: resident X still served while configured Y is missing")
+    withServer {
+      val response = post(X_ID)
+      assertTrue("resident X must answer 200, got: ${response.statusLine}", response.statusLine.contains(" 200 "))
+    }
+    Log.i(TAG, "PASS: resident X still served (200) while configured Y is missing")
   }
 
-  private fun requestOutcome(requestedModelId: String): ModelRequestOutcome {
-    // Same read order as RelaisHttpServer: startupInProgress BEFORE isReady.
-    val loadInFlight = RelaisLivenessState.snapshot.startupInProgress
-    val ready = RelaisEngine.isReady
-    val configuredId = RelaisConfig.modelId(context)
-    val onDisk = RelaisConfig.provisionedModels(context).filter { File(it.path).exists() }
-    val configuredOnDisk = RelaisModelProvisioner.pathFor(context, configuredId)?.let { File(it).exists() } == true
-    return resolveModelRequest(
-      residentModelId = RelaisEngine.residentModelId,
-      requestedModelId = requestedModelId,
-      configuredModelId = configuredId,
-      provisionedModelIds = onDisk.map { it.modelId }.toSet(),
-      isReady = ready,
-      loadInFlight = loadInFlight,
-      configuredModelOnDisk = configuredOnDisk,
-    )
+  private fun withServer(block: () -> Unit) {
+    val server = RelaisHttpServer(context, port = PORT, tls = false, bindAddr = "127.0.0.1")
+    try {
+      server.start()
+      Thread.sleep(300)
+      block()
+    } finally {
+      server.stop()
+    }
+  }
+
+  private data class HttpResult(val statusLine: String, val headers: List<String>, val body: String)
+
+  private fun post(model: String): HttpResult {
+    val json = JSONObject().put("model", model).put("stream", false).put("max_tokens", 4).put(
+      "messages",
+      JSONArray().put(JSONObject().put("role", "user").put("content", "hello")),
+    ).toString()
+    val head =
+      "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${RelaisConfig.apiKey(context)}\r\n" +
+        "Content-Type: application/json\r\nContent-Length: ${json.toByteArray().size}\r\nConnection: close\r\n\r\n"
+    Socket().use { socket ->
+      socket.connect(InetSocketAddress("127.0.0.1", PORT), 5_000)
+      socket.soTimeout = RESPONSE_TIMEOUT_MS
+      socket.getOutputStream().apply { write((head + json).toByteArray()); flush() }
+      val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+      val statusLine = reader.readLine() ?: ""
+      val headers = generateSequence { reader.readLine() }.takeWhile { it.isNotEmpty() }.toList()
+      return HttpResult(statusLine, headers, reader.readText())
+    }
   }
 
   private fun withMissingConfiguredModel(test: (String) -> Unit) {
@@ -186,6 +216,8 @@ class ConfiguredModelSwapProbe {
     const val TAG = "RelaisConfiguredSwapProbe"
     const val X_ID = "device/gemma3-1b-it-int4"
     const val RETRIES = 3
+    const val PORT = 18097
+    const val RESPONSE_TIMEOUT_MS = 60_000
     val MODEL_KEYS = listOf("model_id", "model_ref", "model_path", "provisioned_models")
   }
 }
