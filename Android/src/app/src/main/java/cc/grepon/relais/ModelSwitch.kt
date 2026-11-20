@@ -65,7 +65,7 @@ object ModelSwitch {
    *    `ensureModel` and so persists the path; [ChatViewModel]'s pick does not, and its model is
    *    found by `pathFor` only if it is already on the device.
    *
-   * **Order is load-bearing.** [RelaisConfig.setModelId] must run BEFORE `remember`, because
+   * **Order is load-bearing.** [RelaisConfig.applyManualSelection] must run BEFORE `remember`, because
    * `remember` persists only when [RelaisModelProvisioner.shouldPersistPath] finds `persistForId`
    * equal to the id it reads back from config. Call them the other way round and the ids mismatch,
    * the drift guard (issue #11, an operator changing model mid-download) correctly refuses, and the
@@ -74,8 +74,7 @@ object ModelSwitch {
    * not defeat the guard by passing a null id: the guard is not the problem here.
    */
   fun applyManualId(context: Context, id: String, resolvedPath: String?) {
-    RelaisConfig.clearModelRef(context)
-    RelaisConfig.setModelId(context, id)
+    RelaisConfig.applyManualSelection(context, id)
     if (resolvedPath != null) {
       RelaisModelProvisioner.remember(context, resolvedPath, persistForId = id)
     }

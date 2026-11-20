@@ -117,15 +117,16 @@ object RelaisModelProvisioner {
    * see which config value feeds `hasExplicitModelId`, and passing a constant there would survive
    * them. [isPixel10] is a parameter only so a test can stand in for the device.
    */
-  internal fun applyDeviceDefaultIfFresh(context: Context, isPixel10: Boolean): RelaisModelRef? =
-    deviceDefaultRef(
-      isPixel10 = isPixel10,
-      hasPersistedRef = RelaisConfig.modelRef(context) != null,
-      hasExplicitModelId = RelaisConfig.hasExplicitModelId(context),
-    )?.also { ref ->
+  internal fun applyDeviceDefaultIfFresh(context: Context, isPixel10: Boolean): RelaisModelRef? {
+    val candidate =
+      deviceDefaultRef(isPixel10 = isPixel10, hasPersistedRef = false, hasExplicitModelId = false)
+        ?: return null
+    // Check and write are one critical section in RelaisConfig: an operator pick landing between
+    // them wins instead of being overwritten.
+    return RelaisConfig.applyDefaultModelRefIfFresh(context, candidate)?.also { ref ->
       Log.i(TAG, "Fresh Pixel 10: defaulting to G5-compatible ${ref.modelId}")
-      RelaisConfig.setModelRef(context, ref)
     }
+  }
 
   /**
    * A provisioned file together with the model id it holds the weights for.
