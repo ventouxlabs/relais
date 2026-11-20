@@ -115,6 +115,49 @@ class ConfiguredModelSelectionTest {
   }
 
   @Test
+  fun `a capture blocks while a writer is parked inside the selection lock`() {
+    RelaisConfig.setModelRef(app, tpu)
+    val inside = java.util.concurrent.CountDownLatch(1)
+    val release = java.util.concurrent.CountDownLatch(1)
+    val ctx =
+      object : ContextWrapper(app) {
+        override fun getSharedPreferences(name: String, mode: Int): SharedPreferences {
+          val d = super.getSharedPreferences(name, mode)
+          return object : SharedPreferences by d {
+            override fun edit(): SharedPreferences.Editor {
+              val e = d.edit()
+              return object : SharedPreferences.Editor by e {
+                // Delegated builders return `e`; keep chaining on this wrapper so apply() is ours.
+                override fun remove(key: String) = apply { e.remove(key) }
+
+                override fun putString(key: String, value: String?) = apply { e.putString(key, value) }
+
+                override fun apply() {
+                  inside.countDown()
+                  release.await()
+                  e.apply()
+                }
+              }
+            }
+          }
+        }
+      }
+    val writer = Thread { RelaisConfig.applyManualSelection(ctx, "x/y") }
+    writer.start()
+    assertTrue(inside.await(5, java.util.concurrent.TimeUnit.SECONDS))
+    val seen = AtomicReference<ConfiguredModelSelection?>(null)
+    val reader = Thread { seen.set(RelaisConfig.modelSelection(app)) }
+    reader.start()
+    reader.join(300)
+    assertNull("capture must wait for the in-flight writer", seen.get())
+    release.countDown()
+    writer.join()
+    reader.join()
+    assertEquals("x/y", seen.get()!!.modelId)
+    assertNull(seen.get()!!.ref)
+  }
+
+  @Test
   fun `an operator pick landing between the default check and write wins`() {
     val picked = AtomicInteger()
     val operator = AtomicReference<Thread?>(null)

@@ -442,8 +442,9 @@ object RelaisEngine {
    * flag.
    *
    * Lock order: engine [lock] → publisher monitor (a leaf `@Synchronized`), never the reverse;
-   * `listenerLifecycleLock` is never nested with [lock]. The [RelaisConfig] selection monitor is also a
-   * leaf: engine [lock] → selection monitor only, with no engine call or disk I/O inside it.
+   * `listenerLifecycleLock` is never nested with [lock]. The [RelaisConfig] `selectionLock` (a dedicated
+   * monitor, not the config object's) is also a leaf: engine [lock] → `selectionLock` only, with no
+   * engine call or Keystore/secret I/O inside it.
    */
   @OptIn(ExperimentalApi::class)
   fun ensureInitialized(

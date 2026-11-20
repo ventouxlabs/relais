@@ -401,17 +401,21 @@ object RelaisConfig {
   }
 
   /**
-   * Runs [block] with the prefs handle inside the selection monitor (this object). The four
+   * Runs [block] with the prefs handle inside [selectionLock]. The four
    * selection keys ([KEY_MODEL_ID], [KEY_MODEL_REF], [KEY_MODEL_PATH], [KEY_PROVISIONED_MODELS])
    * are written and captured only under it, so a [modelSelection] never straddles a writer.
    *
-   * Lock order: the engine `lock` -> this monitor, never the reverse. The prefs handle is acquired
+   * [selectionLock] is a dedicated monitor, distinct from this object's monitor held by the secret
+   * paths (Keystore init, store reset, `commit()`), so selection users never wait behind them.
+   * Lock order: the engine `lock` -> [selectionLock], never the reverse. The prefs handle is acquired
    * BEFORE the monitor (a test probe blocks inside `getSharedPreferences`). Inside [block]: no
    * engine call, no network, no disk I/O beyond the prefs editor.
    */
+  private val selectionLock = Any()
+
   private inline fun <T> withSelectionPrefs(context: Context, block: (SharedPreferences) -> T): T {
     val p = prefs(context)
-    return synchronized(this) { block(p) }
+    return synchronized(selectionLock) { block(p) }
   }
 
   /**
