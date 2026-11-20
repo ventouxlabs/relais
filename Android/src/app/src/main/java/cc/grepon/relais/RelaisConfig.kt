@@ -225,12 +225,11 @@ object RelaisConfig {
    * Test/reset seam: forgets that a model id was ever chosen, for on-device probes that must leave
    * a device's Pixel-10 default eligibility as they found it ([hasExplicitModelId]).
    */
-  internal fun clearModelIdForTest(context: Context) {
-    prefs(context).edit().remove(KEY_MODEL_ID).apply()
+  internal fun clearModelIdForTest(context: Context) = withSelectionPrefs(context) { p ->
+    p.edit().remove(KEY_MODEL_ID).apply()
   }
 
-  fun setModelId(context: Context, value: String) {
-    val p = prefs(context)
+  fun setModelId(context: Context, value: String) = withSelectionPrefs(context) { p ->
     val changed = p.getString(KEY_MODEL_ID, null) != value
     val edit = p.edit().putString(KEY_MODEL_ID, value)
     if (changed) {
@@ -244,6 +243,17 @@ object RelaisConfig {
       val refId = RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null))?.modelId
       if (refId != null && refId != value) edit.remove(KEY_MODEL_REF)
     }
+    edit.apply()
+  }
+
+  /**
+   * Operator's raw-id pick as ONE editor commit: drops the ref (and, like [clearModelRef] plus
+   * [setModelId], the staged path when a ref was present or the id changes) and writes the id. The
+   * three-step form let a concurrent [modelSelection] see the old id with its ref already gone.
+   */
+  internal fun applyManualSelection(context: Context, id: String) = withSelectionPrefs(context) { p ->
+    val edit = p.edit().remove(KEY_MODEL_REF).putString(KEY_MODEL_ID, id)
+    if (p.contains(KEY_MODEL_REF) || p.getString(KEY_MODEL_ID, null) != id) edit.remove(KEY_MODEL_PATH)
     edit.apply()
   }
 
@@ -298,8 +308,7 @@ object RelaisConfig {
    * previously provisioned model. Writes the id directly (not via [setModelId]) so the stale-ref
    * cleanup there never fires against the ref being set.
    */
-  fun setModelRef(context: Context, ref: RelaisModelRef) {
-    val p = prefs(context)
+  fun setModelRef(context: Context, ref: RelaisModelRef) = withSelectionPrefs(context) { p ->
     val json = ref.toJson()
     val changed =
       p.getString(KEY_MODEL_REF, null) != json || p.getString(KEY_MODEL_ID, null) != ref.modelId
@@ -319,9 +328,10 @@ object RelaisConfig {
   fun provisionedModels(context: Context): List<ProvisionedModel> =
     decodeProvisioned(prefs(context).getString(KEY_PROVISIONED_MODELS, null))
 
-  fun setProvisionedModels(context: Context, entries: List<ProvisionedModel>) {
-    prefs(context).edit().putString(KEY_PROVISIONED_MODELS, encodeProvisioned(entries)).apply()
-  }
+  fun setProvisionedModels(context: Context, entries: List<ProvisionedModel>) =
+    withSelectionPrefs(context) { p ->
+      p.edit().putString(KEY_PROVISIONED_MODELS, encodeProvisioned(entries)).apply()
+    }
 
   /**
    * Drops the persisted ref (e.g. reverting to a pure allowlist id). Leaves [KEY_MODEL_ID] intact.
@@ -334,8 +344,7 @@ object RelaisConfig {
    * from, and keeping the path is what lets an offline node boot without the allowlist. One editor,
    * one commit, matching [setModelRef].
    */
-  fun clearModelRef(context: Context) {
-    val p = prefs(context)
+  fun clearModelRef(context: Context) = withSelectionPrefs(context) { p ->
     val edit = p.edit().remove(KEY_MODEL_REF)
     if (p.contains(KEY_MODEL_REF)) edit.remove(KEY_MODEL_PATH)
     edit.apply()
@@ -387,9 +396,54 @@ object RelaisConfig {
    */
   fun modelPath(context: Context): String? = prefs(context).getString(KEY_MODEL_PATH, null)
 
-  fun setModelPath(context: Context, value: String) {
-    prefs(context).edit().putString(KEY_MODEL_PATH, value).apply()
+  fun setModelPath(context: Context, value: String) = withSelectionPrefs(context) { p ->
+    p.edit().putString(KEY_MODEL_PATH, value).apply()
   }
+
+  /**
+   * Runs [block] with the prefs handle inside the selection monitor (this object). The four
+   * selection keys ([KEY_MODEL_ID], [KEY_MODEL_REF], [KEY_MODEL_PATH], [KEY_PROVISIONED_MODELS])
+   * are written and captured only under it, so a [modelSelection] never straddles a writer.
+   *
+   * Lock order: the engine `lock` -> this monitor, never the reverse. The prefs handle is acquired
+   * BEFORE the monitor (a test probe blocks inside `getSharedPreferences`). Inside [block]: no
+   * engine call, no network, no disk I/O beyond the prefs editor.
+   */
+  private inline fun <T> withSelectionPrefs(context: Context, block: (SharedPreferences) -> T): T {
+    val p = prefs(context)
+    return synchronized(this) { block(p) }
+  }
+
+  /**
+   * Captures id, effective ref and staged path as one coherent value. A ref naming a different id
+   * than the stored id is stale and excluded. Same lock-order rules as [withSelectionPrefs].
+   */
+  internal fun modelSelection(context: Context): ConfiguredModelSelection =
+    withSelectionPrefs(context) { p ->
+      val id = p.getString(KEY_MODEL_ID, null) ?: DEFAULT_MODEL_ID
+      val ref = RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null))?.takeIf { it.modelId == id }
+      ConfiguredModelSelection(id, ref, p.getString(KEY_MODEL_PATH, null))
+    }
+
+  /** True while the stored selection still has [selection]'s identity (the path is output, not identity). */
+  internal fun isCurrentSelection(context: Context, selection: ConfiguredModelSelection): Boolean =
+    modelSelection(context).sameIdentity(selection)
+
+  /**
+   * Applies [ref] as the device default only if nothing was chosen yet (no explicit id, no ref);
+   * check and write are one critical section, so a concurrent operator pick wins. Returns [ref] if
+   * applied, else null.
+   */
+  internal fun applyDefaultModelRefIfFresh(context: Context, ref: RelaisModelRef): RelaisModelRef? =
+    withSelectionPrefs(context) { p ->
+      if (p.contains(KEY_MODEL_ID) || RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null)) != null) {
+        null
+      } else {
+        p.edit().putString(KEY_MODEL_REF, ref.toJson()).putString(KEY_MODEL_ID, ref.modelId)
+          .remove(KEY_MODEL_PATH).apply()
+        ref
+      }
+    }
 
   /**
    * Random per-install password protecting the runtime-generated TLS keystore. Generated and
