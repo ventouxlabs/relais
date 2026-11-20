@@ -58,7 +58,7 @@ class MidDecodeStopEngineProbe {
     assumeTrue("pass -e model <path to a staged .litertlm>", modelPath != null)
     assumeTrue("model file missing/unreadable: $modelPath", File(modelPath!!).canRead())
 
-    RelaisEngine.ensureInitialized(context, modelPath)
+    RelaisEngine.ensureInitialized(context, modelPath, RelaisConfig.modelId(context))
     assumeTrue("engine not ready after init", RelaisEngine.isReady)
 
     val streamed = AtomicInteger(0)

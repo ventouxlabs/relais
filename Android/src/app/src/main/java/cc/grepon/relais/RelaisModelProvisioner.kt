@@ -319,14 +319,22 @@ object RelaisModelProvisioner {
    * take minutes for a multi-GB model. [onProgress] receives 0..100 while downloading. For a
    * license-gated repo, set [RelaisConfig.setHfToken] first or the download 401s.
    */
-  fun ensureModel(context: Context, onProgress: (Int) -> Unit = {}): String {
+  fun ensureModel(context: Context, onProgress: (Int) -> Unit = {}): String =
+    ensureModel(context, captureSelectionForProvision(context), onProgress)
+
+  /**
+   * The capture an entry point hands to [ensureModel] (selection overload): enters RESOLVING, applies
+   * the fresh-Pixel-10 device default (see [G5_DEFAULT_REF]) BEFORE capturing, so the captured
+   * selection already names E2B and the drift gate sees no false drift. Engine/service boot paths use
+   * this rather than a bare [RelaisConfig.modelSelection], which would skip the default (#369).
+   * May touch prefs/disk, so never call it under the engine lock.
+   */
+  internal fun captureSelectionForProvision(context: Context): ConfiguredModelSelection {
     RelaisNodeProgress.phase = ProvisionPhase.RESOLVING
-    // Fresh Pixel 10 (Tensor G5): default to the faster TPU-native E2B-G5 (see [G5_DEFAULT_REF])
-    // before ANY provisioning. The default is applied BEFORE the capture so the captured selection
-    // already names E2B and the drift gate sees no false drift. (E4B is no longer blocked on G5:
-    // this is a perf-preference default, not a gate.)
+    // Fresh Pixel 10 (Tensor G5): default to the faster TPU-native E2B-G5 before ANY provisioning.
+    // (E4B is no longer blocked on G5: this is a perf-preference default, not a gate.)
     applyDeviceDefaultIfFresh(context, isPixel10 = isPixel10())
-    return ensureModel(context, RelaisConfig.modelSelection(context), onProgress)
+    return RelaisConfig.modelSelection(context)
   }
 
   /**

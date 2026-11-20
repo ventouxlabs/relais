@@ -153,7 +153,7 @@ class RelaisNodeTest {
     val out = RelaisModelProvisioner.ensureModel(context) { pct -> Log.i(TAG, "download $pct%") }
     assertTrue("provisioned file missing at $out", File(out).exists())
 
-    RelaisEngine.ensureInitialized(context, out)
+    RelaisEngine.ensureInitialized(context, out, RelaisConfig.modelId(context))
     assertTrue("engine not ready after provisioning from $out", RelaisEngine.isReady)
     Log.i(TAG, "Provisioned + engine ready from $out")
   }

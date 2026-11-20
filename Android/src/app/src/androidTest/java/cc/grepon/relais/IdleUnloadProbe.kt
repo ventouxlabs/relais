@@ -270,7 +270,7 @@ class IdleUnloadProbe {
     // The property task 1 could not test on the JVM: a second ensureInitialized call against an
     // already-ready engine is a fast no-op (RelaisEngine.kt:403 `if (isReady) return`) and must not
     // record a second load observation.
-    RelaisEngine.ensureInitialized(context)
+    RelaisEngine.ensureInitialized(context, modelId = RelaisConfig.modelId(context))
     val loadCountAfterRedundantCall = promCounter(METRIC_LOAD_COUNT)
     assertEquals(
       "a second ensureInitialized call on an already-ready engine must record no second load",
@@ -290,7 +290,7 @@ class IdleUnloadProbe {
     try {
       // RelaisEngine.kt:357's require(File(modelPath).exists()) is the first statement that can
       // throw — nothing mutates engine/residentModelId/lastActivityAtMs before it.
-      RelaisEngine.ensureInitialized(context, modelPath = "/data/local/tmp/relais-probe-does-not-exist.litertlm")
+      RelaisEngine.ensureInitialized(context, modelPath = "/data/local/tmp/relais-probe-does-not-exist.litertlm", modelId = RelaisConfig.modelId(context))
     } catch (e: Exception) {
       threw = true
       Log.i(TAG, "forced init failure threw as expected: ${e.message}")
@@ -367,7 +367,7 @@ class IdleUnloadProbe {
   /** Idempotent: reloads the engine if a prior test left it unloaded, and clears forced-failure residue. */
   private fun ensureReady() {
     RelaisEngine.lastInitFailed = false // undo any prior test's forced-failure residue (4(c'))
-    if (!RelaisEngine.isReady) RelaisEngine.ensureInitialized(context)
+    if (!RelaisEngine.isReady) RelaisEngine.ensureInitialized(context, modelId = RelaisConfig.modelId(context))
     assertTrue("engine must be ready before this test can proceed", RelaisEngine.isReady)
   }
 
