@@ -18,6 +18,7 @@ import android.content.SharedPreferences
 import androidx.test.core.app.ApplicationProvider
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
@@ -98,7 +99,7 @@ class ConfiguredModelSelectionTest {
   @Test
   fun `a concurrent capture never sees the old id with its ref already gone`() {
     val failure = AtomicReference<String?>(null)
-    val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+    val stop = AtomicBoolean(false)
     val reader = Thread {
       while (!stop.get() && failure.get() == null) {
         val s = RelaisConfig.modelSelection(app)
@@ -179,7 +180,7 @@ class ConfiguredModelSelectionTest {
         }
       }
     RelaisModelProvisioner.applyDeviceDefaultIfFresh(ctx, isPixel10 = true)
-    operator.get()!!.join()
+    checkNotNull(operator.get()) { "operator thread never started" }.join()
     assertEquals("operator/pick", RelaisConfig.modelId(app))
     assertNull("default ref must not survive the operator pick", RelaisConfig.modelRef(app))
   }
