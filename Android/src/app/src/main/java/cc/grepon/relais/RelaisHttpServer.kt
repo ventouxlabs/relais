@@ -1487,6 +1487,14 @@ class RelaisHttpServer(
 
   // --- OpenAI-compatible chat completions ---
 
+  /**
+   * Whether [selection]'s model file exists (#369). Resolves the path exactly as the loader does
+   * (`RelaisEngine.generate`: [RelaisModelProvisioner.pathFor] with the id AND persisted path from the
+   * same captured [selection]), so this check cannot disagree with what a cold start would load.
+   */
+  private fun configuredModelOnDisk(selection: ConfiguredModelSelection): Boolean =
+    RelaisModelProvisioner.pathFor(context, selection.modelId, selection)?.let { java.io.File(it).exists() } == true
+
   /** Registry entries whose file still exists — see the read-prune note in [rejectIfModelUnavailable]. */
   private fun provisionedOnDisk(): List<ProvisionedModel> =
     pruneMissingProvisioned(RelaisConfig.provisionedModels(context)) { java.io.File(it).exists() }
@@ -1521,11 +1529,13 @@ class RelaisHttpServer(
     // before a swap finished beside "nothing loading" from after it.
     val loadInFlight = RelaisLivenessState.snapshot.startupInProgress
     val ready = RelaisEngine.isReady
+    // ONE capture: the configured id and the on-disk check below must describe the same selection.
+    val selection = RelaisConfig.modelSelection(context)
     val outcome =
       resolveModelRequest(
         residentModelId = RelaisEngine.residentModelId,
         requestedModelId = requestedModel,
-        configuredModelId = RelaisConfig.modelId(context),
+        configuredModelId = selection.modelId,
         // #220: being provisioned proves a model is on disk, NOT that this runtime can create an
         // engine against it — the broken ones download perfectly. A model provisioned before it was
         // known-bad is still in the registry, so without this the swap path would 503 the client and
@@ -1538,6 +1548,8 @@ class RelaisHttpServer(
         provisionedModelIds = provisionedIds(provisionedOnDisk()),
         isReady = ready,
         loadInFlight = loadInFlight,
+        // #369: a swap to a configured model with no file can only bail, so say so instead.
+        configuredModelOnDisk = configuredModelOnDisk(selection),
       )
     return when (outcome) {
       is ModelRequestOutcome.ServeResident -> false
@@ -1567,6 +1579,13 @@ class RelaisHttpServer(
           errorBody("a model is loading; retry shortly"),
           listOf("Retry-After: $MODEL_SWAP_RETRY_AFTER_SECONDS"),
         )
+        true
+      }
+      is ModelRequestOutcome.NotOnDevice -> {
+        // Truthful 503, no Retry-After: retrying changes nothing until the operator downloads it.
+        // Deliberately no download from here: a client request never originates one.
+        RelaisMetrics.recordRequest(endpoint, 503)
+        respond(sock, 503, errorBody(notOnDeviceModelMessage(outcome.requestedModelId)))
         true
       }
       is ModelRequestOutcome.Incompatible -> {

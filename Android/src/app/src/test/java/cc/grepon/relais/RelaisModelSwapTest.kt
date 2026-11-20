@@ -39,6 +39,7 @@ class RelaisModelSwapTest {
     provisioned: Set<String> = onDisk,
     isReady: Boolean = true,
     loadInFlight: Boolean = false,
+    configuredOnDisk: Boolean = true,
     incompatibleReason: (String) -> String? = { null },
   ) =
     resolveModelRequest(
@@ -48,8 +49,43 @@ class RelaisModelSwapTest {
       provisionedModelIds = provisioned,
       isReady = isReady,
       loadInFlight = loadInFlight,
+      configuredModelOnDisk = configuredOnDisk,
       incompatibleReason = incompatibleReason,
     )
+
+  // ---- #369 T6: configured model missing from disk while another is resident ----
+
+  @Test fun `configured model absent from disk answers not-on-device, never a swap`() {
+    // Y configured but not on disk, X resident. Swapping can only bail (nothing to load), leaving X
+    // resident, so every retry re-dispatched the swap: an endless "swapping" 503.
+    val first = outcome(configured, provisioned = setOf(resident), configuredOnDisk = false)
+    assertEquals(ModelRequestOutcome.NotOnDevice(configured), first)
+    // The retry sees the same state and must reach the same terminal answer, not SwapThenRetry.
+    assertEquals(first, outcome(configured, provisioned = setOf(resident), configuredOnDisk = false))
+  }
+
+  @Test fun `with no engine up the configured model is served even when absent from disk`() {
+    // Not ready: willServe is the configured id, so it is ServeResident (the lazy reload owns the
+    // 503) whether or not a load is in flight; NotOnDevice needs a ready engine serving another model.
+    for (inFlight in listOf(false, true)) {
+      assertEquals(
+        ModelRequestOutcome.ServeResident,
+        outcome(configured, isReady = false, loadInFlight = inFlight, provisioned = emptySet(), configuredOnDisk = false),
+      )
+    }
+  }
+
+  @Test fun `configured model on disk but unrecorded still swaps`() {
+    assertEquals(
+      ModelRequestOutcome.SwapThenRetry(configured),
+      outcome(configured, provisioned = setOf(resident), configuredOnDisk = true),
+    )
+  }
+
+  @Test fun `not-on-device message names the model and the missing download`() {
+    val msg = notOnDeviceModelMessage("some/y")
+    assertTrue(msg, msg.contains("some/y") && msg.contains("not on this device"))
+  }
 
   // ---- serve the resident model ----
 
