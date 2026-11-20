@@ -152,13 +152,11 @@ fun resolveModelRequest(
   // refuse something already demonstrably working.
   if (requested == willServe) return ModelRequestOutcome.ServeResident
   // #369: checked before the compat gate for the same reason NotProvisioned is: absence is the
-  // more actionable diagnosis. Skipped while a load is in flight: that load may be provisioning it.
-  if (
-    requested == configuredModelId &&
-      requested !in provisionedModelIds &&
-      !configuredModelOnDisk &&
-      !(!isReady && loadInFlight)
-  ) {
+  // more actionable diagnosis. No load-in-flight carve-out is needed: with no engine up, willServe is
+  // the configured id, so a request for it already returned ServeResident above; reaching here with
+  // requested == configuredModelId means an engine is up and serving another model, where a swap
+  // to a missing file can only bail.
+  if (requested == configuredModelId && requested !in provisionedModelIds && !configuredModelOnDisk) {
     return ModelRequestOutcome.NotOnDevice(requested)
   }
   if (requested == configuredModelId || requested in provisionedModelIds) {
