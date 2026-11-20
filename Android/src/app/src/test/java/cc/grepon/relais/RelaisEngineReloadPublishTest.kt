@@ -85,7 +85,7 @@ class RelaisEngineReloadPublishTest {
     RelaisEngine.lastInitFailed = false
 
     val missing = File(ctx.cacheDir, "no-such-model.litertlm").absolutePath
-    assertThrows(IllegalArgumentException::class.java) { RelaisEngine.ensureInitialized(ctx, modelPath = missing) }
+    assertThrows(IllegalArgumentException::class.java) { RelaisEngine.ensureInitialized(ctx, modelPath = missing, modelId = RelaisConfig.modelId(ctx)) }
 
     val after = RelaisLivenessState.snapshot
     assertFalse("idleUnloaded is cleared at attempt start, not on success", after.idleUnloaded)
@@ -145,7 +145,7 @@ class RelaisEngineReloadPublishTest {
       }
     }
     try {
-      assertThrows(ProbeStop::class.java) { RelaisEngine.ensureInitialized(probing, modelPath = present.absolutePath) }
+      assertThrows(ProbeStop::class.java) { RelaisEngine.ensureInitialized(probing, modelPath = present.absolutePath, modelId = RelaisConfig.modelId(ctx)) }
     } finally {
       present.delete()
     }

@@ -412,8 +412,13 @@ object RelaisEngine {
   var residentModelPath: String? = null
     private set
 
-  /** Guards [ensureModelSwapInBackground] so a burst of mismatched requests dispatches at most one swap thread. */
-  private val swapDispatching = java.util.concurrent.atomic.AtomicBoolean(false)
+  /** Single-flight swap dispatch: a burst of mismatched requests starts at most one swap thread. */
+  private val swapRunner =
+    RelaisModelSwapRunner(
+      epoch = { shutdownEpoch },
+      handover = ::handoverModelSwap,
+      publish = { RelaisDiscovery.updateModel(it) },
+    )
 
   /**
    * Legacy hardcoded model location from the spike (manually side-loaded; see SPIKE-FINDINGS.md).
@@ -450,7 +455,7 @@ object RelaisEngine {
   fun ensureInitialized(
     context: Context,
     modelPath: String? = null,
-    modelId: String = RelaisConfig.modelId(context),
+    modelId: String,
   ) {
     if (isReady) return
     synchronized(lock) {
@@ -531,7 +536,7 @@ object RelaisEngine {
     epoch: Long,
     context: Context,
     modelPath: String? = null,
-    modelId: String = RelaisConfig.modelId(context),
+    modelId: String,
   ): Boolean =
     synchronized(lock) {
       if (shutdownEpoch != epoch) {
@@ -663,8 +668,10 @@ object RelaisEngine {
       // Check BEFORE any Context/disk access: STOP during dispatch owns the engine and must not
       // leave us downloading on its behalf. Keep this original epoch throughout provisioning.
       if (shutdownEpoch != epoch || isReady) return
-      val modelId = RelaisConfig.modelId(context)
-      val path = RelaisModelProvisioner.pathFor(context, modelId)
+      // Captured once under the engine lock; the boot-or-provision decision runs on this selection.
+      val selection = RelaisConfig.modelSelection(context)
+      val modelId = selection.modelId
+      val path = RelaisModelProvisioner.pathFor(context, modelId, selection)
       if (!provisionOnly && !configuredModelMissing(isReady, path) { File(it).exists() }) {
         ensureInitialized(context, modelPath = path, modelId = modelId)
         false
@@ -680,8 +687,15 @@ object RelaisEngine {
     if (!needsProvision) return
     // Download outside the engine lock: STOP remains prompt and the provisioner's existing
     // single-flight owner attaches to any ModelsScreen download already in progress.
-    RelaisModelProvisioner.ensureModel(context)
-    if (!ensureInitializedUnlessShutdownSince(epoch, context)) {
+    // The provisioning half is pinned to ONE capture (taken after the device default is applied; never
+    // under the engine lock). ensureModel returns the file provisioned for THIS selection, paired
+    // below with its id: no fresh id read between download and init (#369 R7).
+    // BEHAVIOUR CHANGE (D3): a pick (or same-id ref change) landing mid-download no longer redirects
+    // this init to the new model; it loads what was provisioned for the captured selection and the
+    // new pick is served by the next swap/reload.
+    val selection = RelaisModelProvisioner.captureSelectionForProvision(context)
+    val provisionedPath = RelaisModelProvisioner.ensureModel(context, selection)
+    if (!ensureInitializedUnlessShutdownSince(epoch, context, modelPath = provisionedPath, modelId = selection.modelId)) {
       Log.i(TAG, "background provision skipped init: engine was shut down since this startup was kicked")
     }
   }
@@ -725,7 +739,7 @@ object RelaisEngine {
    * resident engine because one bad request triggered a swap attempt. Only [shutdown] + the actual
    * reload happen once the new model is confirmed present on disk.
    *
-   * @return true iff THIS call won [swapDispatching] and started a swap thread — **not** that the
+   * @return true iff THIS call won the swap runner's single-flight flag and started a swap thread — **not** that the
    * swap succeeded. The thread can still bail (target not on disk), roll back (engine-create
    * failed), both of which leave the previous model resident, or bail because a STOP ran
    * [shutdown] since dispatch (#362 review, [shutdownEpoch]) — nothing is resident then, by STOP's design. Callers that persist an operator's
@@ -734,111 +748,69 @@ object RelaisEngine {
    * naming a model no swap is bringing up. A false is the caller's cue to answer "busy, retry"
    * rather than to report success.
    */
-  fun ensureModelSwapInBackground(context: Context, target: ProvisionedModel? = null): Boolean {
-    if (!swapDispatching.compareAndSet(false, true)) return false // a swap is already dispatching
-    // Before the thread exists and before resolveModel (which may block on the allowlist fetch): a
-    // STOP landing in that window must not be followed by this swap loading an engine (shutdownEpoch).
-    val epoch = shutdownEpoch
-    thread(name = "relais-model-swap") {
-      // Set only on a SUCCESSFUL engine transition. The rollback catch below swallows and lets
-      // execution continue, so a post-lock re-publish with no flag would also fire after a failed
-      // swap; and the file-missing branch returns before anything changes at all.
-      var swapped = false
+  fun ensureModelSwapInBackground(context: Context, target: ProvisionedModel? = null): Boolean =
+    swapRunner.dispatch(context, target)
+
+  /**
+   * Close+reload under ONE lock acquisition (#180 review, HIGH finding) so no concurrent
+   * generate()/ensureInitialized() call can interleave in the gap between shutdown() and the reload
+   * and pair the OLD cached path with the NEW id. [selection] is the capture taken at dispatch for
+   * an untargeted swap (null for a targeted one); [configuredModelId] is that capture's id. Drift
+   * is re-checked HERE, under the lock, before the old engine is torn down (#369 R2).
+   *
+   * Lock order: engine [lock] -> `RelaisConfig` selection monitor, never the reverse.
+   *
+   * @return true iff the new model is resident.
+   */
+  private fun handoverModelSwap(
+    context: Context,
+    path: String,
+    configuredModelId: String,
+    epoch: Long,
+    selection: ConfiguredModelSelection?,
+  ): Boolean {
+    synchronized(lock) {
+      // Checked FIRST, before this swap's own shutdown() (which bumps the epoch): a STOP since
+      // dispatch already closed the engine and owns the outcome.
+      if (shutdownEpoch != epoch) {
+        Log.w(TAG, "model swap skipped: engine was shut down since this swap was dispatched")
+        return false
+      }
+      // This re-check runs UNDER [lock], after the dispatcher's own unlocked check: it is what closes
+      // the check-then-act (TOCTOU) window between dispatch and the shutdown() below.
+      if (selection != null && !RelaisConfig.isCurrentSelection(context, selection)) {
+        Log.w(TAG, "model swap skipped: selection changed since dispatch")
+        return false
+      }
+      // Capture what is working BEFORE tearing it down: a model can download fine and still fail
+      // engine-create, and without this rollback one such request would take a healthy node down.
+      val previousPath = residentModelPath
+      val previousId = residentModelId
+      // #347: a swap can start from an idle-unloaded node; captured before shutdown() clears it.
+      val wasReady = isReady
+      val wasIdleUnloaded = RelaisLivenessState.snapshot.idleUnloaded
+      shutdown() // close the OLD engine only now that the NEW one is confirmed present on disk
       try {
-        RelaisLivenessState.beginStartup() // tell the watchdog "coming up", not "dead" (same signal as any init)
-        // Captured ONCE, before resolveModel runs, so the id stamped on the reloaded engine can never
-        // drift from an operator config change happening mid-swap (#180 review, MEDIUM finding 2):
-        // resolveModel() internally re-reads RelaisConfig.modelId(context) itself (its signature only
-        // takes context, so that internal read can't be avoided), but THIS function must not read the
-        // preference a second time after resolveModel() returns — reusing configuredModelId for the
-        // final ensureInitialized() call guarantees at least this function's own view of "which model
-        // id" stays single-sourced for the rest of the swap.
-        // #180 (full): [target] names the model the REQUEST asked for, which is not necessarily the
-        // operator's configured one now that any provisioned model is swap-eligible. Loading the
-        // configured model here regardless — as the first cut did, correctly, because its guard made
-        // requested == configured by construction — would 503 "swapping", reload the SAME model, and
-        // 503 the client's retry forever. A targeted swap needs no network: the registry already
-        // holds the on-disk path.
-        val configuredModelId = target?.modelId ?: RelaisConfig.modelId(context)
-        val path =
-          target?.path
-            ?: RelaisModelProvisioner.resolveModel(context).getPath(context) // blocking, may hit network
-        if (!File(path).exists()) {
-          Log.w(TAG, "model swap target not provisioned on disk: $path — leaving resident engine untouched")
-          return@thread
-        }
-        // Atomic swap (#180 review, HIGH finding): close+reload under ONE lock acquisition so no
-        // concurrent generate()/ensureInitialized() call can interleave in the gap between shutdown()
-        // and the reload and observe (or build from) a half-swapped state — e.g. the OLD cached model
-        // path with the NEW model id stamped over it. synchronized(lock) is reentrant on the JVM, and
-        // shutdown()/ensureInitialized() both synchronize on this exact same `lock` field, so nesting
-        // them here is safe: any other caller blocks on `lock` for the FULL close+reload, then sees the
-        // fully-updated engine/residentModelId together.
-        synchronized(lock) {
-          // Checked FIRST, before this swap's own shutdown() (which bumps the epoch): a STOP since
-          // dispatch already closed the engine and owns the outcome. Bail like the file-missing
-          // return above — nothing changed, `swapped` stays false, the finally ends the startup.
-          if (shutdownEpoch != epoch) {
-            Log.w(TAG, "model swap skipped: engine was shut down since this swap was dispatched")
-            return@thread
-          }
-          // Capture what is working BEFORE tearing it down. `File.exists()` is the only pre-check we
-          // can do — whether a model actually LOADS is unknowable until init runs — and the allowlist
-          // ships models that download fine but fail engine-create (e.g. Qwen2.5-1.5B on litertlm
-          // 0.12.0: "Failed to parse LlmMetadata"). #180 makes that reachable by request, since any
-          // provisioned model is now a legal swap target. Without this rollback, one such request
-          // would take a healthy node down until an operator restarted it.
-          val previousPath = residentModelPath
-          val previousId = residentModelId
-          // #347: a swap can now start from an idle-unloaded node. Captured before shutdown(), which
-          // clears idleUnloaded, so a failed swap can put the node back exactly as it found it.
-          val wasReady = isReady
-          val wasIdleUnloaded = RelaisLivenessState.snapshot.idleUnloaded
-          shutdown() // close the OLD engine only now that the NEW one is confirmed present on disk
-          try {
-            ensureInitialized(context, modelPath = path, modelId = configuredModelId)
-            swapped = true
-          } catch (t: Throwable) {
-            val restore = swapRollbackTarget(wasReady, previousPath, previousId)
-            if (restore != null) {
-              Log.w(TAG, "swap to $configuredModelId failed (${t.message}); restoring ${restore.second}")
-              runCatching { ensureInitialized(context, modelPath = restore.first, modelId = restore.second) }
-                .onFailure { Log.e(TAG, "could not restore previous model ${restore.second}: ${it.message}") }
-            } else {
-              Log.w(TAG, "swap to $configuredModelId failed (${t.message}); no engine was up, leaving it unloaded")
-              if (wasIdleUnloaded) {
-                // Back to the idle state the swap found: the failed attempt set lastInitFailed and
-                // shutdown() cleared idleUnloaded, which together read as a dead node to the watchdog.
-                lastInitFailed = false
-                RelaisLivenessState.publishIdleUnloaded(true)
-              }
-            }
-            // Deliberately NOT rethrown. The failure is fully handled here — rolled back and logged —
-            // and this is a bare thread: the outer handler catches Exception, so an Error (a native
-            // engine-create can surface UnsatisfiedLinkError or OutOfMemoryError, and #180 makes
-            // models that fail to load reachable by request) would escape it, hit Android's default
-            // uncaught handler, and kill the WHOLE node process — moments after the rollback saved it.
+        ensureInitialized(context, modelPath = path, modelId = configuredModelId)
+        return true
+      } catch (t: Throwable) {
+        val restore = swapRollbackTarget(wasReady, previousPath, previousId)
+        if (restore != null) {
+          Log.w(TAG, "swap to $configuredModelId failed (${t.message}); restoring ${restore.second}")
+          runCatching { ensureInitialized(context, modelPath = restore.first, modelId = restore.second) }
+            .onFailure { Log.e(TAG, "could not restore previous model ${restore.second}: ${it.message}") }
+        } else {
+          Log.w(TAG, "swap to $configuredModelId failed (${t.message}); no engine was up, leaving it unloaded")
+          if (wasIdleUnloaded) {
+            lastInitFailed = false
+            RelaisLivenessState.publishIdleUnloaded(true)
           }
         }
-        // #bug6: re-publish the mDNS TXT once the engine has actually transitioned. HERE, not in the
-        // caller: the dashboard dispatches the swap BEFORE it persists the operator's choice, so a
-        // re-publish on the request thread would advertise the old id (at dispatch) or a model not
-        // yet resident (after persist). And not in the `finally` — that also runs on the
-        // file-missing return above and after a rollback, where nothing changed.
-        //
-        // Correctness does not rest on this placement: buildServiceInfo reads residentModelId first
-        // (see advertisedModelId), so what is published is what the engine is serving regardless of
-        // whether the caller has persisted yet. The `swapped` guard is about not churning an NSD
-        // unregister/re-register for a swap that changed nothing.
-        if (swapped) RelaisDiscovery.updateModel(context)
-      } catch (e: Exception) {
-        Log.w(TAG, "model swap failed: ${e.message}")
-      } finally {
-        RelaisLivenessState.endStartup()
-        swapDispatching.set(false)
+        // Deliberately NOT rethrown: fully handled (rolled back, logged), and a native Error escaping
+        // the bare swap thread would kill the whole node process moments after the rollback saved it.
+        return false
       }
     }
-    return true
   }
 
   /**
@@ -997,24 +969,31 @@ object RelaisEngine {
         // kick with the node OFF — in-app chat reaches here in-process — nor in ERROR, where the
         // watchdog's revive owns retries). The request itself writes no liveness and no
         // lastInitFailed — only the kick publishes, and owns, its startup pair. The id is read ONCE,
-        // so the check and the init are about the same model; `!isReady` first keeps prefs reads and
-        // a stat off the ready path.
-        val configuredId = RelaisConfig.modelId(context)
-        if (!isReady &&
-          configuredModelMissing(isReady, RelaisModelProvisioner.pathFor(context, configuredId)) { File(it).exists() }
-        ) {
-          // Snapshot ONCE, first, then the engine flag — computeNodeState's read-order rule.
-          val liveness = RelaisLivenessState.snapshot
-          val kick =
-            shouldKickProvision(
-              lastInitFailed = lastInitFailed,
-              listenersUp = liveness.listenersUp,
-              idleUnloaded = liveness.idleUnloaded,
-            )
-          val provisioning = if (kick) ensureProvisionedInBackground(context) else liveness.startupInProgress
-          throw ModelNotOnDiskException(configuredId, provisioning = provisioning)
+        // so the check and the init are about the same model. The ready (hot) path does only the cheap
+        // id read, as before #369: the full selection capture and the path resolution/stat happen
+        // only when the engine is cold (`!isReady`).
+        val configuredId: String
+        var configuredPath: String? = null
+        if (isReady) {
+          configuredId = RelaisConfig.modelId(context)
+        } else {
+          val selection = RelaisConfig.modelSelection(context)
+          configuredId = selection.modelId
+          configuredPath = RelaisModelProvisioner.pathFor(context, configuredId, selection)
+          if (configuredModelMissing(isReady, configuredPath) { File(it).exists() }) {
+            // Snapshot ONCE, first, then the engine flag — computeNodeState's read-order rule.
+            val liveness = RelaisLivenessState.snapshot
+            val kick =
+              shouldKickProvision(
+                lastInitFailed = lastInitFailed,
+                listenersUp = liveness.listenersUp,
+                idleUnloaded = liveness.idleUnloaded,
+              )
+            val provisioning = if (kick) ensureProvisionedInBackground(context) else liveness.startupInProgress
+            throw ModelNotOnDiskException(configuredId, provisioning = provisioning)
+          }
         }
-        ensureInitialized(context, modelId = configuredId)
+        ensureInitialized(context, modelPath = configuredPath, modelId = configuredId)
         val e = engine ?: error("Engine not initialized")
         // #352: what serves is only knowable here. Read once, so the check and the echo agree.
         val served = residentModelId

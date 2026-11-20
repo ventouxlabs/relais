@@ -66,7 +66,7 @@ class TensorTpuProbe {
       File(context.applicationInfo.nativeLibraryDir, RelaisTpuLane.DISPATCHER_LIB).exists(),
     )
 
-    RelaisEngine.ensureInitialized(context, modelPath)
+    RelaisEngine.ensureInitialized(context, modelPath, RelaisConfig.modelId(context))
     assertTrue("engine not ready after init", RelaisEngine.isReady)
     assertTrue("TPU lane not selected — check filename marker + dispatcher", RelaisEngine.residentIsTpu)
 
@@ -104,7 +104,7 @@ class TensorTpuProbe {
       File(context.applicationInfo.nativeLibraryDir, RelaisTpuLane.DISPATCHER_LIB).exists(),
     )
 
-    RelaisEngine.ensureInitialized(context, modelPath)
+    RelaisEngine.ensureInitialized(context, modelPath, RelaisConfig.modelId(context))
     assertTrue("engine not ready after init", RelaisEngine.isReady)
     assertTrue("TPU lane not selected — check filename marker + dispatcher", RelaisEngine.residentIsTpu)
     assumeTrue(

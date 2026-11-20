@@ -286,20 +286,27 @@ class RelaisNodeService : Service() {
       RelaisNodeProgress.reset() // drop any stale phase/bytes from a prior attempt (control-panel phase line)
       try {
         updateNotification("Provisioning model…")
-        RelaisModelProvisioner.ensureModel(applicationContext) { pct ->
+        // ONE selection for the whole boot (#369): provisioning and init are both pinned to it, so
+        // a pick landing mid-download cannot pair one model's weights with another's id (#337's
+        // class). ensureModel returns the file provisioned for THIS selection even if the selection
+        // drifted meanwhile (it then publishes nothing), so (path, selection.modelId) is a consistent
+        // pair; the new pick is served by the next swap/reload.
+        // BEHAVIOUR CHANGE (D3): previously init re-read the id, so a pick landing mid-download made
+        // this boot load the NEW pick (or fail ERROR -> watchdog revive). Now the boot loads the model
+        // it provisioned (the captured selection) and the new pick waits for the next swap/restart.
+        // A same-id different-build ref change counts as a pick too.
+        val selection = RelaisModelProvisioner.captureSelectionForProvision(applicationContext)
+        val modelPath = RelaisModelProvisioner.ensureModel(applicationContext, selection) { pct ->
           updateNotification("Downloading model $pct%…")
         }
         RelaisNodeProgress.phase = ProvisionPhase.LOADING_ENGINE
-        // No `modelPath`: ensureModel's return is the path for ITS idAtStart, while init's `modelId`
-        // is a fresh read, so handing one to the other lets a selection change mid-download load one
-        // model's weights under another's id (#337's class; the #11 drift guard only declines to
-        // PERSIST that path, it is still returned). Resolved by id instead, as the provision kick
-        // does: a provision whose selection is still current publishes its in-memory cache, persisted
-        // path and registry entry under idAtStart, so pathFor finds that model's file (not necessarily
-        // the very file ensureModel returned: a same-id build pick can replace it; that applies on
-        // restart, #354). If the selection drifted, ensureModel publishes nothing, so the id-keyed
-        // lookup finds the new id's file or fails honestly (ERROR -> watchdog revive).
-        if (!RelaisEngine.ensureInitializedUnlessShutdownSince(shutdownEpoch, applicationContext)) {
+        if (!RelaisEngine.ensureInitializedUnlessShutdownSince(
+            shutdownEpoch,
+            applicationContext,
+            modelPath = modelPath,
+            modelId = selection.modelId,
+          )
+        ) {
           // Nothing was loaded: a shutdown() ran since this attempt began. Two owners can have run it.
           //  - STOP: onDestroy sets serviceDestroyed (under listenerLifecycleLock) BEFORE it calls
           //    shutdown(), so it is already true here. Throw NOW, with the same message as the check

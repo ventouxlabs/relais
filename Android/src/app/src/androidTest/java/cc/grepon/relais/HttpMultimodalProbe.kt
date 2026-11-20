@@ -50,7 +50,7 @@ class HttpMultimodalProbe {
     val modelPath = args.getString("model")
     assumeTrue("pass -e model <a readable multimodal .litertlm>", modelPath != null && File(modelPath).canRead())
 
-    RelaisEngine.ensureInitialized(context, modelPath!!)
+    RelaisEngine.ensureInitialized(context, modelPath!!, RelaisConfig.modelId(context))
     assertTrue("engine not ready after init", RelaisEngine.isReady)
     assertTrue("model did not expose image and audio encoders", RelaisEngine.isMultimodal)
 

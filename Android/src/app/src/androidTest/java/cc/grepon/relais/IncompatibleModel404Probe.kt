@@ -91,7 +91,7 @@ class IncompatibleModel404Probe {
         "fixture drift: $knownBad is no longer in the measured-incompatible table"
       }
 
-    RelaisEngine.ensureInitialized(context, requireNotNull(modelPath))
+    RelaisEngine.ensureInitialized(context, requireNotNull(modelPath), RelaisConfig.modelId(context))
     assertTrue("engine not ready after init — the gate returns early and never 404s", RelaisEngine.isReady)
     assertFalse(
       "resident must NOT be the known-bad model, or the request short-circuits to ServeResident",
