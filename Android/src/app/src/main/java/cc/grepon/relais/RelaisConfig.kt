@@ -329,9 +329,15 @@ object RelaisConfig {
     decodeProvisioned(prefs(context).getString(KEY_PROVISIONED_MODELS, null))
 
   fun setProvisionedModels(context: Context, entries: List<ProvisionedModel>) =
-    withSelectionPrefs(context) { p ->
-      p.edit().putString(KEY_PROVISIONED_MODELS, encodeProvisioned(entries)).apply()
-    }
+    withSelectionPrefs(context) { p -> setProvisionedModelsIn(p, entries) }
+
+  /** Handle-based registry read for [ifCurrentSelection]'s block: no `getSharedPreferences` under the monitor. */
+  internal fun provisionedModelsIn(p: SharedPreferences): List<ProvisionedModel> =
+    decodeProvisioned(p.getString(KEY_PROVISIONED_MODELS, null))
+
+  internal fun setProvisionedModelsIn(p: SharedPreferences, entries: List<ProvisionedModel>) {
+    p.edit().putString(KEY_PROVISIONED_MODELS, encodeProvisioned(entries)).apply()
+  }
 
   /**
    * Drops the persisted ref (e.g. reverting to a pure allowlist id). Leaves [KEY_MODEL_ID] intact.
@@ -397,6 +403,10 @@ object RelaisConfig {
   fun modelPath(context: Context): String? = prefs(context).getString(KEY_MODEL_PATH, null)
 
   fun setModelPath(context: Context, value: String) = withSelectionPrefs(context) { p ->
+    setModelPathIn(p, value)
+  }
+
+  internal fun setModelPathIn(p: SharedPreferences, value: String) {
     p.edit().putString(KEY_MODEL_PATH, value).apply()
   }
 
@@ -436,17 +446,19 @@ object RelaisConfig {
    * [selection]'s identity, else returns null without running it. The check and everything [block]
    * writes are one critical section, so a stale provision can never publish across an operator pick.
    *
-   * [block] may call this object's selection writers (the monitor is reentrant, and the prefs handle
-   * was already acquired). Same rules as [withSelectionPrefs]: no engine call, no network, no file
-   * I/O inside [block]; do disk work before calling this and pass the result in.
+   * [block] receives the prefs handle acquired BEFORE the monitor and must write only through it
+   * ([setModelPathIn], [provisionedModelsIn], [setProvisionedModelsIn]); a context-based accessor
+   * would call `getSharedPreferences` while [selectionLock] is held. Same rules as
+   * [withSelectionPrefs]: no engine call, no network, no file I/O inside [block]; do disk work
+   * before calling this and pass the result in.
    */
   internal fun <T> ifCurrentSelection(
     context: Context,
     selection: ConfiguredModelSelection,
-    block: () -> T,
+    block: (SharedPreferences) -> T,
   ): T? =
     withSelectionPrefs(context) { p ->
-      if (captureSelection(p).sameIdentity(selection)) block() else null
+      if (captureSelection(p).sameIdentity(selection)) block(p) else null
     }
 
   /** True while the stored selection still has [selection]'s identity (the path is output, not identity). */

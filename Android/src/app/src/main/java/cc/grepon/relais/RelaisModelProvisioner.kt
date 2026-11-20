@@ -17,6 +17,7 @@
 package cc.grepon.relais
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
@@ -509,7 +510,7 @@ object RelaisModelProvisioner {
    * stats the registry's files first ([goneRegistryPaths]) and passes the result in.
    */
   private fun recordProvisioned(
-    context: Context,
+    p: SharedPreferences,
     path: String,
     id: String,
     displayName: String,
@@ -518,10 +519,10 @@ object RelaisModelProvisioner {
     runCatching {
         val updated =
           upsertProvisioned(
-            pruneMissingProvisioned(RelaisConfig.provisionedModels(context)) { it !in gone },
+            pruneMissingProvisioned(RelaisConfig.provisionedModelsIn(p)) { it !in gone },
             ProvisionedModel(modelId = id, path = path, displayName = displayName),
           )
-        RelaisConfig.setProvisionedModels(context, updated)
+        RelaisConfig.setProvisionedModelsIn(p, updated)
         Log.i(TAG, "Registry: ${updated.size} model(s) provisioned on device")
       }
       .onFailure { Log.w(TAG, "Could not update provisioned-model registry: ${it.message}") }
@@ -548,15 +549,15 @@ object RelaisModelProvisioner {
   internal fun remember(context: Context, path: String, selection: ConfiguredModelSelection): String {
     val gone = goneRegistryPaths(context) // file I/O stays outside the monitor
     val published =
-      RelaisConfig.ifCurrentSelection(context, selection) {
+      RelaisConfig.ifCurrentSelection(context, selection) { p ->
         cachedModelPath = CachedModelPath(modelId = selection.modelId, path = path)
-        RelaisConfig.setModelPath(context, path)
+        RelaisConfig.setModelPathIn(p, path)
         // #180: the ONE funnel both the already-present and freshly-downloaded paths pass through, so
         // it is where the provisioned-model registry gains entries. Recording only on local success is
         // what keeps a per-request swap unable to originate a download. Inside the compare: the
         // registry entry and the persisted path are the same claim ("this id lives at this file").
         recordProvisioned(
-          context,
+          p,
           path,
           selection.modelId,
           selection.ref?.displayName ?: selection.modelId,

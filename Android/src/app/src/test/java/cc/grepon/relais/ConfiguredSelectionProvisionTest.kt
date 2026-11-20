@@ -137,6 +137,32 @@ class ConfiguredSelectionProvisionTest {
   }
 
   @Test
+  fun `publish acquires prefs only before the monitor never inside it`() {
+    val a = ref("acme/model-a")
+    val fileA = stageFor(a)
+    ModelSwitch.applyRef(ctx, a)
+    val selection = RelaisConfig.modelSelection(ctx)
+
+    // Registry stat read (1) + ifCurrentSelection's handle (2). Any further access would be a
+    // context-based accessor running while selectionLock is held.
+    val counting = CountingContext(ctx)
+    RelaisModelProvisioner.remember(counting, fileA.absolutePath, selection)
+
+    assertEquals("no getSharedPreferences inside the selection monitor", 2, counting.calls)
+    assertEquals(fileA.absolutePath, RelaisConfig.modelPath(ctx))
+    assertEquals(1, RelaisConfig.provisionedModels(ctx).size)
+  }
+
+  private class CountingContext(base: android.content.Context) : ContextWrapper(base) {
+    var calls = 0
+
+    override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
+      if (name == "relais") calls++
+      return super.getSharedPreferences(name, mode)
+    }
+  }
+
+  @Test
   fun `T3 pathFor takes configured id and persisted path from one capture`() {
     val a = ref("acme/model-a")
     val fileA = stageFor(a)
