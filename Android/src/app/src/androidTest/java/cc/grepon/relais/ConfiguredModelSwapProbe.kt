@@ -66,7 +66,7 @@ class ConfiguredModelSwapProbe {
         assertEquals(X_ID, RelaisEngine.residentModelId)
         assertTrue("X must stay ready", RelaisEngine.isReady)
         assertFalse("no swap may be started by a client request", RelaisLivenessState.snapshot.startupInProgress)
-        assertFalse("no provisioning may start", RelaisNodeProgress.phase == ProvisionPhase.RESOLVING)
+        assertEquals("no provisioning may start (any phase past IDLE: RESOLVING, DOWNLOADING, LOADING_ENGINE)", ProvisionPhase.IDLE, RelaisNodeProgress.phase)
         assertFalse(RelaisEngine.lastInitFailed)
       }
     }
@@ -130,6 +130,13 @@ class ConfiguredModelSwapProbe {
     val x = RelaisConfig.provisionedModels(context).firstOrNull { it.modelId == X_ID }
     assumeTrue("Registered X must be a different, present local model", x != null && x.modelId != yId && File(x.path).length() > 0L)
     val residentX = requireNotNull(x)
+    // Y's file must be the ONLY copy: another copy (same name or same size nearby, or a second registry
+    // path for Y's id) would let the loader resolve elsewhere and the NotOnDevice assertion mean nothing.
+    val otherCopies =
+      original.parentFile.parentFile.walkTopDown().maxDepth(3).filter { it.isFile && it != original && !it.name.endsWith(".backup") }
+        .filter { it.name == original.name || it.length() == original.length() }.map { it.absolutePath }.toList() +
+        RelaisConfig.provisionedModels(context).filter { it.modelId == yId && it.path != original.absolutePath && File(it.path).exists() }.map { it.path }
+    assumeTrue("Y must have no other copy on disk: $otherCopies", otherCopies.isEmpty())
     val backup = File(original.parentFile, "${original.name}.configured-swap-probe-${UUID.randomUUID()}.backup")
     val originalLength = original.length()
     val originalInode = Os.stat(original.absolutePath).st_ino
@@ -216,7 +223,7 @@ class ConfiguredModelSwapProbe {
     const val TAG = "RelaisConfiguredSwapProbe"
     const val X_ID = "device/gemma3-1b-it-int4"
     const val RETRIES = 3
-    const val PORT = 18097
+    const val PORT = 18094 // distinct from the other probes (18095-18099, 18443)
     const val RESPONSE_TIMEOUT_MS = 60_000
     val MODEL_KEYS = listOf("model_id", "model_ref", "model_path", "provisioned_models")
   }
