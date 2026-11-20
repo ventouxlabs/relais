@@ -64,6 +64,17 @@ class RelaisModelSwapTest {
     assertEquals(first, outcome(configured, provisioned = setOf(resident), configuredOnDisk = false))
   }
 
+  @Test fun `with no engine up the configured model is served even when absent from disk`() {
+    // Not ready: willServe is the configured id, so it is ServeResident (the lazy reload owns the
+    // 503) whether or not a load is in flight; NotOnDevice needs a ready engine serving another model.
+    for (inFlight in listOf(false, true)) {
+      assertEquals(
+        ModelRequestOutcome.ServeResident,
+        outcome(configured, isReady = false, loadInFlight = inFlight, provisioned = emptySet(), configuredOnDisk = false),
+      )
+    }
+  }
+
   @Test fun `configured model on disk but unrecorded still swaps`() {
     assertEquals(
       ModelRequestOutcome.SwapThenRetry(configured),
