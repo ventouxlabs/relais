@@ -1487,6 +1487,12 @@ class RelaisHttpServer(
 
   // --- OpenAI-compatible chat completions ---
 
+  /** Whether the configured model's file exists (#369); [RelaisModelProvisioner.pathFor] only names it. */
+  private fun configuredModelOnDisk(): Boolean {
+    val id = RelaisConfig.modelId(context)
+    return RelaisModelProvisioner.pathFor(context, id)?.let { java.io.File(it).exists() } == true
+  }
+
   /** Registry entries whose file still exists — see the read-prune note in [rejectIfModelUnavailable]. */
   private fun provisionedOnDisk(): List<ProvisionedModel> =
     pruneMissingProvisioned(RelaisConfig.provisionedModels(context)) { java.io.File(it).exists() }
@@ -1538,6 +1544,8 @@ class RelaisHttpServer(
         provisionedModelIds = provisionedIds(provisionedOnDisk()),
         isReady = ready,
         loadInFlight = loadInFlight,
+        // #369: a swap to a configured model with no file can only bail, so say so instead.
+        configuredModelOnDisk = configuredModelOnDisk(),
       )
     return when (outcome) {
       is ModelRequestOutcome.ServeResident -> false
@@ -1567,6 +1575,13 @@ class RelaisHttpServer(
           errorBody("a model is loading; retry shortly"),
           listOf("Retry-After: $MODEL_SWAP_RETRY_AFTER_SECONDS"),
         )
+        true
+      }
+      is ModelRequestOutcome.NotOnDevice -> {
+        // Truthful 503, no Retry-After: retrying changes nothing until the operator downloads it.
+        // Deliberately no download from here: a client request never originates one.
+        RelaisMetrics.recordRequest(endpoint, 503)
+        respond(sock, 503, errorBody(notOnDeviceModelMessage(outcome.requestedModelId)))
         true
       }
       is ModelRequestOutcome.Incompatible -> {

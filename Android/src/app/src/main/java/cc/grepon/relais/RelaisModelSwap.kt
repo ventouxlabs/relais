@@ -76,6 +76,15 @@ sealed interface ModelRequestOutcome {
    * configured model would never load.
    */
   data class RetryAfterLoad(val requestedModelId: String) : ModelRequestOutcome
+
+  /**
+   * [requestedModelId] is the operator's configured model, but it is not on disk (#369) and another
+   * model is resident. A swap could only bail ("not provisioned on disk") and leave the resident
+   * engine untouched, so every retry would be answered "swapping" forever. Answer a truthful 503
+   * WITHOUT dispatching a swap and WITHOUT starting a download: a client request never originates
+   * one. Only the operator can fix it (download the model).
+   */
+  data class NotOnDevice(val requestedModelId: String) : ModelRequestOutcome
 }
 
 /**
@@ -102,6 +111,11 @@ sealed interface ModelRequestOutcome {
  * model that will serve is [configuredModelId] (`RelaisEngine.generate`'s lazy reload), so that is
  * what [requestedModelId] is compared against.
  *
+ * [configuredModelOnDisk] says whether the configured model's file exists (#369). It only matters
+ * for a request naming [configuredModelId] that is not in [provisionedModelIds]: absent from disk
+ * that is [ModelRequestOutcome.NotOnDevice], not a swap that can only bail. It has no default so a
+ * caller cannot silently reintroduce the endless "swapping" 503.
+ *
  * [loadInFlight] is `startupInProgress` — a START, swap or reload already running. It only matters
  * while not ready, where it turns a swap into [ModelRequestOutcome.RetryAfterLoad]. It has no
  * default: omitting it would dispatch swaps during a START, the failure it exists to prevent.
@@ -122,6 +136,7 @@ fun resolveModelRequest(
   provisionedModelIds: Set<String>,
   isReady: Boolean,
   loadInFlight: Boolean,
+  configuredModelOnDisk: Boolean,
   incompatibleReason: (String) -> String? = { null },
 ): ModelRequestOutcome {
   val requested = requestedModelId?.takeIf { it.isNotBlank() } ?: return ModelRequestOutcome.ServeResident
@@ -136,6 +151,16 @@ fun resolveModelRequest(
   // reality outranks the static table. The table's job is to stop us loading something, not to
   // refuse something already demonstrably working.
   if (requested == willServe) return ModelRequestOutcome.ServeResident
+  // #369: checked before the compat gate for the same reason NotProvisioned is: absence is the
+  // more actionable diagnosis. Skipped while a load is in flight: that load may be provisioning it.
+  if (
+    requested == configuredModelId &&
+      requested !in provisionedModelIds &&
+      !configuredModelOnDisk &&
+      !(!isReady && loadInFlight)
+  ) {
+    return ModelRequestOutcome.NotOnDevice(requested)
+  }
   if (requested == configuredModelId || requested in provisionedModelIds) {
     // On disk (or the operator's own selection) — but on-disk proves the file downloaded, NOT that
     // the engine can create against it. Refuse before attempting a swap, otherwise the client gets
@@ -202,5 +227,8 @@ internal fun incompatibleModelMessage(modelId: String, reason: String): String =
   "model '$modelId' is $reason"
 
 /** The 404 body for a model this node does not have at all — points at the discovery endpoint. */
+internal fun notOnDeviceModelMessage(modelId: String): String =
+  "model '$modelId' is configured but not on this device; it has to be downloaded on the node first"
+
 internal fun notProvisionedModelMessage(modelId: String): String =
   "model '$modelId' is not provisioned on this node; see GET /v1/models for what is available"
