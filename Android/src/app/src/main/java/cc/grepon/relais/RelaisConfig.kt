@@ -315,8 +315,13 @@ object RelaisConfig {
     // One editor, one commit: a crash between two separate apply()s could persist the new ref+id
     // while keeping the old KEY_MODEL_PATH, and ensureModel's fast-path would then serve the
     // previous model's file for the new model. Mirrors setModelId's single-editor discipline.
-    val edit = p.edit().putString(KEY_MODEL_REF, json).putString(KEY_MODEL_ID, ref.modelId)
-    if (changed) edit.remove(KEY_MODEL_PATH)
+    writeRef(p, ref, clearPath = changed)
+  }
+
+  /** One editor, one commit: ref + coherent id, optionally dropping the staged path. Call under [selectionLock]. */
+  private fun writeRef(p: SharedPreferences, ref: RelaisModelRef, clearPath: Boolean) {
+    val edit = p.edit().putString(KEY_MODEL_REF, ref.toJson()).putString(KEY_MODEL_ID, ref.modelId)
+    if (clearPath) edit.remove(KEY_MODEL_PATH)
     edit.apply()
   }
 
@@ -400,19 +405,20 @@ object RelaisConfig {
     p.edit().putString(KEY_MODEL_PATH, value).apply()
   }
 
+  /** Dedicated monitor guarding the selection keys; see [withSelectionPrefs]. */
+  private val selectionLock = Any()
+
   /**
    * Runs [block] with the prefs handle inside [selectionLock]. The four
    * selection keys ([KEY_MODEL_ID], [KEY_MODEL_REF], [KEY_MODEL_PATH], [KEY_PROVISIONED_MODELS])
    * are written and captured only under it, so a [modelSelection] never straddles a writer.
    *
-   * [selectionLock] is a dedicated monitor, distinct from this object's monitor held by the secret
+   * [selectionLock] is distinct from this object's monitor held by the secret
    * paths (Keystore init, store reset, `commit()`), so selection users never wait behind them.
    * Lock order: the engine `lock` -> [selectionLock], never the reverse. The prefs handle is acquired
    * BEFORE the monitor (a test probe blocks inside `getSharedPreferences`). Inside [block]: no
    * engine call, no network, no disk I/O beyond the prefs editor.
    */
-  private val selectionLock = Any()
-
   private inline fun <T> withSelectionPrefs(context: Context, block: (SharedPreferences) -> T): T {
     val p = prefs(context)
     return synchronized(selectionLock) { block(p) }
@@ -443,8 +449,7 @@ object RelaisConfig {
       if (p.contains(KEY_MODEL_ID) || RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null)) != null) {
         null
       } else {
-        p.edit().putString(KEY_MODEL_REF, ref.toJson()).putString(KEY_MODEL_ID, ref.modelId)
-          .remove(KEY_MODEL_PATH).apply()
+        writeRef(p, ref, clearPath = true)
         ref
       }
     }
