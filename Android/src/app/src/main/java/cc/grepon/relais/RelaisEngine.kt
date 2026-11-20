@@ -690,6 +690,9 @@ object RelaisEngine {
     // The provisioning half is pinned to ONE capture (taken after the device default is applied; never
     // under the engine lock). ensureModel returns the file provisioned for THIS selection, paired
     // below with its id: no fresh id read between download and init (#369 R7).
+    // BEHAVIOUR CHANGE (D3): a pick (or same-id ref change) landing mid-download no longer redirects
+    // this init to the new model; it loads what was provisioned for the captured selection and the
+    // new pick is served by the next swap/reload.
     val selection = RelaisModelProvisioner.captureSelectionForProvision(context)
     val provisionedPath = RelaisModelProvisioner.ensureModel(context, selection)
     if (!ensureInitializedUnlessShutdownSince(epoch, context, modelPath = provisionedPath, modelId = selection.modelId)) {
@@ -773,6 +776,8 @@ object RelaisEngine {
         Log.w(TAG, "model swap skipped: engine was shut down since this swap was dispatched")
         return false
       }
+      // This re-check runs UNDER [lock], after the dispatcher's own unlocked check: it is what closes
+      // the check-then-act (TOCTOU) window between dispatch and the shutdown() below.
       if (selection != null && !RelaisConfig.isCurrentSelection(context, selection)) {
         Log.w(TAG, "model swap skipped: selection changed since dispatch")
         return false
@@ -964,22 +969,29 @@ object RelaisEngine {
         // kick with the node OFF — in-app chat reaches here in-process — nor in ERROR, where the
         // watchdog's revive owns retries). The request itself writes no liveness and no
         // lastInitFailed — only the kick publishes, and owns, its startup pair. The id is read ONCE,
-        // so the check and the init are about the same model; `!isReady` first keeps prefs reads and
-        // a stat off the ready path.
-        val selection = RelaisConfig.modelSelection(context)
-        val configuredId = selection.modelId
-        val configuredPath = RelaisModelProvisioner.pathFor(context, configuredId, selection)
-        if (!isReady && configuredModelMissing(isReady, configuredPath) { File(it).exists() }) {
-          // Snapshot ONCE, first, then the engine flag — computeNodeState's read-order rule.
-          val liveness = RelaisLivenessState.snapshot
-          val kick =
-            shouldKickProvision(
-              lastInitFailed = lastInitFailed,
-              listenersUp = liveness.listenersUp,
-              idleUnloaded = liveness.idleUnloaded,
-            )
-          val provisioning = if (kick) ensureProvisionedInBackground(context) else liveness.startupInProgress
-          throw ModelNotOnDiskException(configuredId, provisioning = provisioning)
+        // so the check and the init are about the same model. The ready (hot) path does only the cheap
+        // id read, as before #369: the full selection capture and the path resolution/stat happen
+        // only when the engine is cold (`!isReady`).
+        val configuredId: String
+        var configuredPath: String? = null
+        if (isReady) {
+          configuredId = RelaisConfig.modelId(context)
+        } else {
+          val selection = RelaisConfig.modelSelection(context)
+          configuredId = selection.modelId
+          configuredPath = RelaisModelProvisioner.pathFor(context, configuredId, selection)
+          if (configuredModelMissing(isReady, configuredPath) { File(it).exists() }) {
+            // Snapshot ONCE, first, then the engine flag — computeNodeState's read-order rule.
+            val liveness = RelaisLivenessState.snapshot
+            val kick =
+              shouldKickProvision(
+                lastInitFailed = lastInitFailed,
+                listenersUp = liveness.listenersUp,
+                idleUnloaded = liveness.idleUnloaded,
+              )
+            val provisioning = if (kick) ensureProvisionedInBackground(context) else liveness.startupInProgress
+            throw ModelNotOnDiskException(configuredId, provisioning = provisioning)
+          }
         }
         ensureInitialized(context, modelPath = configuredPath, modelId = configuredId)
         val e = engine ?: error("Engine not initialized")

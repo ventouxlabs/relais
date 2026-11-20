@@ -291,6 +291,10 @@ class RelaisNodeService : Service() {
         // class). ensureModel returns the file provisioned for THIS selection even if the selection
         // drifted meanwhile (it then publishes nothing), so (path, selection.modelId) is a consistent
         // pair; the new pick is served by the next swap/reload.
+        // BEHAVIOUR CHANGE (D3): previously init re-read the id, so a pick landing mid-download made
+        // this boot load the NEW pick (or fail ERROR -> watchdog revive). Now the boot loads the model
+        // it provisioned (the captured selection) and the new pick waits for the next swap/restart.
+        // A same-id different-build ref change counts as a pick too.
         val selection = RelaisModelProvisioner.captureSelectionForProvision(applicationContext)
         val modelPath = RelaisModelProvisioner.ensureModel(applicationContext, selection) { pct ->
           updateNotification("Downloading model $pct%…")
