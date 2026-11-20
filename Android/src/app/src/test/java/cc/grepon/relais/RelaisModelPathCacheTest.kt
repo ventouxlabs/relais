@@ -17,6 +17,7 @@ import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -44,15 +45,6 @@ class RelaisModelPathCacheTest {
   private companion object {
     const val OPERATOR_ID = "operator/typed-this"
 
-    /**
-     * The prefs read to flip the model id on: one call after `ensureModel`'s `idAtStart` capture
-     * (modelRef, modelId, idAtStart, then modelPath for fast path 1). Not asserted by counting —
-     * a counter only proves the Nth read happened, not which read it was. The test instead asserts
-     * that the staged file reached neither the registry nor the persisted path: if a read-order
-     * change moved the capture to or past this call, `idAtStart` would be the flipped DEFAULT id,
-     * adoption would be legitimate, `remember` would persist it, and that assertion fails loudly.
-     */
-    const val FLIP_ON_PREFS_CALL = 4
   }
 
   /** A real file, because every resolution step below the default is gated on the file existing. */
@@ -120,56 +112,41 @@ class RelaisModelPathCacheTest {
 
   @Test
   fun `the staged default file is not adopted for a non-default id`() {
-    // The window is an id change landing between ensureModel's `idAtStart` capture and the
-    // staged-adoption gate. Driving it needs no concurrency: RelaisConfig.prefs is a plain per-call
-    // getSharedPreferences, so every RelaisConfig.xxx(context) is one observable call on a wrapper,
-    // and flipping the id from inside the Nth call is synchronously equivalent to a racing write.
+    // The window is an id change landing after ensureModel's capture and before the staged-adoption
+    // gate. The provisioner now runs on ONE captured selection, so the window is driven directly:
+    // capture the operator's id, flip config to the DEFAULT id, then provision the captured value.
     //
     // The dangerous direction is non-default -> default: a gate that re-read the id would see
-    // DEFAULT and adopt, while `remember` tags with the captured `idAtStart`, binding the default
-    // model's file to the operator's id. `pathFor`'s rung 1 then trusts that tag.
+    // DEFAULT and adopt the staged default-model file for the operator's captured id.
     val staged = File(RelaisEngine.defaultModelPath(ctx)).apply { parentFile?.mkdirs() }
     staged.writeText("default model weights")
     RelaisConfig.setModelId(ctx, OPERATOR_ID)
     // Fast path 1 must miss, or it returns before the staged branch is ever reached.
     RelaisConfig.setModelPath(ctx, File(ctx.cacheDir, "absent.litertlm").absolutePath)
-
-    var prefsCalls = 0
-    val flipping = object : android.content.ContextWrapper(ctx) {
-      override fun getSharedPreferences(name: String?, mode: Int): android.content.SharedPreferences {
-        val real = super.getSharedPreferences(name, mode)
-        prefsCalls++
-        // One call AFTER idAtStart is captured — see FLIP_ON_PREFS_CALL for how a read-order change
-        // that moves the capture is caught.
-        if (prefsCalls == FLIP_ON_PREFS_CALL) {
-          real.edit().putString("model_id", RelaisConfig.DEFAULT_MODEL_ID).commit()
-        }
-        return real
-      }
-    }
+    val captured = RelaisConfig.modelSelection(ctx)
+    RelaisConfig.setModelId(ctx, RelaisConfig.DEFAULT_MODEL_ID)
 
     try {
-      // With the gate reading idAtStart this falls through to allowlist resolution, which cannot
-      // reach the network under Robolectric. The throw is expected; the binding is the assertion.
-      runCatching { RelaisModelProvisioner.ensureModel(flipping) }
+      // With the gate on the captured id this falls through to allowlist resolution, which cannot
+      // reach the network under Robolectric: the provision must FAIL. A gate that re-read the id
+      // would adopt the staged file and return its path instead.
+      val outcome = runCatching { RelaisModelProvisioner.ensureModel(ctx, captured) }
 
+      assertTrue(
+        "the staged default file must not be adopted for the captured non-default id",
+        outcome.isFailure,
+      )
       assertEquals(
         "the id really did change mid-call, or the test proves nothing",
         RelaisConfig.DEFAULT_MODEL_ID,
         RelaisConfig.modelId(ctx),
       )
-      // Catches the gate re-reading the id: adoption tagged OPERATOR_ID lands only in the cache
-      // (the drift gate refuses to persist it), so only pathFor sees it.
       assertNull(
         "the default model's file must never be remembered under the operator's id",
         RelaisModelProvisioner.pathFor(ctx, OPERATOR_ID),
       )
-      // Catches the flip landing at or before the capture: idAtStart would then BE the default id,
-      // adoption would be legitimate and PERSISTED, and the gate above would pass for the wrong
-      // reason. With the capture before the flip, nothing is remembered at all.
       assertFalse(
-        "the staged file must not have been adopted under any id — if it was, the flip landed " +
-          "before idAtStart was captured and this test no longer exercises the gate",
+        "the staged file must not have been adopted under any id",
         RelaisConfig.provisionedModels(ctx).any { it.path == staged.absolutePath } ||
           RelaisConfig.modelPath(ctx) == staged.absolutePath,
       )

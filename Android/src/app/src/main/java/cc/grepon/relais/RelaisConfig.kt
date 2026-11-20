@@ -423,10 +423,30 @@ object RelaisConfig {
    * than the stored id is stale and excluded. Same lock-order rules as [withSelectionPrefs].
    */
   internal fun modelSelection(context: Context): ConfiguredModelSelection =
+    withSelectionPrefs(context) { p -> captureSelection(p) }
+
+  private fun captureSelection(p: SharedPreferences): ConfiguredModelSelection {
+    val id = p.getString(KEY_MODEL_ID, null) ?: DEFAULT_MODEL_ID
+    val ref = RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null))?.takeIf { it.modelId == id }
+    return ConfiguredModelSelection(id, ref, p.getString(KEY_MODEL_PATH, null))
+  }
+
+  /**
+   * Compare-and-publish: runs [block] inside [selectionLock] only if the stored selection still has
+   * [selection]'s identity, else returns null without running it. The check and everything [block]
+   * writes are one critical section, so a stale provision can never publish across an operator pick.
+   *
+   * [block] may call this object's selection writers (the monitor is reentrant, and the prefs handle
+   * was already acquired). Same rules as [withSelectionPrefs]: no engine call, no network, no file
+   * I/O inside [block]; do disk work before calling this and pass the result in.
+   */
+  internal fun <T> ifCurrentSelection(
+    context: Context,
+    selection: ConfiguredModelSelection,
+    block: () -> T,
+  ): T? =
     withSelectionPrefs(context) { p ->
-      val id = p.getString(KEY_MODEL_ID, null) ?: DEFAULT_MODEL_ID
-      val ref = RelaisModelRef.fromJson(p.getString(KEY_MODEL_REF, null))?.takeIf { it.modelId == id }
-      ConfiguredModelSelection(id, ref, p.getString(KEY_MODEL_PATH, null))
+      if (captureSelection(p).sameIdentity(selection)) block() else null
     }
 
   /** True while the stored selection still has [selection]'s identity (the path is output, not identity). */

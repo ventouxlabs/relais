@@ -220,8 +220,16 @@ object RelaisModelProvisioner {
    * and otherwise fetches the allowlist and matches [RelaisConfig.modelId]. Blocking. Throws with a
    * clear message if the allowlist can't be fetched or the configured id isn't in it.
    */
-  fun resolveModel(context: Context): Model {
-    val modelId = RelaisConfig.modelId(context)
+  @Deprecated(
+    "Captures a fresh selection per call. Pass the operation's captured selection instead.",
+    ReplaceWith("resolveModel(context, selection)"),
+  )
+  fun resolveModel(context: Context): Model =
+    resolveModel(context, RelaisConfig.modelSelection(context))
+
+  /** [resolveModel] on a captured [selection]: nothing below re-reads [RelaisConfig]. */
+  internal fun resolveModel(context: Context, selection: ConfiguredModelSelection): Model {
+    val modelId = selection.modelId
     // #220 follow-up: gate the id THIS function actually resolves, in the same breath as reading it.
     // [ensureModel]'s gate reads the preference separately and earlier, so the two reads can disagree
     // — flip the selection mid-provision (ModelSwitch.applyRef while an earlier startup is still
@@ -239,7 +247,7 @@ object RelaisModelProvisioner {
     // Ref fast path: a self-contained ref provisions any selected model offline. Gated to modelId
     // agreement so a bare id change (adb `--es modelId`) bypasses a stale ref and re-resolves the
     // new id via the allowlist below; RelaisConfig.setModelId also drops a diverged ref.
-    RelaisConfig.modelRef(context)?.takeIf { it.modelId == modelId }?.let { ref ->
+    selection.ref?.let { ref ->
       Log.i(TAG, "Resolving from persisted ref (no allowlist): ${ref.modelId}/${ref.modelFile}")
       // preProcess() populates totalBytes (= sizeInBytes + extras), needed for download progress %.
       return modelFromRef(ref).also { it.preProcess() }
@@ -311,18 +319,31 @@ object RelaisModelProvisioner {
    * license-gated repo, set [RelaisConfig.setHfToken] first or the download 401s.
    */
   fun ensureModel(context: Context, onProgress: (Int) -> Unit = {}): String {
+    RelaisNodeProgress.phase = ProvisionPhase.RESOLVING
+    // Fresh Pixel 10 (Tensor G5): default to the faster TPU-native E2B-G5 (see [G5_DEFAULT_REF])
+    // before ANY provisioning. The default is applied BEFORE the capture so the captured selection
+    // already names E2B and the drift gate sees no false drift. (E4B is no longer blocked on G5:
+    // this is a perf-preference default, not a gate.)
+    applyDeviceDefaultIfFresh(context, isPixel10 = isPixel10())
+    return ensureModel(context, RelaisConfig.modelSelection(context), onProgress)
+  }
+
+  /**
+   * [ensureModel] on ONE captured [selection] (#369): every branch below reads id, ref and staged
+   * path from it and never from [RelaisConfig] again, so an operator pick landing mid-provision
+   * cannot pair one model's id with another's weights. A provision that finishes after the
+   * selection drifted returns its path but publishes nothing ([remember]).
+   */
+  internal fun ensureModel(
+    context: Context,
+    selection: ConfiguredModelSelection,
+    onProgress: (Int) -> Unit = {},
+  ): String {
     // Control-panel phase line (AUDIT.md §4.2/Q6): every path through this function starts in
     // RESOLVING — the offline fast paths below finish before ever reaching DOWNLOADING, so a node
     // that boots from a persisted/pre-staged model never shows a stale phase from a prior attempt.
     RelaisNodeProgress.phase = ProvisionPhase.RESOLVING
-    // Fresh Pixel 10 (Tensor G5): default to the faster TPU-native E2B-G5 (see [G5_DEFAULT_REF])
-    // before ANY provisioning. setModelRef clears the stale modelPath and sets modelId=E2B, so the
-    // fast-paths below skip and the ref fast-path in resolveModel provisions E2B. Self-healing if
-    // apply() races. (E4B is no longer blocked on G5 — this is a perf-preference default, not a gate.)
-    applyDeviceDefaultIfFresh(context, isPixel10 = isPixel10())
-    // Capture the id AFTER substitution so the issue-#11 drift guard doesn't see false drift
-    // (the id is now E2B, and idAtStart must match for the persist gate to pass).
-    val idAtStart = RelaisConfig.modelId(context)
+    val idAtStart = selection.modelId
     // Decided HERE, beside the capture, and never re-read further down. The staged-adoption branch
     // below adopts a file whose model identity is fixed by its NAME, so it may only ever be
     // remembered for DEFAULT_MODEL_ID; asking a fresh `RelaisConfig.modelId(context)` down there
@@ -359,7 +380,7 @@ object RelaisModelProvisioner {
     refuseIfIncompatible(idAtStart)
     // Offline-safe fast path: a previously provisioned file still on disk needs no network. This
     // lets a rebooted / watchdog-restarted node boot without the allowlist when nothing to download.
-    RelaisConfig.modelPath(context)?.let { saved ->
+    selection.persistedPath?.let { saved ->
       if (File(saved).exists()) {
         Log.i(TAG, "Using persisted model path (no allowlist fetch needed): $saved")
         // Route through remember() rather than assigning cachedModelPath directly: this is the MOST
@@ -367,7 +388,7 @@ object RelaisModelProvisioner {
         // remember() meant the #180 registry never learned about the resident model — /v1/models
         // reported it as not-provisioned and a request naming it would 404. Idempotent here: the
         // path is already persisted, so remember() only refreshes the cache and the registry.
-        return remember(context, saved, persistForId = idAtStart)
+        return remember(context, saved, selection)
       }
     }
     // Offline-safe fast path 2: a model an operator pre-staged at the conventional side-load
@@ -387,7 +408,7 @@ object RelaisModelProvisioner {
       // 0-byte stub isn't adopted and then fails opaquely later in Engine init.
       if (staged.length() > 0L) {
         Log.i(TAG, "Adopting pre-staged model at default location (no download): ${staged.path}")
-        return remember(context, staged.absolutePath, persistForId = idAtStart)
+        return remember(context, staged.absolutePath, selection)
       }
       // If the staging dir exists but no app-readable model does, an operator likely side-loaded a
       // file the app can't read: an adb-pushed file is owned by `shell` with no "others" bit, so
@@ -402,22 +423,22 @@ object RelaisModelProvisioner {
         )
       }
     }
-    val model = resolveModel(context)
+    val model = resolveModel(context, selection)
     val path = model.getPath(context)
     if (File(path).exists()) {
       Log.i(TAG, "Model already present, skipping download: $path")
-      return remember(context, path, persistForId = idAtStart)
+      return remember(context, path, selection)
     }
     // #221: "absent" at [path] does NOT mean absent from the device. The on-disk directory is derived
     // from Model.name, and modelFromRef picks that name by PROVENANCE — modelId for a Hugging Face
     // ref, displayName for an allowlist entry — so one model id owns two possible directories with
     // byte-identical content. Checking only this route's path re-downloaded multiple GB of a model
     // the device already had (observed: 2.6 GB on rango). Probe the other route before concluding.
-    siblingModelPath(context)
+    siblingModelPath(context, selection)
       ?.takeIf { it != path && File(it).exists() }
       ?.let { existing ->
         Log.i(TAG, "Adopting the existing copy at the sibling path (#221), no download needed: $existing")
-        return remember(context, existing, persistForId = idAtStart)
+        return remember(context, existing, selection)
       }
     model.accessToken = RelaisConfig.hfToken(context)
     Log.i(TAG, "Model absent; downloading ${model.name} from ${model.url} -> $path")
@@ -428,7 +449,7 @@ object RelaisModelProvisioner {
     // here would only re-read the same number.
     require(File(path).exists()) { "Download reported success but file is missing: $path" }
     Log.i(TAG, "Model provisioned: $path")
-    return remember(context, path, persistForId = idAtStart)
+    return remember(context, path, selection)
   }
 
   /**
@@ -443,8 +464,16 @@ object RelaisModelProvisioner {
    * Deliberately does NOT move, link, or delete anything: the goal is only to stop re-downloading a
    * model that is already here. Reclaiming the orphaned copy is a separate decision (#221 option 3).
    */
-  internal fun siblingModelPath(context: Context): String? {
-    val ref = RelaisConfig.modelRef(context)?.takeIf { it.modelId == RelaisConfig.modelId(context) } ?: return null
+  @Deprecated(
+    "Captures a fresh selection per call. Pass the operation's captured selection instead.",
+    ReplaceWith("siblingModelPath(context, selection)"),
+  )
+  internal fun siblingModelPath(context: Context): String? =
+    siblingModelPath(context, RelaisConfig.modelSelection(context))
+
+  /** [siblingModelPath] on a captured [selection]; its [ConfiguredModelSelection.ref] is already id-matched. */
+  internal fun siblingModelPath(context: Context, selection: ConfiguredModelSelection): String? {
+    val ref = selection.ref ?: return null
     val flipped =
       if (ref.source == RelaisModelRef.SOURCE_HUGGINGFACE) RelaisModelRef.SOURCE_ALLOWLIST
       else RelaisModelRef.SOURCE_HUGGINGFACE
@@ -464,17 +493,10 @@ object RelaisModelProvisioner {
     provisionedForId == null || provisionedForId == currentId
 
   /**
-   * Caches the resolved path in-memory (always — it's what this boot actually provisioned) and
-   * persists it to [RelaisConfig] only if the model id hasn't drifted since provisioning started.
-   * [persistForId] is the id captured at [ensureModel] entry and has **no default**: it is the
-   * value the drift gate keys on AND the identity this file is remembered under, so a caller that
-   * declines to state it cannot be answered with a fresh `RelaisConfig.modelId` read —
-   * [recordProvisioned]'s KDoc forbids exactly that, and the old `?: currentId` fallback did it.
-   */
-  /**
-   * Add (or refresh) this model in the provisioned registry (#180), pruning entries whose file has
-   * since disappeared. Best-effort: a registry write must never fail a provision that succeeded —
-   * the model IS on disk either way, and a missing registry entry only costs a swap opportunity.
+   * Add (or refresh) this model in the provisioned registry (#180), dropping entries in [gone] (files
+   * that have since disappeared). Best-effort: a registry write must never fail a provision that
+   * succeeded — the model IS on disk either way, and a missing registry entry only costs a swap
+   * opportunity.
    *
    * [id] MUST be the id [path] was actually provisioned FOR, never a fresh read of
    * [RelaisConfig.modelId] — see [remember]'s drift gate for why. A registry entry binds an id to a
@@ -482,14 +504,22 @@ object RelaisModelProvisioner {
    * `ensureInitialized(modelPath = …, modelId = id)`, so a mismatched pair makes the node serve one
    * model's weights stamped with another model's id — permanently, since every later request for
    * that id then matches `residentModelId` and short-circuits to ServeResident.
+   *
+   * Runs inside [RelaisConfig.ifCurrentSelection]'s monitor, so it does no file I/O: the caller
+   * stats the registry's files first ([goneRegistryPaths]) and passes the result in.
    */
-  private fun recordProvisioned(context: Context, path: String, id: String) {
+  private fun recordProvisioned(
+    context: Context,
+    path: String,
+    id: String,
+    displayName: String,
+    gone: Set<String>,
+  ) {
     runCatching {
-        val display = RelaisConfig.modelRef(context)?.takeIf { it.modelId == id }?.displayName ?: id
         val updated =
           upsertProvisioned(
-            pruneMissingProvisioned(RelaisConfig.provisionedModels(context)) { File(it).exists() },
-            ProvisionedModel(modelId = id, path = path, displayName = display),
+            pruneMissingProvisioned(RelaisConfig.provisionedModels(context)) { it !in gone },
+            ProvisionedModel(modelId = id, path = path, displayName = displayName),
           )
         RelaisConfig.setProvisionedModels(context, updated)
         Log.i(TAG, "Registry: ${updated.size} model(s) provisioned on device")
@@ -497,35 +527,72 @@ object RelaisModelProvisioner {
       .onFailure { Log.w(TAG, "Could not update provisioned-model registry: ${it.message}") }
   }
 
-  internal fun remember(context: Context, path: String, persistForId: String): String {
-    // Read the current id once: it drives the gate AND the drift warning, and re-reading risks a
-    // TOCTOU mismatch between the decision and the logged value.
-    val currentId = RelaisConfig.modelId(context)
-    // Tag the cache with the SAME id the persist gate below keys on, so the in-memory and durable
-    // halves can never disagree about which model they describe. Still written unconditionally —
-    // it is what this boot actually provisioned — but on drift that tag is the OUTGOING id, so a
-    // read for the incoming model correctly misses instead of serving the wrong weights (#337).
-    cachedModelPath = CachedModelPath(modelId = persistForId, path = path)
-    if (shouldPersistPath(persistForId, currentId)) {
-      RelaisConfig.setModelPath(context, path)
-      // #180: the ONE funnel both the already-present and freshly-downloaded paths pass through, so
-      // it is where the provisioned-model registry gains entries. Recording only on local success is
-      // what keeps a per-request swap unable to originate a download.
-      //
-      // INSIDE the drift gate, and keyed on the id this path was provisioned FOR: the registry entry
-      // and the persisted path are the same claim ("this id lives at this file"), so drift must
-      // refuse both. Recording it above the gate — with a fresh read of RelaisConfig.modelId —
-      // reintroduced the issue-#11 race one line before the guard that exists to stop it: an
-      // operator switching models mid-download would bind the NEW id to the OLD model's file.
-      recordProvisioned(context, path, persistForId)
-    } else {
+  /** Registry paths whose file is gone. File I/O, so it must run BEFORE the selection monitor. */
+  private fun goneRegistryPaths(context: Context): Set<String> =
+    runCatching {
+        RelaisConfig.provisionedModels(context).map { it.path }.filterNot { File(it).exists() }.toSet()
+      }
+      .getOrDefault(emptySet())
+
+  /**
+   * Publishes a finished provision for [selection]: the in-memory cache, the persisted path and the
+   * #180 registry entry, all or nothing, in one compare-and-publish under [RelaisConfig]'s selection
+   * monitor. If the stored selection no longer has [selection]'s identity (an operator pick landed
+   * mid-provision, a same-id different-build pick included) NOTHING is written and [path] is merely
+   * returned: the file belongs to a selection that is gone, and any entry binding it to an id
+   * reintroduces #337. The cache used to be written unconditionally here, which is how a drifted
+   * boot could answer `pathFor(A)` with model B's weights.
+   *
+   * The id this file is remembered under is `selection.modelId`; there is no fresh read of it.
+   */
+  internal fun remember(context: Context, path: String, selection: ConfiguredModelSelection): String {
+    val gone = goneRegistryPaths(context) // file I/O stays outside the monitor
+    val published =
+      RelaisConfig.ifCurrentSelection(context, selection) {
+        cachedModelPath = CachedModelPath(modelId = selection.modelId, path = path)
+        RelaisConfig.setModelPath(context, path)
+        // #180: the ONE funnel both the already-present and freshly-downloaded paths pass through, so
+        // it is where the provisioned-model registry gains entries. Recording only on local success is
+        // what keeps a per-request swap unable to originate a download. Inside the compare: the
+        // registry entry and the persisted path are the same claim ("this id lives at this file").
+        recordProvisioned(
+          context,
+          path,
+          selection.modelId,
+          selection.ref?.displayName ?: selection.modelId,
+          gone,
+        )
+      }
+    if (published == null) {
       Log.w(
         TAG,
-        "Model id changed mid-provision (now $currentId, provisioned for $persistForId); " +
-          "not persisting stale path",
+        "Model selection changed mid-provision (provisioned for ${selection.modelId}); " +
+          "not publishing stale path",
       )
     }
     return path
+  }
+
+  /**
+   * Remembers a path the CALLER already knows holds [persistForId]'s weights (the targeted-swap
+   * bypass in [ModelSwitch.applyManualId]); it provisions nothing. [persistForId] has **no
+   * default**: it is the identity the file is remembered under. On id drift (the operator moved on
+   * since) only the in-memory cache is written, tagged with the OUTGOING id so a read for the
+   * incoming model misses (#337); nothing is persisted. Provisioning itself uses the
+   * [ConfiguredModelSelection] overload, which suppresses every write on drift.
+   */
+  internal fun remember(context: Context, path: String, persistForId: String): String {
+    val current = RelaisConfig.modelSelection(context)
+    if (!shouldPersistPath(persistForId, current.modelId)) {
+      cachedModelPath = CachedModelPath(modelId = persistForId, path = path)
+      Log.w(
+        TAG,
+        "Model id changed mid-provision (now ${current.modelId}, provisioned for $persistForId); " +
+          "not persisting stale path",
+      )
+      return path
+    }
+    return remember(context, path, current)
   }
 
   /**
@@ -541,13 +608,21 @@ object RelaisModelProvisioner {
    * passes the target's id.
    */
   fun pathFor(context: Context, modelId: String): String? =
+    pathFor(context, modelId, RelaisConfig.modelSelection(context))
+
+  /**
+   * [pathFor] with the configured id and persisted path taken from ONE captured [selection]. The two
+   * used to be read separately, so a write between the reads could pair one write's id with another
+   * write's path and slip a stale path past rung 3 (design R4).
+   */
+  internal fun pathFor(context: Context, modelId: String, selection: ConfiguredModelSelection): String? =
     resolveModelPath(
       modelId = modelId,
       // ONE read of the volatile field, passed by value. Reading it twice (once per field) is a
       // torn read: a write landing between the reads pairs the new id with the old path.
       cached = cachedModelPath,
-      configuredId = RelaisConfig.modelId(context),
-      persistedPath = RelaisConfig.modelPath(context),
+      configuredId = selection.modelId,
+      persistedPath = selection.persistedPath,
       provisioned = RelaisConfig.provisionedModels(context),
       defaultPath = RelaisEngine.defaultModelPath(context),
       defaultModelId = RelaisConfig.DEFAULT_MODEL_ID,
