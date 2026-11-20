@@ -66,6 +66,17 @@ class RelaisModelSwapRunnerTest {
     assertEquals(0, publications)
   }
 
+  @Test fun `resolve receives the dispatch-time capture, not a fresh read`() {
+    RelaisConfig.setModelRef(ctx, ref)
+    var resolvedFor: String? = null
+    val runner = runner(resolve = { _, s -> resolvedFor = s.modelId; file().path })
+    assertTrue(runner.dispatch(ctx, null))
+    RelaisConfig.setModelId(ctx, "test/z") // operator pick lands after dispatch
+    requireNotNull(queued).invoke()
+    assertEquals("resolve must be pinned to the dispatch capture", ref.modelId, resolvedFor)
+    assertEquals(0, handovers)
+  }
+
   @Test fun `selection flipped while resolving cancels handover`() {
     RelaisConfig.setModelRef(ctx, ref)
     val runner = runner(resolve = { _, _ -> RelaisConfig.setModelId(ctx, "test/z"); file().path })

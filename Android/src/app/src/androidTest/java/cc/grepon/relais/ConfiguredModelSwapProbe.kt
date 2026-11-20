@@ -46,7 +46,7 @@ import org.junit.runner.RunWith
  * before starting the app, then restore the recorded prefs. Do not interrupt while weights move.
  * The host also owns reinstalling the pre-probe APK after verification; instrumentation cannot.
  *
- * Compile-only in CI (`compileDebugAndroidTestKotlin`); never run on a device by the pipeline.
+ * Compile-only in CI (`:app:compileFullOpenDebugAndroidTestKotlin`); never run on a device by the pipeline.
  */
 @RunWith(AndroidJUnit4::class)
 class ConfiguredModelSwapProbe {
@@ -197,6 +197,8 @@ class ConfiguredModelSwapProbe {
     return MODEL_KEYS.associateWith { prefs.getString(it, null) }
   }
 
+  // Writes prefs directly, bypassing RelaisConfig's selection monitor: safe only because the caller
+  // has already stopped the service and awaited its workers, so nothing else touches the selection.
   private fun restoreModelPrefs(values: Map<String, String?>) {
     val edit = context.getSharedPreferences("relais", Context.MODE_PRIVATE).edit()
     values.forEach { (key, value) -> if (value == null) edit.remove(key) else edit.putString(key, value) }
