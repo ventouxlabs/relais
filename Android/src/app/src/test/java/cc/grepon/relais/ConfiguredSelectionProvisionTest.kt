@@ -102,9 +102,9 @@ class ConfiguredSelectionProvisionTest {
       val returned = result.get(10, TimeUnit.SECONDS)
 
       assertEquals("the return value is the file for the CAPTURED selection", fileA.absolutePath, returned)
-      assertNotEquals(fileB.absolutePath, RelaisModelProvisioner.pathFor(ctx, "acme/model-a"))
-      assertNull("no cache entry answers for A", RelaisModelProvisioner.pathFor(ctx, "acme/model-a"))
-      assertNull("B was never provisioned", RelaisModelProvisioner.pathFor(ctx, "acme/model-b"))
+      assertNotEquals(fileB.absolutePath, RelaisModelProvisioner.pathFor(ctx, "acme/model-a", RelaisConfig.modelSelection(ctx)))
+      assertNull("no cache entry answers for A", RelaisModelProvisioner.pathFor(ctx, "acme/model-a", RelaisConfig.modelSelection(ctx)))
+      assertNull("B was never provisioned", RelaisModelProvisioner.pathFor(ctx, "acme/model-b", RelaisConfig.modelSelection(ctx)))
       assertEquals("drift publishes no registry entry", emptyList<ProvisionedModel>(), RelaisConfig.provisionedModels(ctx))
       assertNull("drift persists no path", RelaisConfig.modelPath(ctx))
     } finally {
