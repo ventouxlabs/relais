@@ -62,7 +62,7 @@ class RelaisEngineReloadPublishTest {
     // Non-null here because a Robolectric context reports the DEFAULT model id, which is the one
     // id the default path is allowed to answer for (#337's rung-4 gate).
     val defaultPath =
-      requireNotNull(RelaisModelProvisioner.pathFor(ctx, RelaisConfig.modelId(ctx), RelaisConfig.modelSelection(ctx))) {
+      requireNotNull(RelaisConfig.modelSelection(ctx).let { RelaisModelProvisioner.pathFor(ctx, it.modelId, it) }) {
         "expected the default model id to resolve to the default path"
       }
     assertFalse("precondition: default model path must not exist ($defaultPath)", File(defaultPath).exists())
@@ -99,7 +99,7 @@ class RelaisEngineReloadPublishTest {
    * Without this, the parameter the KDoc calls load-bearing is a no-op at every call site in the
    * tree: every caller that omits `modelPath` also omits `modelId`, and every caller that passes a
    * non-default `modelId` passes `modelPath` too, skipping resolution entirely. Replacing
-   * `pathFor(context, modelId)` with `pathFor(context, RelaisConfig.modelId(context))` would pass
+   * `modelId` with `RelaisConfig.modelId(context)` in the `pathFor` call would pass
    * the whole suite.
    *
    * The discriminator is the failure: the configured model has a path on disk that EXISTS, and the
@@ -131,7 +131,8 @@ class RelaisEngineReloadPublishTest {
    *
    * The seam [RelaisEngine.readSelection] hands back a selection whose persisted path EXISTS, while
    * the prefs know nothing about it. Resolution must use the captured value, so the attempt gets
-   * past path resolution and stops at the sentinel [ProbeStop]. A second read of the selection (the
+   * past path resolution (and `require(exists)`) and stops at the sentinel [ProbeStop] on the engine's
+   * own `getExternalFilesDir` call. A second read of the selection (the
    * old two-read `pathFor(context, modelId)`) sees the empty prefs, finds no file for the id and
    * fails with "No model file ... holds the weights" — and the seam is consulted zero times.
    */
@@ -144,7 +145,11 @@ class RelaisEngineReloadPublishTest {
       ConfiguredModelSelection("asked/about", null, captured.absolutePath)
     }
     val probing = object : ContextWrapper(ctx) {
-      override fun getExternalFilesDir(type: String?): File? = throw ProbeStop()
+      // The FIRST call is defaultModelPath inside pathFor (must pass through); the SECOND is the
+      // engine's own, after resolution and require(exists) — stop there.
+      var calls = 0
+      override fun getExternalFilesDir(type: String?): File? =
+        if (++calls == 1) super.getExternalFilesDir(type) else throw ProbeStop()
     }
     try {
       assertThrows(ProbeStop::class.java) { RelaisEngine.ensureInitialized(probing, modelId = "asked/about") }

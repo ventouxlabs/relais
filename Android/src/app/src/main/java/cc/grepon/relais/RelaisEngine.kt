@@ -308,6 +308,7 @@ object RelaisEngine {
   private val backgroundReloadDispatching = java.util.concurrent.atomic.AtomicBoolean(false)
 
   /** Test seam: the ONE place the engine reads the configured selection when it resolves a model path. */
+  @androidx.annotation.VisibleForTesting
   internal var readSelection: (Context) -> ConfiguredModelSelection = { RelaisConfig.modelSelection(it) }
 
   /** Narrow thread-start seam: tests can fail dispatch before any worker exists. */
