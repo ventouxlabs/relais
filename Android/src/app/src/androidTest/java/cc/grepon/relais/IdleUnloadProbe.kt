@@ -123,7 +123,7 @@ class IdleUnloadProbe {
   @Before
   fun setUp() {
     assumeTrue("On-device probe; pass -e RELAIS_PROBE 1 to run", args.getString("RELAIS_PROBE") == "1")
-    val modelPath = RelaisModelProvisioner.pathFor(context, RelaisConfig.modelId(context), RelaisConfig.modelSelection(context))
+    val modelPath = RelaisConfig.modelSelection(context).let { RelaisModelProvisioner.pathFor(context, it.modelId, it) }
     assumeTrue(
       "no model file on this device for ${RelaisConfig.modelId(context)} — provision one before running this probe",
       modelPath != null && File(modelPath).exists(),
