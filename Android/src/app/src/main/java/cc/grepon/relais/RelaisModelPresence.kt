@@ -27,7 +27,7 @@ package cc.grepon.relais
 
 /**
  * True iff the engine is not resident AND the configured model's weights are not on disk:
- * [resolvedPath] is `RelaisModelProvisioner.pathFor(context, configuredId)`, which is null when
+ * [resolvedPath] is `RelaisModelProvisioner.pathFor(context, configuredId, selection)`, which is null when
  * nothing on the device is known to hold the model, and otherwise MAY be the conventional default
  * path returned UNCHECKED (its rung 4 — where a provision will write). Both shapes are "missing".
  *

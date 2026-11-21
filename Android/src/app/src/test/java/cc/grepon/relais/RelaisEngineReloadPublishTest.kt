@@ -62,7 +62,7 @@ class RelaisEngineReloadPublishTest {
     // Non-null here because a Robolectric context reports the DEFAULT model id, which is the one
     // id the default path is allowed to answer for (#337's rung-4 gate).
     val defaultPath =
-      requireNotNull(RelaisModelProvisioner.pathFor(ctx, RelaisConfig.modelId(ctx))) {
+      requireNotNull(RelaisModelProvisioner.pathFor(ctx, RelaisConfig.modelId(ctx), RelaisConfig.modelSelection(ctx))) {
         "expected the default model id to resolve to the default path"
       }
     assertFalse("precondition: default model path must not exist ($defaultPath)", File(defaultPath).exists())
@@ -123,6 +123,35 @@ class RelaisEngineReloadPublishTest {
       )
     } finally {
       configured.delete()
+    }
+  }
+
+  /**
+   * The engine resolves the model path from ONE captured selection (relais arch-review #1).
+   *
+   * The seam [RelaisEngine.readSelection] hands back a selection whose persisted path EXISTS, while
+   * the prefs know nothing about it. Resolution must use the captured value, so the attempt gets
+   * past path resolution and stops at the sentinel [ProbeStop]. A second read of the selection (the
+   * old two-read `pathFor(context, modelId)`) sees the empty prefs, finds no file for the id and
+   * fails with "No model file ... holds the weights" — and the seam is consulted zero times.
+   */
+  @Test fun `the engine resolves the path from the single captured selection, not a second read`() {
+    val captured = File(ctx.cacheDir, "captured-selection-model.litertlm").apply { writeBytes(byteArrayOf(0x00)) }
+    var reads = 0
+    val original = RelaisEngine.readSelection
+    RelaisEngine.readSelection = { _ ->
+      reads++
+      ConfiguredModelSelection("asked/about", null, captured.absolutePath)
+    }
+    val probing = object : ContextWrapper(ctx) {
+      override fun getExternalFilesDir(type: String?): File? = throw ProbeStop()
+    }
+    try {
+      assertThrows(ProbeStop::class.java) { RelaisEngine.ensureInitialized(probing, modelId = "asked/about") }
+      assertEquals("exactly one selection read per resolution", 1, reads)
+    } finally {
+      RelaisEngine.readSelection = original
+      captured.delete()
     }
   }
 

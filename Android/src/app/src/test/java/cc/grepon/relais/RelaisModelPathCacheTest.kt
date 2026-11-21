@@ -68,7 +68,7 @@ class RelaisModelPathCacheTest {
     RelaisConfig.setModelId(ctx, "alpha")
     RelaisModelProvisioner.remember(ctx, path, persistForId = "alpha")
 
-    assertEquals(path, RelaisModelProvisioner.pathFor(ctx, "alpha"))
+    assertEquals(path, RelaisModelProvisioner.pathFor(ctx, "alpha", RelaisConfig.modelSelection(ctx)))
   }
 
   @Test
@@ -85,7 +85,7 @@ class RelaisModelPathCacheTest {
     // answer — assertNotEquals(alpha) would also pass for some third model's file.
     assertNull(
       "an idle reload for beta must not be handed alpha's weights",
-      RelaisModelProvisioner.pathFor(ctx, "beta"),
+      RelaisModelProvisioner.pathFor(ctx, "beta", RelaisConfig.modelSelection(ctx)),
     )
   }
 
@@ -101,12 +101,12 @@ class RelaisModelPathCacheTest {
 
     assertNull(
       "a path fetched for the outgoing id must not answer for the incoming one",
-      RelaisModelProvisioner.pathFor(ctx, "incoming"),
+      RelaisModelProvisioner.pathFor(ctx, "incoming", RelaisConfig.modelSelection(ctx)),
     )
     assertEquals(
       "and it must still answer for the id it WAS fetched for",
       superseded,
-      RelaisModelProvisioner.pathFor(ctx, "outgoing"),
+      RelaisModelProvisioner.pathFor(ctx, "outgoing", RelaisConfig.modelSelection(ctx)),
     )
   }
 
@@ -143,7 +143,7 @@ class RelaisModelPathCacheTest {
       )
       assertNull(
         "the default model's file must never be remembered under the operator's id",
-        RelaisModelProvisioner.pathFor(ctx, OPERATOR_ID),
+        RelaisModelProvisioner.pathFor(ctx, OPERATOR_ID, RelaisConfig.modelSelection(ctx)),
       )
       assertFalse(
         "the staged file must not have been adopted under any id",
@@ -165,7 +165,7 @@ class RelaisModelPathCacheTest {
     RelaisModelProvisioner.remember(ctx, alpha, persistForId = "alpha")
     RelaisConfig.setModelId(ctx, "beta")
     RelaisModelProvisioner.remember(ctx, beta, persistForId = "beta")
-    assertEquals("alpha is still provisioned, so it resolves from the registry", alpha, RelaisModelProvisioner.pathFor(ctx, "alpha"))
-    assertEquals(beta, RelaisModelProvisioner.pathFor(ctx, "beta"))
+    assertEquals("alpha is still provisioned, so it resolves from the registry", alpha, RelaisModelProvisioner.pathFor(ctx, "alpha", RelaisConfig.modelSelection(ctx)))
+    assertEquals(beta, RelaisModelProvisioner.pathFor(ctx, "beta", RelaisConfig.modelSelection(ctx)))
   }
 }

@@ -621,16 +621,13 @@ object RelaisModelProvisioner {
    * [ModelSwitch.applyManualId]'s `resolvedPath` has no default — the caller must state which model
    * it means, because the wrong answer is silent.
    *
-   * Callers wanting the operator's configured model pass `RelaisConfig.modelId(context)`; a swap
-   * passes the target's id.
-   */
-  fun pathFor(context: Context, modelId: String): String? =
-    pathFor(context, modelId, RelaisConfig.modelSelection(context))
-
-  /**
-   * [pathFor] with the configured id and persisted path taken from ONE captured [selection]. The two
-   * used to be read separately, so a write between the reads could pair one write's id with another
-   * write's path and slip a stale path past rung 3 (design R4).
+   * Callers wanting the operator's configured model pass the configured id from a captured
+   * [ConfiguredModelSelection] (`RelaisConfig.modelSelection(context)`) together with that same
+   * selection; a swap passes the target's id. There is deliberately no overload that reads the
+   * selection itself: a second read lets a write land between the id and the persisted path it
+   * gates (design R4).
+   *
+   * [selection] is the ONE captured read the id-gated persisted path comes from.
    */
   internal fun pathFor(context: Context, modelId: String, selection: ConfiguredModelSelection): String? =
     resolveModelPath(

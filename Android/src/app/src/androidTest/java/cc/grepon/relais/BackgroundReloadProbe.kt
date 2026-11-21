@@ -89,7 +89,7 @@ class BackgroundReloadProbe {
   private fun withPausedProvision(test: (ProvisionGate, File, File) -> Unit) {
     assumeTrue("Pass -e RELAIS_PROBE 1", InstrumentationRegistry.getArguments().getString("RELAIS_PROBE") == "1")
     val modelId = RelaisConfig.modelId(context)
-    val path = RelaisModelProvisioner.pathFor(context, modelId)
+    val path = RelaisModelProvisioner.pathFor(context, modelId, RelaisConfig.modelSelection(context))
     assumeTrue("Configured weights must already exist", path != null && File(path).isFile && File(path).length() > 0L)
     val original = File(requireNotNull(path))
     val backup = File(original.parentFile, "${original.name}.background-reload-probe-${UUID.randomUUID()}.backup")
@@ -110,7 +110,7 @@ class BackgroundReloadProbe {
       moved = true
       assertTrue(
         "resolved configured weights must be genuinely absent before kick",
-        configuredModelMissing(RelaisEngine.isReady, RelaisModelProvisioner.pathFor(context, modelId)) { File(it).exists() },
+        configuredModelMissing(RelaisEngine.isReady, RelaisModelProvisioner.pathFor(context, modelId, RelaisConfig.modelSelection(context))) { File(it).exists() },
       )
       RelaisEngine.ensureInitializedInBackground(gate)
       assertTrue("background worker did not reach ensureModel RESOLVING", gate.entered.await(20, TimeUnit.SECONDS))

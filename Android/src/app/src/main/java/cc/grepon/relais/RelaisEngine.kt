@@ -307,6 +307,9 @@ object RelaisEngine {
   /** Guards [ensureInitializedInBackground] so a burst of requests during an idle-reload dispatches at most one thread. */
   private val backgroundReloadDispatching = java.util.concurrent.atomic.AtomicBoolean(false)
 
+  /** Test seam: the ONE place the engine reads the configured selection when it resolves a model path. */
+  internal var readSelection: (Context) -> ConfiguredModelSelection = { RelaisConfig.modelSelection(it) }
+
   /** Narrow thread-start seam: tests can fail dispatch before any worker exists. */
   internal var startBackgroundStartup: (String, () -> Unit) -> Unit = { name, work ->
     thread(name = name, block = work)
@@ -482,13 +485,11 @@ object RelaisEngine {
         // `lastInitFailed` and publishes `endStartup` exactly like a missing file does, instead of
         // throwing past the bookkeeping and leaving the node's state machine unaware.
         // Resolving in the body also means the id the path is resolved FOR and the id it is
-        // published under are one value — the old pair of defaults each called
-        // RelaisConfig.modelId independently, so an id change landing between them could pair a
-        // path resolved for one model with the other model's id. (pathFor still reads the
-        // configured id and KEY_MODEL_PATH as two separate prefs reads for its rung-3 gate; that
-        // microsecond window is a known, unfixed follow-up.)
+        // published under are one value, and the configured selection is read exactly ONCE
+        // ([readSelection]) and handed to pathFor as a captured value, so the configured id and the
+        // persisted path it gates (rung 3) cannot come from two different writes.
         val resolvedPath =
-          requireNotNull(modelPath ?: RelaisModelProvisioner.pathFor(context, modelId)) {
+          requireNotNull(modelPath ?: RelaisModelProvisioner.pathFor(context, modelId, readSelection(context))) {
             // Deliberately a failure rather than a fallback: the only paths left to guess with
             // belong to OTHER models, and loading those under this id is the defect #337 closed.
             "No model file on this device holds the weights for $modelId"
